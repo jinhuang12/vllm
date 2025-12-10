@@ -116,6 +116,7 @@ class Fp8MoeBackend(Enum):
     CUTLASS_BLOCK_SCALED_GROUPED_GEMM = 4
     MARLIN = 5
     TRITON = 6
+    MONOKERNEL = 7
 
 
 def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
@@ -123,6 +124,21 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    # Check for monokernel FIRST (explicit opt-in via env var)
+    if envs.VLLM_USE_MOE_MONOKERNEL and block_quant:
+        if current_platform.is_cuda():
+            from vllm import _custom_ops as ops
+            if ops.moe_monokernel_supported():
+                tp_size = get_tensor_model_parallel_world_size()
+                if tp_size == 1:
+                    logger.info_once("Using MoE Monokernel backend (TP=1)")
+                    return Fp8MoeBackend.MONOKERNEL
+                else:
+                    logger.warning_once(
+                        f"MoE Monokernel requires TP=1, got TP={tp_size}. "
+                        "Falling back to other backend."
+                    )
+
     # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
     if (
         current_platform.is_cuda()
@@ -661,6 +677,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
         )
 
+        # MoE Monokernel (fused routing + GEMM, TP=1 only)
+        self.use_monokernel = self.fp8_backend == Fp8MoeBackend.MONOKERNEL
+        if self.use_monokernel:
+            self._monokernel_scratchpad_fn = (
+                ops.moe_monokernel_qwen3_block_quant_scratchpad_size
+            )
+            self._monokernel_fn = ops.moe_monokernel_qwen3_block_quant
+
     def create_weights(
         self,
         layer: Module,
@@ -803,6 +827,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
         self.rocm_aiter_moe_enabled = False
+
+        # Allocate monokernel scratchpad (if using monokernel backend)
+        if self.use_monokernel:
+            max_batch_size = 64  # BS64 variant supports up to 64 tokens
+            scratchpad_size = self._monokernel_scratchpad_fn(max_batch_size)
+            layer.register_buffer(
+                "monokernel_scratchpad",
+                torch.empty(scratchpad_size, dtype=torch.uint8, device="cuda"),
+                persistent=False,
+            )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
@@ -1131,6 +1165,54 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def allow_inplace(self) -> bool:
         return True
 
+    def _apply_monokernel(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Apply MoE using fused monokernel (handles routing internally).
+
+        The monokernel fuses top-k routing, per-token quantization, up/down
+        projection GEMMs, SiLU activation, and weighted accumulation into
+        a single cooperative kernel launch.
+
+        Returns None if batch_size > 64 or hidden_size != 2048 (fallback needed).
+        """
+        batch_size = x.size(0)
+        hidden_size = x.size(1)
+
+        # Return None to trigger fallback for unsupported configurations
+        if hidden_size != 2048:
+            return None
+        if batch_size > 64:
+            return None
+
+        # Ensure correct dtype and contiguity
+        x = x.contiguous()
+        router_logits = router_logits.contiguous()
+        if x.dtype != torch.bfloat16:
+            x = x.to(torch.bfloat16)
+        if router_logits.dtype != torch.bfloat16:
+            router_logits = router_logits.to(torch.bfloat16)
+
+        # Allocate output
+        output = torch.empty_like(x)
+
+        # Call monokernel (fuses routing, quantization, GEMMs, activation)
+        self._monokernel_fn(
+            activations=x,
+            router_logits=router_logits,
+            w13=layer.w13_weight,
+            w13_scale=layer.w13_weight_scale_inv,
+            w2=layer.w2_weight,
+            w2_scale=layer.w2_weight_scale_inv,
+            output=output,
+            scratchpad=layer.monokernel_scratchpad,
+        )
+
+        return output
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1159,6 +1241,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert logical_to_physical_map is not None
             assert logical_replica_count is not None
             assert isinstance(layer, FusedMoE)
+
+        # Monokernel path (handles routing internally, must come first)
+        if self.use_monokernel:
+            result = self._apply_monokernel(layer, x, router_logits)
+            if result is not None:
+                return result
+            # Fall through to other backends for unsupported configurations
+            # (e.g., batch_size > 64 during profile run)
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             assert activation == "silu", (

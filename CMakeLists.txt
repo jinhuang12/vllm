@@ -925,6 +925,28 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
 endif()
 
+# MoE Monokernel for Qwen3 (requires SM 8.9+ for FP8)
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  cuda_archs_loose_intersection(MOE_MONOKERNEL_ARCHS "8.9;9.0" "${CUDA_ARCHS}")
+  if(MOE_MONOKERNEL_ARCHS)
+    # Note: moe.cu is #included by moe_monokernel_wrapper.cu to keep
+    # template instantiations in the same translation unit
+    set(MOE_MONOKERNEL_SRC
+        "csrc/moe/moe_monokernel/moe_monokernel_wrapper.cu")
+
+    set_gencode_flags_for_srcs(
+      SRCS "${MOE_MONOKERNEL_SRC}"
+      CUDA_ARCHS "${MOE_MONOKERNEL_ARCHS}")
+
+    list(APPEND VLLM_MOE_EXT_SRC "${MOE_MONOKERNEL_SRC}")
+
+    message(STATUS "Building MoE Monokernel for archs: ${MOE_MONOKERNEL_ARCHS}")
+  else()
+    message(STATUS "Not building MoE Monokernel as no compatible archs found"
+                   " (requires SM 8.9+)")
+  endif()
+endif()
+
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")

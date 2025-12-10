@@ -1962,6 +1962,81 @@ def topk_softmax(
     )
 
 
+# MoE Monokernel for Qwen3 (fused routing + GEMM)
+def moe_monokernel_supported() -> bool:
+    """Check if MoE monokernel is supported on current device (SM 8.9+)."""
+    if not current_platform.is_cuda():
+        return False
+    try:
+        return torch.ops._moe_C.moe_monokernel_supported()
+    except AttributeError:
+        return False
+
+
+# ===========================================================================
+# Block Quantization Support for MoE Monokernel
+# ===========================================================================
+# These functions support 128x128 block-scaled FP8 quantization as used by
+# Qwen3-Coder-30B-A3B-Instruct-FP8.
+
+def moe_monokernel_qwen3_block_quant_scratchpad_size(batch_size: int) -> int:
+    """Get required scratchpad size for block-quantized Qwen3 MoE monokernel."""
+    return torch.ops._moe_C.moe_monokernel_qwen3_block_quant_scratchpad_size(
+        batch_size)
+
+
+def moe_monokernel_qwen3_block_quant(
+    activations: torch.Tensor,
+    router_logits: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    output: torch.Tensor,
+    scratchpad: torch.Tensor,
+) -> None:
+    """
+    Fused MoE kernel for Qwen3-Coder-30B-A3B-Instruct-FP8 with block quantization.
+
+    This is the block-quantized version of the monokernel, supporting 128x128
+    block scales as used by Qwen3-Coder-30B-A3B-Instruct-FP8.
+
+    Args:
+        activations: Input hidden states [BS, K=2048] in BF16
+        router_logits: Router outputs [BS, E=128] in BF16
+        w13: Up-projection weights [E, 2*N, K] in FP8
+        w13_scale: Up-projection scales [E, 12, 16] in FP32 (block scales)
+        w2: Down-projection weights [E, K, N] in FP8
+        w2_scale: Down-projection scales [E, 16, 6] in FP32 (block scales)
+        output: Output buffer [BS, K] in BF16 (will be overwritten)
+        scratchpad: Pre-allocated scratchpad memory
+    """
+    batch_size = activations.size(0)
+
+    if batch_size <= 8:
+        torch.ops._moe_C.moe_monokernel_qwen3_block_quant_bs8(
+            activations, router_logits, w13, w13_scale, w2, w2_scale,
+            output, scratchpad
+        )
+    else:
+        torch.ops._moe_C.moe_monokernel_qwen3_block_quant_bs64(
+            activations, router_logits, w13, w13_scale, w2, w2_scale,
+            output, scratchpad
+        )
+
+
+def moe_monokernel_block_quant_get_timing(
+    scratchpad: torch.Tensor,
+    batch_size: int
+) -> torch.Tensor:
+    """
+    Get per-stage timing data from block-quantized monokernel scratchpad.
+    Same format as moe_monokernel_get_timing.
+    """
+    return torch.ops._moe_C.moe_monokernel_block_quant_get_timing(
+        scratchpad, batch_size)
+
+
 def grouped_topk(
     scores: torch.Tensor,
     num_expert_group: int,

@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
+    VLLM_USE_MOE_MONOKERNEL: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -784,6 +785,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "1"))
     ),
+    # If set, use the MoE monokernel for supported models (Qwen3-Coder-30B-A3B)
+    # This fuses routing, quantization, and GEMMs into a single cooperative kernel
+    "VLLM_USE_MOE_MONOKERNEL": lambda: os.environ.get(
+        "VLLM_USE_MOE_MONOKERNEL", ""
+    ).strip().lower() in ("1", "true"),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(

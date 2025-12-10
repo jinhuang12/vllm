@@ -1,6 +1,123 @@
 #include "core/registration.h"
 #include "moe_ops.h"
 
+#ifndef USE_ROCM
+#include <ATen/cuda/CUDAContext.h>
+#include "moe_monokernel/moe_monokernel_wrapper.h"
+
+// ============================================================================
+// MoE Monokernel for Qwen3-Coder-30B-A3B-Instruct-FP8 (block quantization)
+// ============================================================================
+// These functions support 128x128 block-scaled FP8 quantization.
+// Scale tensor shapes are 3D: w13_scale [E, 12, 16], w2_scale [E, 16, 6]
+
+bool moe_monokernel_supported()
+{
+    return moe_monokernel::check_device_supported();
+}
+
+void moe_monokernel_qwen3_block_quant_bs8_impl(
+    torch::Tensor& activations,
+    torch::Tensor& router_logits,
+    torch::Tensor& w13,
+    torch::Tensor& w13_scale,
+    torch::Tensor& w2,
+    torch::Tensor& w2_scale,
+    torch::Tensor& output,
+    torch::Tensor& scratchpad)
+{
+    TORCH_CHECK(activations.is_cuda(), "activations must be a CUDA tensor");
+    TORCH_CHECK(router_logits.is_cuda(), "router_logits must be a CUDA tensor");
+    TORCH_CHECK(w13.is_cuda(), "w13 must be a CUDA tensor");
+    TORCH_CHECK(w13_scale.is_cuda(), "w13_scale must be a CUDA tensor");
+    TORCH_CHECK(w13_scale.dim() == 3, "w13_scale must be 3D for block quantization [E, row_blocks, k_blocks]");
+    TORCH_CHECK(w2.is_cuda(), "w2 must be a CUDA tensor");
+    TORCH_CHECK(w2_scale.is_cuda(), "w2_scale must be a CUDA tensor");
+    TORCH_CHECK(w2_scale.dim() == 3, "w2_scale must be 3D for block quantization [E, k_blocks, n_blocks]");
+    TORCH_CHECK(output.is_cuda(), "output must be a CUDA tensor");
+    TORCH_CHECK(scratchpad.is_cuda(), "scratchpad must be a CUDA tensor");
+
+    uint32_t batch_size = static_cast<uint32_t>(activations.size(0));
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    moe_monokernel::launch_moe_monokernel_qwen3_block_quant_bs8(
+        activations.data_ptr(),
+        batch_size,
+        router_logits.data_ptr(),
+        w13.data_ptr(),
+        w13_scale.data_ptr(),
+        w2.data_ptr(),
+        w2_scale.data_ptr(),
+        output.data_ptr(),
+        scratchpad.data_ptr(),
+        stream);
+}
+
+void moe_monokernel_qwen3_block_quant_bs64_impl(
+    torch::Tensor& activations,
+    torch::Tensor& router_logits,
+    torch::Tensor& w13,
+    torch::Tensor& w13_scale,
+    torch::Tensor& w2,
+    torch::Tensor& w2_scale,
+    torch::Tensor& output,
+    torch::Tensor& scratchpad)
+{
+    TORCH_CHECK(activations.is_cuda(), "activations must be a CUDA tensor");
+    TORCH_CHECK(router_logits.is_cuda(), "router_logits must be a CUDA tensor");
+    TORCH_CHECK(w13.is_cuda(), "w13 must be a CUDA tensor");
+    TORCH_CHECK(w13_scale.is_cuda(), "w13_scale must be a CUDA tensor");
+    TORCH_CHECK(w13_scale.dim() == 3, "w13_scale must be 3D for block quantization [E, row_blocks, k_blocks]");
+    TORCH_CHECK(w2.is_cuda(), "w2 must be a CUDA tensor");
+    TORCH_CHECK(w2_scale.is_cuda(), "w2_scale must be a CUDA tensor");
+    TORCH_CHECK(w2_scale.dim() == 3, "w2_scale must be 3D for block quantization [E, k_blocks, n_blocks]");
+    TORCH_CHECK(output.is_cuda(), "output must be a CUDA tensor");
+    TORCH_CHECK(scratchpad.is_cuda(), "scratchpad must be a CUDA tensor");
+
+    uint32_t batch_size = static_cast<uint32_t>(activations.size(0));
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    moe_monokernel::launch_moe_monokernel_qwen3_block_quant_bs64(
+        activations.data_ptr(),
+        batch_size,
+        router_logits.data_ptr(),
+        w13.data_ptr(),
+        w13_scale.data_ptr(),
+        w2.data_ptr(),
+        w2_scale.data_ptr(),
+        output.data_ptr(),
+        scratchpad.data_ptr(),
+        stream);
+}
+
+int64_t moe_monokernel_qwen3_block_quant_scratchpad_size(int64_t batch_size)
+{
+    if (batch_size <= 8) {
+        return moe_monokernel::get_scratchpad_size_block_quant_bs8();
+    } else {
+        return moe_monokernel::get_scratchpad_size_block_quant_bs64();
+    }
+}
+
+torch::Tensor moe_monokernel_block_quant_get_timing(torch::Tensor& scratchpad, int64_t batch_size)
+{
+    auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+    torch::Tensor timing = torch::empty({10}, options);
+
+    if (batch_size <= 8) {
+        moe_monokernel::get_monokernel_timing_block_quant_bs8(
+            scratchpad.data_ptr(),
+            timing.data_ptr<int64_t>());
+    } else {
+        moe_monokernel::get_monokernel_timing_block_quant_bs64(
+            scratchpad.data_ptr(),
+            timing.data_ptr<int64_t>());
+    }
+
+    return timing;
+}
+#endif
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
@@ -112,6 +229,38 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
+
+  // Check if MoE monokernel is supported
+  m.def("moe_monokernel_supported() -> bool");
+  m.impl("moe_monokernel_supported", &moe_monokernel_supported);
+
+  // ============================================================================
+  // Block Quantization Support (Qwen3-Coder-30B-A3B-Instruct-FP8)
+  // ============================================================================
+  // These ops support 128x128 block-scaled FP8 quantization.
+  // Scale tensor shapes are 3D: w13_scale [E, 12, 16], w2_scale [E, 16, 6]
+
+  // MoE Monokernel with block quant for Qwen3 (BS <= 8)
+  m.def(
+      "moe_monokernel_qwen3_block_quant_bs8(Tensor! activations, Tensor! router_logits, "
+      "Tensor! w13, Tensor! w13_scale, Tensor! w2, Tensor! w2_scale, "
+      "Tensor! output, Tensor! scratchpad) -> ()");
+  m.impl("moe_monokernel_qwen3_block_quant_bs8", torch::kCUDA, &moe_monokernel_qwen3_block_quant_bs8_impl);
+
+  // MoE Monokernel with block quant for Qwen3 (BS <= 64)
+  m.def(
+      "moe_monokernel_qwen3_block_quant_bs64(Tensor! activations, Tensor! router_logits, "
+      "Tensor! w13, Tensor! w13_scale, Tensor! w2, Tensor! w2_scale, "
+      "Tensor! output, Tensor! scratchpad) -> ()");
+  m.impl("moe_monokernel_qwen3_block_quant_bs64", torch::kCUDA, &moe_monokernel_qwen3_block_quant_bs64_impl);
+
+  // Get scratchpad size for block quant MoE monokernel
+  m.def("moe_monokernel_qwen3_block_quant_scratchpad_size(int batch_size) -> int");
+  m.impl("moe_monokernel_qwen3_block_quant_scratchpad_size", &moe_monokernel_qwen3_block_quant_scratchpad_size);
+
+  // Get per-stage timing data from block quant monokernel (for profiling)
+  m.def("moe_monokernel_block_quant_get_timing(Tensor! scratchpad, int batch_size) -> Tensor");
+  m.impl("moe_monokernel_block_quant_get_timing", &moe_monokernel_block_quant_get_timing);
 #endif
 }
 
