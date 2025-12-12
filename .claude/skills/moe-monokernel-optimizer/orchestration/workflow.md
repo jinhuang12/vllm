@@ -1,5 +1,60 @@
 # MoE Monokernel Workflow
 
+## LLM Council Checkpoints
+
+**IMPORTANT**: Invoke `llm-council` skill at these points to catch issues early:
+
+| After | Council Topic | Why |
+|-------|---------------|-----|
+| Phase 1 (constraints) | "Review MoE constraints extraction for {model}" | Catch missed semantics before planning |
+| Phase 2 (plan) | "Review optimization plan for {model} on {hardware}" | Validate algorithmic decisions before implementation |
+| Stage 3 (GEMM) | "Review GEMM implementation for {model}" | Most complex stage - external review critical |
+| 3 failed attempts | "Debug {stage} - failed 3 times" | Fresh perspective beats spinning |
+| Phase 4 (validation) | "Interpret benchmark results for {model}" | Sanity check performance conclusions |
+
+### Council Invocation Template
+
+```python
+# After completing a major phase
+def invoke_council_checkpoint(phase, model, hardware):
+    context = f"""
+    ## MoE Monokernel Council Review
+
+    **Phase Completed**: {phase}
+    **Model**: {model}
+    **Hardware**: {hardware}
+
+    ## Artifacts
+    - Constraints: $(cat {artifact_dir}/constraints.md)
+    - Plan: $(cat {artifact_dir}/optimization_plan.md)
+
+    ## Questions
+    1. Are there any issues with our approach?
+    2. What might we have missed?
+    3. Any concerns before proceeding to next phase?
+    """
+
+    invoke_skill("llm-council", topic=f"MoE {phase} review", context=context)
+```
+
+### Council for Blocked Tasks
+
+When a task exits with status "blocked" after 3 attempts, **automatically** invoke council:
+
+```python
+def on_task_blocked(stage, blocker_file):
+    if attempts >= 3 and not council_invoked:
+        council_context = build_council_context(stage, blocker_file)
+        council_feedback = invoke_skill("llm-council",
+            topic=f"MoE {stage} implementation blocked",
+            context=council_context,
+            mode="single-round"
+        )
+        save_feedback_and_retry(stage, council_feedback)
+```
+
+---
+
 ## Phase State Machine
 
 ```

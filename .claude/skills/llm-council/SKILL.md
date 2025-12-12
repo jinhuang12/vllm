@@ -1,6 +1,6 @@
 ---
 name: llm-council
-description: Use Gemini CLI and Codex CLI as a council of critics to review Claude's proposals, plans, and approaches. Triggers when (1) needing a second opinion on architecture or design decisions, (2) stuck on debugging and want fresh perspectives, (3) reviewing complex implementation plans before execution, (4) wanting to validate assumptions across multiple AI models. Features read-only sandbox, web search verification, session ID tracking for robust resume, and graceful degradation when one CLI is unavailable.
+description: Use Gemini CLI and Codex CLI as a council of critics to review Claude's proposals, plans, and approaches. Triggers when (1) needing a second opinion on architecture or design decisions, (2) stuck on debugging after 3+ failed attempts, (3) reviewing complex implementation plans before execution, (4) validating assumptions across multiple AI models, (5) completing a major implementation phase before proceeding, (6) before finalizing any optimization plan or CUDA kernel design, (7) after generating significant code that will be committed. Use PROACTIVELY - the 30-60s latency catches issues that would cost hours to debug. Features read-only sandbox, web search verification, session ID tracking for robust resume, and graceful degradation when one CLI is unavailable.
 ---
 
 # LLM Council

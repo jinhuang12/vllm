@@ -174,7 +174,6 @@ Location: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/state.json`
 |------|---------|
 | [LLAMA4_MONOKERNEL_PATCH.md](assets/LLAMA4_MONOKERNEL_PATCH.md) | Reference implementation (168KB) |
 | [MOE_MONOKERNEL_OPTIMIZATION_GUIDE.md](assets/MOE_MONOKERNEL_OPTIMIZATION_GUIDE.md) | 13 optimization techniques |
-| [benchmark_template.py](assets/benchmark_template.py) | Correctness + performance benchmark template |
 
 ## Orchestration
 
