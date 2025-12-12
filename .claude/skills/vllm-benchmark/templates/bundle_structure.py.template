@@ -1,0 +1,354 @@
+"""
+{{SYMBOL_NAME}} - Standalone Bundle
+Extracted from vLLM codebase for benchmarking
+
+This bundle is completely self-contained and requires only:
+- torch (PyTorch)
+- triton (for Triton kernels, optional for CUDA-only kernels)
+- Python 3.10+
+
+Generated: {{TIMESTAMP}}
+Model Context: {{MODEL}}
+Hardware Target: {{HARDWARE}}
+Precision: {{PRECISION}}
+"""
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
+
+import torch
+import torch.nn.functional as F
+from typing import Optional, Tuple, Dict, Any
+from dataclasses import dataclass
+
+# For Triton kernels, uncomment:
+# import triton
+# import triton.language as tl
+
+# Python stdlib
+import math
+from functools import reduce
+
+
+# ============================================================================
+# INLINED DEPENDENCIES
+# ============================================================================
+
+# This section contains functions/classes extracted from vLLM to make this
+# bundle self-contained. Each inlined dependency is annotated with its
+# source file location.
+
+# Example:
+# # Inlined from vllm/utils/tensor_ops.py:45-67
+# def reshape_and_cache(
+#     key: torch.Tensor,
+#     value: torch.Tensor,
+#     cache: torch.Tensor,
+#     slot_mapping: torch.Tensor,
+# ) -> None:
+#     """Reshape key/value tensors and cache them."""
+#     # ... exact vLLM implementation ...
+#     pass
+
+
+# ============================================================================
+# KERNEL IMPLEMENTATION
+# ============================================================================
+
+# For Triton kernels:
+# @triton.jit
+# def {{SYMBOL_NAME}}_kernel(
+#     # Pointer arguments
+#     input_ptr,
+#     output_ptr,
+#     # Scalar arguments
+#     M: tl.constexpr,
+#     N: tl.constexpr,
+#     BLOCK_M: tl.constexpr,
+#     BLOCK_N: tl.constexpr,
+# ):
+#     """
+#     Triton kernel implementation.
+#     Preserved exactly as in vLLM source.
+#     """
+#     # ... kernel code ...
+#     pass
+
+# For CUDA kernels (via torch.ops):
+# This section would contain the Python wrapper that calls torch.ops.vllm.X
+# The actual CUDA source would be embedded as a string if needed for compilation
+
+
+# ============================================================================
+# WRAPPER FUNCTION
+# ============================================================================
+
+def {{SYMBOL_NAME}}_wrapper(
+    # Input tensors
+    input_tensor: torch.Tensor,
+    # Kernel-specific arguments
+    # For MoE: topk_ids, topk_weights, expert_ids
+    # For attention: query, key, value, attention_mask
+    # For quantization: scales, zero_points
+    # Configuration parameters
+    **kwargs
+) -> torch.Tensor:
+    """
+    Python wrapper that launches the {{SYMBOL_NAME}} kernel.
+
+    This function handles:
+    1. Input validation and shape checking
+    2. Memory allocation for output tensors
+    3. Grid/block dimension calculation
+    4. Kernel launch with proper arguments
+    5. Output post-processing if needed
+
+    Args:
+        input_tensor: Primary input tensor
+            Shape: {{INPUT_SHAPE}}
+            Dtype: {{INPUT_DTYPE}}
+        **kwargs: Additional kernel-specific arguments
+
+    Returns:
+        output: Result tensor
+            Shape: {{OUTPUT_SHAPE}}
+            Dtype: {{OUTPUT_DTYPE}}
+
+    Example:
+        >>> input_tensor = torch.randn(4, 2048, 4096, device="cuda", dtype=torch.float16)
+        >>> output = {{SYMBOL_NAME}}_wrapper(input_tensor)
+        >>> assert output.shape == (4, 2048, 4096)
+    """
+    # Input validation
+    assert input_tensor.is_cuda, "Input must be on CUDA device"
+    assert input_tensor.dtype == torch.float16, f"Expected float16, got {input_tensor.dtype}"
+
+    # Extract dimensions
+    batch_size, seq_len, hidden_size = input_tensor.shape
+
+    # Allocate output tensor
+    output = torch.empty_like(input_tensor)
+
+    # Calculate grid and block dimensions
+    # Example for Triton:
+    # BLOCK_M = 128
+    # BLOCK_N = 128
+    # grid = (triton.cdiv(seq_len, BLOCK_M), batch_size)
+
+    # Launch kernel
+    # For Triton:
+    # {{SYMBOL_NAME}}_kernel[grid](
+    #     input_tensor, output,
+    #     M=seq_len, N=hidden_size,
+    #     BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+    #     num_warps=4,
+    #     num_stages=3,
+    # )
+
+    # For CUDA via torch.ops:
+    # output = torch.ops.vllm.{{SYMBOL_NAME}}(input_tensor, **kwargs)
+
+    return output
+
+
+# ============================================================================
+# INVOCATION EXAMPLE
+# ============================================================================
+
+def invocation_example(small: bool = False) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    """
+    Demonstrate correct usage of the {{SYMBOL_NAME}} kernel.
+
+    This function serves three purposes:
+    1. **Documentation**: Shows how to properly invoke the kernel
+    2. **Testing**: Validates the bundle works end-to-end
+    3. **Benchmarking**: Provides a template for benchmark generation
+
+    Args:
+        small: If True, use minimal sizes for quick validation
+               If False, use realistic production sizes
+
+    Returns:
+        output_tensor: Result from kernel execution
+        metadata_dict: Diagnostic information (shapes, dtypes, timing)
+
+    Example:
+        >>> # Quick validation
+        >>> output, meta = invocation_example(small=True)
+        >>> print(f"Output shape: {output.shape}")
+
+        >>> # Production-size test
+        >>> output, meta = invocation_example(small=False)
+        >>> print(f"Latency: {meta['latency_ms']:.3f} ms")
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    assert device.type == "cuda", "This kernel requires CUDA"
+
+    # ========================================================================
+    # SETUP PHASE: Create realistic input tensors
+    # ========================================================================
+
+    if small:
+        # Minimal sizes for quick validation (< 1 second)
+        batch_size = 2
+        seq_len = 64
+        hidden_size = 128
+    else:
+        # Realistic production sizes for {{MODEL}} on {{HARDWARE}}
+        batch_size = 4
+        seq_len = 2048
+        hidden_size = 4096
+
+    print(f"Creating inputs: B={batch_size}, S={seq_len}, H={hidden_size}")
+
+    # Create input tensor with appropriate dtype for {{PRECISION}}
+    input_tensor = torch.randn(
+        batch_size, seq_len, hidden_size,
+        dtype=torch.float16,  # Adjust for {{PRECISION}}
+        device=device,
+        requires_grad=False  # CRITICAL: No gradient tracking in benchmarks
+    )
+
+    # ========================================================================
+    # METADATA GENERATION: Create kernel-specific metadata
+    # ========================================================================
+
+    # For MoE kernels:
+    # num_experts = 8
+    # top_k = 2
+    # topk_ids = torch.randint(0, num_experts, (batch_size, top_k), device=device)
+    # topk_weights = F.softmax(torch.randn(batch_size, top_k, device=device), dim=-1)
+
+    # For PagedAttention:
+    # num_blocks = 1024
+    # max_blocks_per_seq = 128
+    # block_tables = torch.randint(0, num_blocks, (batch_size, max_blocks_per_seq), device=device)
+    # context_lens = torch.randint(1, seq_len, (batch_size,), device=device)
+
+    # For Quantization:
+    # group_size = 128
+    # num_groups = hidden_size // group_size
+    # scales = torch.randn(batch_size, num_groups, device=device, dtype=torch.float32)
+    # zero_points = torch.randint(0, 255, (batch_size, num_groups), device=device, dtype=torch.uint8)
+
+    # ========================================================================
+    # KERNEL INVOCATION: Call wrapper function
+    # ========================================================================
+
+    print("Launching kernel...")
+
+    # Warmup (for accurate timing)
+    for _ in range(10):
+        _ = {{SYMBOL_NAME}}_wrapper(input_tensor)
+    torch.cuda.synchronize()
+
+    # Timed execution
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    output = {{SYMBOL_NAME}}_wrapper(
+        input_tensor,
+        # Add kernel-specific kwargs here
+    )
+    end_event.record()
+    torch.cuda.synchronize()
+
+    latency_ms = start_event.elapsed_time(end_event)
+
+    # ========================================================================
+    # VALIDATION: Check output for correctness
+    # ========================================================================
+
+    print(f"Output shape: {output.shape}, dtype: {output.dtype}")
+
+    # Shape validation
+    expected_shape = (batch_size, seq_len, hidden_size)  # Adjust as needed
+    assert output.shape == expected_shape, (
+        f"Shape mismatch: expected {expected_shape}, got {output.shape}"
+    )
+
+    # Dtype validation
+    assert output.dtype == torch.float16, (
+        f"Dtype mismatch: expected float16, got {output.dtype}"
+    )
+
+    # NaN/Inf checks
+    if torch.isnan(output).any():
+        print("⚠ Warning: Output contains NaN values")
+    if torch.isinf(output).any():
+        print("⚠ Warning: Output contains Inf values")
+
+    # Value range sanity check (kernel-specific)
+    # output_min, output_max = output.min().item(), output.max().item()
+    # print(f"Output range: [{output_min:.6f}, {output_max:.6f}]")
+
+    print("✓ Validation passed")
+
+    # ========================================================================
+    # RETURN: Metadata for benchmarking
+    # ========================================================================
+
+    metadata = {
+        "batch_size": batch_size,
+        "seq_len": seq_len,
+        "hidden_size": hidden_size,
+        "dtype": str(output.dtype),
+        "device": str(output.device),
+        "latency_ms": latency_ms,
+        "throughput_samples_per_sec": (batch_size * 1000) / latency_ms,
+        "memory_mb": (output.numel() * output.element_size()) / (1024 ** 2),
+    }
+
+    # Add kernel-specific metrics
+    # For matmul: TFLOPS = (2 * M * N * K) / (latency_ms * 1e-3 * 1e12)
+    # For MoE: active_experts_per_sample = top_k
+
+    return output, metadata
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == "__main__":
+    print("=" * 80)
+    print(f"{{{{SYMBOL_NAME}}}} Bundle Execution Test")
+    print("=" * 80)
+
+    # Check CUDA availability
+    if not torch.cuda.is_available():
+        print("❌ Error: CUDA not available")
+        print("This bundle requires a CUDA-enabled GPU")
+        exit(1)
+
+    print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
+    print(f"Compute Capability: {torch.cuda.get_device_capability(0)}")
+    print()
+
+    # Run invocation example
+    try:
+        output, meta = invocation_example(small=False)
+
+        print()
+        print("=" * 80)
+        print("✓ Bundle execution successful!")
+        print("=" * 80)
+        print(f"Latency: {meta['latency_ms']:.3f} ms")
+        print(f"Throughput: {meta['throughput_samples_per_sec']:.2f} samples/sec")
+        print(f"Memory: {meta['memory_mb']:.2f} MB")
+        print()
+        print("Metadata:")
+        for key, value in meta.items():
+            print(f"  {key}: {value}")
+
+    except Exception as e:
+        print()
+        print("=" * 80)
+        print("❌ Bundle execution failed!")
+        print("=" * 80)
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
