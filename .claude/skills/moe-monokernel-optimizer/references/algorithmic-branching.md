@@ -304,6 +304,89 @@ if (blockIdx.x < S_SHARED) {
 
 Use when: Sidecar causes SM imbalance or debugging.
 
+### DeepSeek Shared Expert Pattern (Preview)
+
+DeepSeek-V2/V3 has dedicated shared experts that process ALL tokens, not just routed ones. This requires special handling:
+
+```cpp
+// DeepSeek pattern: N routed experts (top-k) + M shared experts (always)
+template <typename Dims>
+__device__ void moe_with_deepseek_shared_experts(
+    const A_element* activations,
+    const W_element* routed_weights,      // Shape: [E_routed, 2*N, K]
+    const W_element* shared_weights,      // Shape: [E_shared, 2*N, K]
+    MoE_SHM<Dims>* shmem,
+    MoEGemmSpec<Dims>* scratchpad)
+{
+    // ========================================
+    // Phase 1: Shared experts (ALL tokens)
+    // ========================================
+    // Unlike routed experts, shared experts process every token
+    // No routing decision needed - just GEMM all tokens
+    if (blockIdx.x < S_SHARED) {
+        uint32_t shared_expert_id = blockIdx.x % Dims::NUM_SHARED_EXPERTS;
+
+        // Process all tokens for this shared expert
+        for (uint32_t tok = 0; tok < num_tokens; tok += T_TILE) {
+            // Up-projection for shared expert
+            shared_up_projection<Dims>(
+                activations + tok * Dims::K,
+                shared_weights[shared_expert_id],
+                scratchpad->shared_temp,
+                min(T_TILE, num_tokens - tok));
+
+            // Down-projection with weight=1.0 (shared experts unweighted)
+            shared_down_projection<Dims>(
+                scratchpad->shared_temp,
+                shared_weights[shared_expert_id],
+                scratchpad->output_accum,  // Accumulate to same buffer
+                1.0f);  // No routing weight for shared
+        }
+    }
+
+    // ========================================
+    // Phase 2: Routed experts (top-k per token)
+    // ========================================
+    // Grid sync to ensure shared experts complete
+    cooperative_groups::this_grid().sync();
+
+    // Standard routing + expert execution
+    if (blockIdx.x == 0) {
+        topk_route<Dims>(router_logits, num_tokens, shmem);
+    }
+    __syncthreads();
+
+    // Process routed experts as usual
+    moe_up_projection<Dims>(...);
+    cooperative_groups::this_grid().sync();
+    moe_down_projection<Dims>(...);
+}
+```
+
+**Key Implementation Details for DeepSeek**:
+
+1. **Separate weight tensors**: Shared experts have their own weights, not in the main expert array
+2. **No routing weight**: Shared expert output is NOT multiplied by routing weight
+3. **Accumulation order**: Shared + routed outputs sum into same FP32 accumulator
+4. **Grid partitioning**: Reserve `NUM_SHARED_EXPERTS * K_SLICES` blocks for shared work
+
+```cpp
+// DeepSeek grid layout
+constexpr uint32_t SHARED_BLOCKS = Dims::NUM_SHARED_EXPERTS * (Dims::K / K_TILE);
+constexpr uint32_t ROUTED_BLOCKS = SM_COUNT - SHARED_BLOCKS;
+
+// Block assignment
+if (blockIdx.x < SHARED_BLOCKS) {
+    // Process shared expert: blockIdx.x / (K/K_TILE) gives expert ID
+    uint32_t shared_id = blockIdx.x / (Dims::K / K_TILE);
+    uint32_t k_slice = blockIdx.x % (Dims::K / K_TILE);
+    process_shared_expert(shared_id, k_slice, ...);
+} else {
+    // Process routed experts
+    process_routed_experts(blockIdx.x - SHARED_BLOCKS, ...);
+}
+```
+
 ---
 
 ## Decision E: Kernel Architecture
@@ -488,5 +571,153 @@ START
   │     r_max >= 2.0 → USE_EXPERT_GROUPING = true (Grouped-GEMM)
   │     r_max < 2.0  → USE_EXPERT_GROUPING = false (Per-pair GEMV)
   │
+  ├─► Decision G: top_k > 1?
+  │     YES → USE_FP32_ACCUMULATOR = true (BF16 atomics unreliable)
+  │     NO  → USE_FP32_ACCUMULATOR = false (direct BF16 write)
+  │
   └─► Proceed to SRAM Tetris (tiling-config.md)
+```
+
+---
+
+## Decision G: Multi-Expert Accumulation (top_k > 1)
+
+**Detailed implementation for accumulating outputs from multiple experts.**
+
+This decision expands on Decision A for top_k > 1 cases, addressing the FP32 accumulator requirement and the pair-to-token index mapping.
+
+### The Problem
+
+When top_k > 1, multiple experts contribute to each token's output:
+- BF16 `atomicAdd` is unreliable on some hardware (produces NaN/incorrect results)
+- Each (token, expert) pair must be correctly mapped back to its token index
+- Scratchpad memory must store FP32 accumulator + intermediate activations
+
+### Solution: FP32 Scratchpad Accumulator
+
+```cpp
+// Scratchpad structure for top_k > 1
+template <typename Dims>
+struct MoEGemmSpec {
+    // FP32 accumulator for output (NOT BF16!)
+    // Shape: [BS, HIDDEN_STATES] - one accumulator per TOKEN (not per pair)
+    float output_accum[Dims::BS * Dims::HIDDEN_STATES];
+
+    // FP8 intermediate after up-projection (gated SiLU applied)
+    // Shape: [BS * TOP_K, N] - one per pair
+    AQ_element temp[Dims::BS * Dims::TOP_K * Dims::N];
+
+    // Routing weights for applying after activation
+    // Shape: [BS * TOP_K]
+    float topk_weights[Dims::BS * Dims::TOP_K];
+};
+```
+
+### Pair-to-Token Index Mapping
+
+```cpp
+// CRITICAL: Convert pair index to token index for accumulation
+// pair_idx ranges from 0 to BS * TOP_K - 1
+// token_idx ranges from 0 to BS - 1
+
+__device__ inline uint32_t pair_to_token(uint32_t pair_idx) {
+    return pair_idx / TOP_K;
+}
+
+// Example for BS=4, TOP_K=8:
+// Pairs 0-7   → Token 0
+// Pairs 8-15  → Token 1
+// Pairs 16-23 → Token 2
+// Pairs 24-31 → Token 3
+```
+
+### Down-Projection Accumulation Pattern
+
+```cpp
+// From Qwen3 implementation: moe_down_projection.cu
+template <typename Dims>
+__device__ void moe_down_accumulate_tc(
+    MoE_SHM<Dims>* shm,
+    MoEGemmSpec<Dims>* scratchpad,
+    const uint16_t* pair_indices,  // Current tile's pair indices
+    uint32_t k_offset,
+    uint32_t num_valid)
+{
+    // Get pair index from shared memory
+    uint16_t pair_idx = pair_indices[thread_row];
+
+    // CRITICAL: Map pair → token for accumulation
+    uint16_t token_idx = pair_idx / Dims::TOP_K;
+
+    // ... compute GEMM partial result d0 ...
+
+    // Accumulate to FP32 buffer (multiple experts sum here)
+    // NOT atomic when blocks own disjoint K-slices
+    scratchpad->output_accum[token_idx * Dims::HIDDEN_STATES + k_idx] += d0;
+}
+```
+
+### Final Conversion Phase
+
+```cpp
+// After all experts processed, convert FP32 → BF16
+template <typename Dims>
+__device__ void convert_output_phase(
+    MoEGemmSpec<Dims>* scratchpad,
+    R_element* output,
+    uint32_t num_tokens)
+{
+    // Grid sync ensures all accumulation complete
+    cooperative_groups::this_grid().sync();
+
+    // Parallel conversion
+    for (uint32_t tok = blockIdx.x; tok < num_tokens; tok += gridDim.x) {
+        for (uint32_t k = threadIdx.x; k < Dims::HIDDEN_STATES; k += blockDim.x) {
+            float val = scratchpad->output_accum[tok * Dims::HIDDEN_STATES + k];
+            output[tok * Dims::HIDDEN_STATES + k] = __float2bfloat16(val);
+        }
+    }
+}
+```
+
+### When to Use atomicAdd vs Direct Write
+
+```cpp
+// Decision tree for accumulation method
+if (TOP_K == 1) {
+    // Direct write - no accumulation needed
+    output[token * K + k] = __float2bfloat16(result);
+
+} else if (blocks_own_disjoint_k_slices) {
+    // Standard grid (one block per K/16 slice)
+    // Direct += to FP32 accumulator - no race between blocks
+    scratchpad->output_accum[token * K + k] += result;
+
+} else {
+    // Split-H or other overlapping schemes
+    // Must use atomicAdd to FP32 accumulator
+    atomicAdd(&scratchpad->output_accum[token * K + k], result);
+}
+```
+
+### Memory Overhead
+
+| Configuration | Output Accumulator Size | Notes |
+|--------------|------------------------|-------|
+| BS=8, K=2048 | 8 × 2048 × 4 = 64 KB | FP32 per token |
+| BS=64, K=2048 | 64 × 2048 × 4 = 512 KB | Consider streaming |
+| BS=1, K=5120 | 1 × 5120 × 4 = 20 KB | Negligible |
+
+### Configuration
+
+```cpp
+// In kernel config
+template <typename Dims>
+struct AccumulationConfig {
+    static constexpr bool USE_FP32_ACCUMULATOR = (Dims::TOP_K > 1);
+
+    // Scratchpad size for FP32 accumulator
+    static constexpr size_t ACCUM_SIZE =
+        USE_FP32_ACCUMULATOR ? (Dims::BS * Dims::HIDDEN_STATES * sizeof(float)) : 0;
+};
 ```

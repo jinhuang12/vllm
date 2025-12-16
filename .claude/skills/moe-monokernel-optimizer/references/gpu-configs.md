@@ -72,6 +72,25 @@ margin = 4-8 KB for header structures
 - Requires smaller tiles or K-chunking
 - **Use**: Double buffering + cp.async
 
+**L40S-Specific Optimizations** (from Qwen3 implementation):
+- SM_COUNT: 142 (highest among common inference GPUs)
+- FP8 Support: Yes (sm_89)
+- TMA: No (requires sm_90+)
+- Recommended warp config: 6 calc + 2 prefetch (8 total)
+- Block size: 256 threads optimal
+- Split-H threshold: BS ≤ 4
+
+**cp.async Pattern for L40S** (no TMA):
+```cpp
+// Use cuda::memcpy_async with explicit 16-byte alignment
+const auto shape16 = cuda::aligned_size_t<16>(16);
+cuda::memcpy_async(&dest, &source, shape16, pipeline);
+
+// Commit and wait
+pipeline.producer_commit();
+cuda::pipeline_consumer_wait_prior<0>(pipeline);
+```
+
 ### A100 (164 KB/SM)
 - Available: ~156 KB
 - Good middle ground
@@ -114,6 +133,38 @@ Grid size must be ≤ SM count for cooperative kernel launch:
 | L40S | 142 | 142 |
 | A100 40GB | 108 | 108 |
 | A100 80GB | 108 | 108 |
+
+## Split-H Thresholds by GPU
+
+Split-H optimization targets small batches where standard grid underutilizes SMs. Thresholds vary by SM count and typical workload:
+
+| GPU | SM Count | Split-H Threshold | Target Utilization | Notes |
+|-----|----------|-------------------|-------------------|-------|
+| H100/H200 | 132 | BS ≤ 4 | 80% | High BW means standard often sufficient |
+| L40S | 142 | BS ≤ 4 | 80% | Reference: Qwen3 implementation |
+| A100 | 108 | BS ≤ 4 | 80% | Lower SM count, less benefit |
+| RTX 4090 | 128 | BS ≤ 4 | 80% | Consumer card, similar to H100 |
+
+**Split Factor Calculation**:
+```python
+def get_split_factor(batch_size: int, top_k: int, sm_count: int) -> int:
+    if batch_size > 4:
+        return 1  # No split for larger batches
+
+    total_pairs = batch_size * top_k
+    target_blocks = int(sm_count * 0.8)  # 80% utilization
+    split = (target_blocks + total_pairs - 1) // total_pairs
+    return min(split, 16)  # Cap at 16 to limit atomicAdd contention
+```
+
+## cp.async vs TMA Decision
+
+| GPU | Architecture | Async Memory | Recommendation |
+|-----|--------------|--------------|----------------|
+| H100/H200 | sm_90a | TMA | Use TMA for large tiles (>16KB) |
+| L40S | sm_89 | cp.async only | Double buffer with 16-byte aligned copies |
+| RTX 4090 | sm_89 | cp.async only | Same as L40S |
+| A100 | sm_80 | cp.async only | Triple buffer compensates for no TMA |
 
 ## Quick Reference Commands
 

@@ -184,3 +184,139 @@ Requirement: Grid size ≤ SM count.
 
 ### U6: Monokernel Replaces (Not Adds To) Fused MoE
 Wire directly into MoE method, disable cutlass/triton paths for matching dims.
+
+---
+
+## T14: Split-H for Small Batch SM Utilization (★★★★☆)
+
+**Problem**: For very small batch sizes (BS ≤ 4), standard grid sizing (one block per K-slice) leaves SMs underutilized.
+
+**Example** (Qwen3 on L40S):
+```
+BS=1, top_k=8: only 8 token-expert pairs
+Standard grid: 128 blocks (K/16 slices)
+But only ~8-16 pairs to process → most blocks idle
+SM utilization: 128 blocks / 142 SMs → each block touches few pairs
+```
+
+**Solution**: Use Split-H to have multiple blocks collaborate per (token, expert) pair.
+
+### Configuration
+
+```cpp
+template <typename Dims>
+struct KernelConfig {
+    static constexpr uint32_t SM_COUNT = 142;  // L40S
+    static constexpr uint32_t SPLIT_H_THRESHOLD = 4;
+    static constexpr uint32_t MAX_SPLIT_FACTOR = 16;
+
+    // Calculate optimal split factor
+    __host__ __device__ static constexpr uint32_t get_split_factor(uint32_t batch_size) {
+        if (batch_size > SPLIT_H_THRESHOLD) return 1;
+
+        uint32_t total_pairs = batch_size * Dims::TOP_K;
+        uint32_t target_blocks = (SM_COUNT * 8) / 10;  // 80% utilization target
+        uint32_t split = (target_blocks + total_pairs - 1) / total_pairs;
+        return split < MAX_SPLIT_FACTOR ? split : MAX_SPLIT_FACTOR;
+    }
+
+    // Dynamic grid size
+    __host__ __device__ static constexpr uint32_t get_grid_size(uint32_t batch_size) {
+        if (batch_size <= SPLIT_H_THRESHOLD) {
+            return batch_size * Dims::TOP_K * get_split_factor(batch_size);
+        }
+        return STANDARD_GRID_SIZE;  // K / 16
+    }
+};
+```
+
+### Example Calculations
+
+| BS | top_k | Pairs | Standard Grid | Split Factor | Split-H Grid | SM Util |
+|----|-------|-------|---------------|--------------|--------------|---------|
+| 1 | 8 | 8 | 128 | 14 | 112 | 79% |
+| 2 | 8 | 16 | 128 | 7 | 112 | 79% |
+| 4 | 8 | 32 | 128 | 4 | 128 | 90% |
+| 8 | 8 | 64 | 128 | 1 | 128 | 90% |
+
+### Implementation Pattern
+
+```cpp
+template <typename Dims>
+__device__ void moe_down_projection_split_h(
+    MoE_SHM<Dims>* shm,
+    MoEGemmSpec<Dims>* scratchpad,
+    const W_element* expert_weights_down,
+    const S_element* expert_scales_down,
+    uint32_t num_tokens)
+{
+    uint32_t split_factor = KernelConfig::get_split_factor(num_tokens);
+
+    if (split_factor == 1) {
+        // Standard path: one block per K-slice
+        moe_down_projection_standard<Dims>(...);
+        return;
+    }
+
+    // Split-H: multiple blocks per (token, expert) pair
+    uint32_t total_pairs = num_tokens * Dims::TOP_K;
+
+    // Map blockIdx to (pair_idx, split_idx)
+    uint32_t pair_idx = blockIdx.x / split_factor;
+    uint32_t split_idx = blockIdx.x % split_factor;
+
+    if (pair_idx >= total_pairs) return;
+
+    // Each split handles different K-range
+    uint32_t k_per_split = Dims::K / split_factor;
+    uint32_t k_start = split_idx * k_per_split;
+    uint32_t k_end = (split_idx == split_factor - 1) ? Dims::K : (split_idx + 1) * k_per_split;
+
+    // Process this K-slice for this pair
+    // IMPORTANT: Must use atomicAdd since multiple blocks write to same output
+    for (uint32_t k = k_start; k < k_end; k += W_DOWN_TILE) {
+        // ... compute partial result for K-slice ...
+
+        // Atomic accumulation required
+        atomicAdd(&scratchpad->output_accum[token_idx * Dims::K + k], partial_result);
+    }
+}
+```
+
+### When to Use Split-H
+
+```python
+def should_use_split_h(batch_size: int, top_k: int, sm_count: int) -> bool:
+    """
+    Split-H beneficial when standard grid underutilizes SMs.
+    """
+    total_pairs = batch_size * top_k
+    standard_utilization = total_pairs / sm_count
+
+    # Below 50% utilization → Split-H helps
+    return standard_utilization < 0.5 and batch_size <= 4
+```
+
+### Tradeoffs
+
+| Pro | Con |
+|-----|-----|
+| Better SM utilization for tiny batches | Requires atomicAdd (contention) |
+| Hides memory latency with more blocks | More complex block assignment |
+| Can achieve 80%+ SM utilization at BS=1 | Additional coordination overhead |
+
+**Recommendation**: Use as optional optimization. Default to standard grid, enable Split-H via environment variable or when profiling shows underutilization.
+
+```cpp
+// Configuration flag
+static constexpr bool ENABLE_SPLIT_H = true;
+
+// Runtime check
+if constexpr (ENABLE_SPLIT_H) {
+    if (batch_size <= SPLIT_H_THRESHOLD) {
+        moe_down_projection_split_h<Dims>(...);
+        return;
+    }
+}
+moe_down_projection_standard<Dims>(...);
+```
