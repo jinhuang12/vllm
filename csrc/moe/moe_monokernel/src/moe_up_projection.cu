@@ -243,7 +243,7 @@ __device__ static void moe_up_reduction(
     bool store_row1,
     std::uint16_t pair_idx0,
     std::uint16_t pair_idx1,
-    T_element* __restrict__ result)
+    AQ_element* __restrict__ result)
 {
     using CoreDims = MoECoreDims<Dims>;
     const unsigned thread = get_thread<Dims>();
@@ -292,12 +292,14 @@ __device__ static void moe_up_reduction(
     sig0 *= ts0;
     sig1 *= ts1;
 
-    // Write to temporary buffer using original pair indices
-    // This matches the scalar down-projection's expectation of temp[pair_idx * N + n]
+    // Write to temporary buffer using original pair indices.
+    // Down-projection reads this as FP8 activations (W8A8 path).
+    constexpr float FP8_E4M3_MAX = 448.0f;
     unsigned out_col = base_row + (thread / 4);
     if (out_col < Dims::N) {
         if (store_row0) {
-            result[pair_idx0 * Dims::N + out_col] = sig0;
+            float q0 = fminf(fmaxf(sig0, -FP8_E4M3_MAX), FP8_E4M3_MAX);
+            result[pair_idx0 * Dims::N + out_col] = __nv_fp8_e4m3(q0);
 #ifdef MOE_MONOKERNEL_DEBUG_OUTPUT
             if (blockIdx.x == 0 && thread == 0) {
                 printf("DEBUG output: pair=%d col=%d sig0=%.4f x0=%.4f gate0=%.4f\n",
@@ -306,7 +308,8 @@ __device__ static void moe_up_reduction(
 #endif
         }
         if (store_row1) {
-            result[pair_idx1 * Dims::N + out_col] = sig1;
+            float q1 = fminf(fmaxf(sig1, -FP8_E4M3_MAX), FP8_E4M3_MAX);
+            result[pair_idx1 * Dims::N + out_col] = __nv_fp8_e4m3(q1);
         }
     }
 }
@@ -352,6 +355,7 @@ __device__ void moe_up_projection(
     typename MoE_SHM::U::Gemm1Data* shm = &shmem->u.gemm1;
     std::uint32_t expert_count = shmem->expert_count;
     const AQ_element* activations = spec->activations[0];
+    AQ_element* temp = spec->temp;
 
     // Triple-buffering: queue first 2 tiles
     if (is_prefetch_warp<Dims>() && expert_count > 0) {
@@ -622,7 +626,7 @@ __device__ void moe_up_projection(
                     row1 < a_rows,
                     pair_idx0,
                     pair_idx1,
-                    spec->temp);
+                    temp);
             }
         }
     }

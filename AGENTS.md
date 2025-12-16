@@ -73,6 +73,24 @@ If the task involves “monokernel”, “fused MoE”, “router→GEMM fusion�
 * Tests (GPU recommended): `pytest tests/`; focused `pytest -s -v tests/test_logger.py`
 * Docs preview: `mkdocs serve`
 
+### CUDA Kernel Development
+
+- CUDA kernels in `csrc/`
+- Python bindings in `vllm/_custom_ops.py`
+- Incremental compilation is configured via `CMakeUserPresets.json` ([docs](https://docs.vllm.ai/en/latest/contributing/incremental_build/))
+
+**After editing `csrc/` code:**
+```bash
+cmake --build --preset release --target install
+```
+
+**After adding new `csrc/` files:**
+```bash
+cmake --preset release && cmake --build --preset release --target install
+```
+
+Python changes take effect immediately (editable install).
+
 ## Coding Style & Naming Conventions
 
 * Follow Google Python/C++ style; 4-space Python indents; `.clang-format` for C++/CUDA.

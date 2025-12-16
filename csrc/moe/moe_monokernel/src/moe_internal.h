@@ -79,13 +79,23 @@ struct alignas(16) MoEGemmSpec
 #endif
     // All arrays aligned to 16 bytes for efficient vectorized access (copy128)
     alignas(16) AQ_element activations[Dims::BS][Dims::HIDDEN_STATES]; //< Quantized activations (one per token)
-    // Up projection produces 2*N values (x and gate) per token-expert pair.
-    // Layout: [0..MAX_PAIRS*N) = x, [MAX_PAIRS*N..2*MAX_PAIRS*N) = gate
-    alignas(16) T_element temp[2 * MAX_PAIRS * Dims::N]; //< Up projection results (x and gate)
+    // Up projection output after SiLU and routing weight, quantized to FP8 for GEMM2.
+    // Layout: temp[pair_idx * N + n]
+    alignas(16) AQ_element temp[MAX_PAIRS * Dims::N];
     alignas(16) float topk_weights_scaled[MAX_PAIRS]; //< topk_weights multiplied with activation quantization
     // FP32 accumulator for atomic adds (BF16 atomicAdd is broken/unsupported)
     // Used by down-projection to accumulate results before converting to BF16
     alignas(16) float output_accum[Dims::BS * Dims::HIDDEN_STATES];
+
+    // Routing data for broadcast from block 0 to all blocks
+    // Block 0 computes routing once in Phase 1, stores here, all blocks load in Phase 3
+    // This avoids recomputing routing 128x (once per block)
+    alignas(16) std::uint8_t routing_topk_ids[MAX_PAIRS];           // Expert IDs [BS * TOP_K]
+    alignas(16) std::uint16_t routing_token_indexes[MAX_PAIRS];     // Sorted pair indices [BS * TOP_K]
+    alignas(16) float routing_topk_weights[MAX_PAIRS];              // Routing weights [BS * TOP_K]
+    alignas(16) ExpertRef routing_experts[Dims::NUM_EXPERTS];       // Expert reference list
+    std::uint32_t routing_expert_count;                             // Number of active experts
+    std::uint32_t routing_total_pairs;                              // Total token-expert pairs
 
     // Per-stage timing (recorded by block 0, thread 0 for profiling)
     // Uses clock64() to record GPU cycle counts at each stage boundary
@@ -116,8 +126,11 @@ struct MoECoreDims {
     using MoEDims = Dims;
 
     // GPU configuration
-    // Optimal configuration determined by benchmarking on L40S (SM 8.9)
-    // 6c2p (6 calc + 2 prefetch = 256 threads) provides best performance
+    // Warp split: (calc warps) + (prefetch warps) = total warps per block.
+    //
+    // For Qwen3 (BS<=64) we use a slightly more prefetch-heavy configuration for
+    // the BS<=8 instantiation to reduce latency on tiny batches, and keep the
+    // higher compute utilization configuration for the BS<=64 instantiation.
     // Benchmark results (BS=1/8/64 ms):
     //   4c2p: 0.764/1.032/3.619 - good
     //   4c4p: 0.786/1.064/3.777 - good
@@ -126,8 +139,8 @@ struct MoECoreDims {
     //   8c4p: 1.122/1.447/4.744 - original baseline
     //   8c8p: 1.355/1.683/6.404 - worst (too many threads)
     static constexpr std::uint32_t THREADS_PER_WARP = 32;
-    static constexpr std::uint32_t CALC_WARP_COUNT = 6;  // Optimal for L40S
-    static constexpr std::uint32_t PREFETCH_WARP_COUNT = 2;  // Minimal prefetch sufficient
+    static constexpr std::uint32_t CALC_WARP_COUNT = (Dims::BS <= 8) ? 4 : 6;
+    static constexpr std::uint32_t PREFETCH_WARP_COUNT = (Dims::BS <= 8) ? 4 : 2;
     static constexpr std::uint32_t TOTAL_WARP_COUNT = CALC_WARP_COUNT + PREFETCH_WARP_COUNT;
 
     // MMA 1 matrix tile dimensions
@@ -154,6 +167,82 @@ struct MoECoreDims {
 
     // For top-k routing
     static constexpr std::uint32_t MAX_PAIRS = Dims::BS * Dims::TOP_K;
+};
+
+/**
+ * @brief Split-H configuration for small batch optimization.
+ *
+ * In Split-H mode, multiple blocks collaborate on each (token, expert) pair
+ * by splitting the hidden dimension. This improves SM utilization for small batches.
+ *
+ * Block assignment in Split-H mode:
+ * - pair_idx = blockIdx.x / split_factor
+ * - slice_idx = blockIdx.x % split_factor
+ * - Each block computes h_chunk of the hidden dimension
+ *
+ * @tparam Dims The MoE dimensions template
+ */
+template <typename Dims>
+struct SplitHConfig {
+    using KernelConfig = typename Dims::KernelConfig;
+
+    /**
+     * @brief Get split factor for a given batch size.
+     */
+    __host__ __device__ static constexpr std::uint32_t get_split_factor(std::uint32_t batch_size) {
+        return KernelConfig::get_split_factor(batch_size);
+    }
+
+    /**
+     * @brief Get the hidden dimension chunk size for a given split factor.
+     */
+    __host__ __device__ static constexpr std::uint32_t get_h_chunk(std::uint32_t split_factor) {
+        return (Dims::HIDDEN_STATES + split_factor - 1) / split_factor;
+    }
+
+    /**
+     * @brief Compute the pair index from block index.
+     */
+    __device__ static std::uint32_t get_pair_idx(std::uint32_t block_idx, std::uint32_t split_factor) {
+        return block_idx / split_factor;
+    }
+
+    /**
+     * @brief Compute the slice index within a pair from block index.
+     */
+    __device__ static std::uint32_t get_slice_idx(std::uint32_t block_idx, std::uint32_t split_factor) {
+        return block_idx % split_factor;
+    }
+
+    /**
+     * @brief Compute the token index from pair index.
+     */
+    __device__ static std::uint32_t get_token_idx(std::uint32_t pair_idx) {
+        return pair_idx / Dims::TOP_K;
+    }
+
+    /**
+     * @brief Compute the expert slot (0 to TOP_K-1) from pair index.
+     */
+    __device__ static std::uint32_t get_expert_slot(std::uint32_t pair_idx) {
+        return pair_idx % Dims::TOP_K;
+    }
+
+    /**
+     * @brief Compute the start of the hidden dimension slice.
+     */
+    __device__ static std::uint32_t get_h_start(std::uint32_t slice_idx, std::uint32_t h_chunk) {
+        return slice_idx * h_chunk;
+    }
+
+    /**
+     * @brief Compute the end of the hidden dimension slice (exclusive).
+     */
+    __device__ static std::uint32_t get_h_end(std::uint32_t slice_idx, std::uint32_t h_chunk) {
+        std::uint32_t h_start = slice_idx * h_chunk;
+        std::uint32_t h_end = h_start + h_chunk;
+        return h_end < Dims::HIDDEN_STATES ? h_end : Dims::HIDDEN_STATES;
+    }
 };
 
 /**
@@ -210,9 +299,9 @@ struct alignas(16) MoE_SHM {
             // Uses single-buffered approach for simplicity.
 
             // Activation buffers (double-buffered for potential future use)
-            // Total: 2 × T_TILE × N × sizeof(float) = 2 × 8 × 768 × 4 = 49,152 bytes
-            alignas(16) T_element t_g0[CoreDims::T_TILE][Dims::N];
-            alignas(16) T_element t_g1[CoreDims::T_TILE][Dims::N];
+            // Total: 2 × T_TILE × N × sizeof(fp8) = 2 × 8 × 768 × 1 = 12,288 bytes
+            alignas(16) AQ_element t_g0[CoreDims::T_TILE][Dims::N];
+            alignas(16) AQ_element t_g1[CoreDims::T_TILE][Dims::N];
 
             // Weight buffers (double-buffered for potential future use)
             // Total: 2 × W_DOWN_TILE × (N + padding) × sizeof(W_element) ≈ 24,576 bytes

@@ -2037,6 +2037,68 @@ def moe_monokernel_block_quant_get_timing(
         scratchpad, batch_size)
 
 
+# ===========================================================================
+# MoE Monokernel for gpt-oss-120b (BF16, TP=4, L40S)
+# ===========================================================================
+# Native BF16 monokernel for openai/gpt-oss-120b with TP=4 on L40S.
+# No quantization - simpler than FP8 but larger SMEM footprint.
+
+def moe_monokernel_gpt_oss_120b_supported() -> bool:
+    """Check if the gpt-oss-120b monokernel is supported on this GPU."""
+    if not current_platform.is_cuda():
+        return False
+    try:
+        return torch.ops._moe_C.moe_monokernel_gpt_oss_120b_supported()
+    except AttributeError:
+        return False
+
+
+def moe_monokernel_gpt_oss_120b_scratchpad_size(batch_size: int) -> int:
+    """Get required scratchpad size in bytes for given batch size."""
+    if batch_size <= 8:
+        return torch.ops._moe_C.moe_monokernel_gpt_oss_120b_scratchpad_size_BS8()
+    else:
+        return torch.ops._moe_C.moe_monokernel_gpt_oss_120b_scratchpad_size_BS32()
+
+
+def moe_monokernel_gpt_oss_120b(
+    activations_in: torch.Tensor,      # [BS, K=2880] BF16
+    router_logits: torch.Tensor,       # [BS, E=128] BF16
+    expert_weights_up: torch.Tensor,   # [E=128, 2*N=1440, K=2880] BF16
+    expert_weights_down: torch.Tensor, # [E=128, K=2880, N=720] BF16
+    activations_out: torch.Tensor,     # [BS, K=2880] BF16 (output)
+    scratchpad: torch.Tensor,          # Preallocated scratchpad
+) -> None:
+    """
+    Fused MoE kernel for gpt-oss-120b with top_k=4.
+
+    This kernel fuses router + expert selection + up-projection GEMM +
+    SiLU activation + down-projection GEMM into a single cooperative kernel.
+
+    Optimized for: L40S, BF16, TP=4, batch sizes <= 32.
+
+    Args:
+        activations_in: Input hidden states [BS, K=2880] in BF16
+        router_logits: Router outputs [BS, E=128] in BF16
+        expert_weights_up: Up-projection weights [E=128, 2*N=1440, K=2880] in BF16
+        expert_weights_down: Down-projection weights [E=128, K=2880, N=720] in BF16
+        activations_out: Output buffer [BS, K=2880] in BF16 (will be overwritten)
+        scratchpad: Pre-allocated scratchpad memory
+    """
+    batch_size = activations_in.size(0)
+
+    if batch_size <= 8:
+        torch.ops._moe_C.moe_monokernel_gpt_oss_120b_BS8(
+            activations_in, router_logits,
+            expert_weights_up, expert_weights_down,
+            activations_out, scratchpad)
+    else:
+        torch.ops._moe_C.moe_monokernel_gpt_oss_120b_BS32(
+            activations_in, router_logits,
+            expert_weights_up, expert_weights_down,
+            activations_out, scratchpad)
+
+
 def grouped_topk(
     scores: torch.Tensor,
     num_expert_group: int,

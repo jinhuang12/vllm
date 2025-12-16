@@ -947,6 +947,28 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 endif()
 
+# MoE Monokernel for gpt-oss-120b (BF16, TP=4, L40S - requires SM 8.9+)
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  cuda_archs_loose_intersection(MOE_MONOKERNEL_GPT_OSS_120B_ARCHS "8.9;9.0" "${CUDA_ARCHS}")
+  if(MOE_MONOKERNEL_GPT_OSS_120B_ARCHS)
+    # Note: moe.cu is #included by moe_wrapper.cu to keep
+    # template instantiations in the same translation unit
+    set(MOE_MONOKERNEL_GPT_OSS_120B_SRC
+        "csrc/moe/moe_monokernel_gpt-oss-120b_l40s_bf16_tp4/moe_wrapper.cu")
+
+    set_gencode_flags_for_srcs(
+      SRCS "${MOE_MONOKERNEL_GPT_OSS_120B_SRC}"
+      CUDA_ARCHS "${MOE_MONOKERNEL_GPT_OSS_120B_ARCHS}")
+
+    list(APPEND VLLM_MOE_EXT_SRC "${MOE_MONOKERNEL_GPT_OSS_120B_SRC}")
+
+    message(STATUS "Building MoE Monokernel for gpt-oss-120b (BF16, TP=4, L40S) for archs: ${MOE_MONOKERNEL_GPT_OSS_120B_ARCHS}")
+  else()
+    message(STATUS "Not building MoE Monokernel for gpt-oss-120b as no compatible archs found"
+                   " (requires SM 8.9+)")
+  endif()
+endif()
+
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")

@@ -49,3 +49,26 @@ bool moe_permute_unpermute_supported();
 void shuffle_rows(const torch::Tensor& input_tensor,
                   const torch::Tensor& dst2src_map,
                   torch::Tensor& output_tensor);
+
+// MoE Monokernel for gpt-oss-120b (BF16, TP=4, L40S)
+namespace moe_monokernel_gpt_oss_120b {
+void moe_monokernel_gpt_oss_120b_BS8_impl(
+    const torch::Tensor& activations_in,
+    const torch::Tensor& router_logits,
+    const torch::Tensor& expert_weights_up,
+    const torch::Tensor& expert_weights_down,
+    torch::Tensor& activations_out,
+    torch::Tensor& scratchpad);
+
+void moe_monokernel_gpt_oss_120b_BS32_impl(
+    const torch::Tensor& activations_in,
+    const torch::Tensor& router_logits,
+    const torch::Tensor& expert_weights_up,
+    const torch::Tensor& expert_weights_down,
+    torch::Tensor& activations_out,
+    torch::Tensor& scratchpad);
+
+int64_t moe_monokernel_gpt_oss_120b_scratchpad_size_BS8();
+int64_t moe_monokernel_gpt_oss_120b_scratchpad_size_BS32();
+bool moe_monokernel_gpt_oss_120b_supported();
+}

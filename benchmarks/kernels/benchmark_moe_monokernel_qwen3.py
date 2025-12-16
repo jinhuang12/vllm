@@ -82,12 +82,10 @@ def benchmark_fused_moe(
     a2_scale: torch.Tensor,
     num_warmup: int = 10,
     num_iters: int = 100,
+    use_cuda_graph: bool = False,
+    include_routing: bool = True,
 ) -> dict:
     """Benchmark baseline FusedMoE."""
-
-    topk_weights, topk_ids, _ = fused_topk(
-        hidden_states, router_logits, TOP_K, renormalize=True
-    )
 
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype=FP8_DTYPE,
@@ -98,29 +96,101 @@ def benchmark_fused_moe(
         block_shape=[128, 128],
     )
 
+    if include_routing:
+        # Match vLLM's Qwen3MoeSparseMoeBlock/FusedMoE behavior:
+        # routing (topk_softmax) happens every forward using router_logits.
+        topk_weights = torch.empty(
+            hidden_states.size(0), TOP_K, dtype=torch.float32, device="cuda"
+        )
+        topk_ids = torch.empty(
+            hidden_states.size(0), TOP_K, dtype=torch.int32, device="cuda"
+        )
+        token_expert_indices = torch.empty(
+            hidden_states.size(0), TOP_K, dtype=torch.int32, device="cuda"
+        )
+
+        def run_once():
+            ops.topk_softmax(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                router_logits,
+                True,  # renormalize
+            )
+            return fused_experts(
+                hidden_states,
+                w13,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                quant_config=quant_config,
+            )
+    else:
+        # Experts-only measurement (topk precomputed once).
+        topk_weights, topk_ids, _ = fused_topk(
+            hidden_states, router_logits, TOP_K, renormalize=True
+        )
+
+        def run_once():
+            return fused_experts(
+                hidden_states,
+                w13,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                quant_config=quant_config,
+            )
+
     # Warmup
     for _ in range(num_warmup):
-        out = fused_experts(
-            hidden_states, w13, w2, topk_weights, topk_ids,
-            inplace=False, quant_config=quant_config,
-        )
+        out = run_once()
 
     torch.cuda.synchronize()
 
-    # Timed iterations
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    if use_cuda_graph:
+        # CUDA graph mode - captures kernel execution without launch overhead
+        num_ops_per_graph = 10
 
-    latencies = []
-    for _ in range(num_iters):
-        start_event.record()
-        out = fused_experts(
-            hidden_states, w13, w2, topk_weights, topk_ids,
-            inplace=False, quant_config=quant_config,
-        )
-        end_event.record()
+        # Capture graph
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            for _ in range(num_ops_per_graph):
+                out = run_once()
         torch.cuda.synchronize()
-        latencies.append(start_event.elapsed_time(end_event))
+
+        # Warmup graph replays
+        for _ in range(5):
+            graph.replay()
+        torch.cuda.synchronize()
+
+        # Timed graph replays
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        latencies = []
+        for _ in range(num_iters):
+            start_event.record()
+            graph.replay()
+            end_event.record()
+            end_event.synchronize()
+            # Divide by num_ops_per_graph to get per-operation latency
+            latencies.append(start_event.elapsed_time(end_event) / num_ops_per_graph)
+
+        graph.reset()
+    else:
+        # Eager mode - includes kernel launch overhead
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        latencies = []
+        for _ in range(num_iters):
+            start_event.record()
+            out = run_once()
+            end_event.record()
+            torch.cuda.synchronize()
+            latencies.append(start_event.elapsed_time(end_event))
 
     latencies = sorted(latencies)
     return {
@@ -142,6 +212,7 @@ def benchmark_monokernel(
     w2_scale: torch.Tensor,
     num_warmup: int = 10,
     num_iters: int = 100,
+    use_cuda_graph: bool = False,
 ) -> dict:
     """Benchmark MoE Monokernel with block quantization."""
 
@@ -166,20 +237,54 @@ def benchmark_monokernel(
 
     torch.cuda.synchronize()
 
-    # Timed iterations
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    if use_cuda_graph:
+        # CUDA graph mode - captures kernel execution without launch overhead
+        num_ops_per_graph = 10
 
-    latencies = []
-    for _ in range(num_iters):
-        start_event.record()
-        ops.moe_monokernel_qwen3_block_quant(
-            hidden_states, router_logits, w13, w13_scale,
-            w2, w2_scale, output, scratchpad
-        )
-        end_event.record()
+        # Capture graph
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            for _ in range(num_ops_per_graph):
+                ops.moe_monokernel_qwen3_block_quant(
+                    hidden_states, router_logits, w13, w13_scale,
+                    w2, w2_scale, output, scratchpad
+                )
         torch.cuda.synchronize()
-        latencies.append(start_event.elapsed_time(end_event))
+
+        # Warmup graph replays
+        for _ in range(5):
+            graph.replay()
+        torch.cuda.synchronize()
+
+        # Timed graph replays
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        latencies = []
+        for _ in range(num_iters):
+            start_event.record()
+            graph.replay()
+            end_event.record()
+            end_event.synchronize()
+            # Divide by num_ops_per_graph to get per-operation latency
+            latencies.append(start_event.elapsed_time(end_event) / num_ops_per_graph)
+
+        graph.reset()
+    else:
+        # Eager mode - includes kernel launch overhead
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        latencies = []
+        for _ in range(num_iters):
+            start_event.record()
+            ops.moe_monokernel_qwen3_block_quant(
+                hidden_states, router_logits, w13, w13_scale,
+                w2, w2_scale, output, scratchpad
+            )
+            end_event.record()
+            torch.cuda.synchronize()
+            latencies.append(start_event.elapsed_time(end_event))
 
     latencies = sorted(latencies)
     return {
@@ -221,6 +326,21 @@ def main():
         default="/tmp/qwen3_moe_monokernel_benchmark",
         help="Output directory for results"
     )
+    parser.add_argument(
+        "--use-cuda-graph",
+        action="store_true",
+        help="Use CUDA graphs to remove launch overhead (pure kernel execution)"
+    )
+    parser.add_argument(
+        "--baseline-scope",
+        type=str,
+        choices=["e2e", "experts-only"],
+        default="e2e",
+        help=(
+            "Baseline measurement scope: 'e2e' matches vLLM (routing+experts); "
+            "'experts-only' precomputes topk once and times experts only."
+        ),
+    )
     args = parser.parse_args()
 
     print("=" * 80)
@@ -233,6 +353,9 @@ def main():
     print(f"Top-K: {TOP_K}")
     print(f"Monokernel Available: {HAS_MONOKERNEL}")
     print(f"Batch Sizes: {args.batch_sizes}")
+    mode = "CUDA Graph (pure kernel)" if args.use_cuda_graph else "Eager (with launch overhead)"
+    print(f"Benchmark Mode: {mode}")
+    print(f"Baseline Scope: {args.baseline_scope}")
     print("=" * 80 + "\n")
 
     results = []
@@ -250,9 +373,15 @@ def main():
             w13_scale, w2_scale, a1_scale, a2_scale,
             num_warmup=args.num_warmup,
             num_iters=args.num_iters,
+            use_cuda_graph=args.use_cuda_graph,
+            include_routing=(args.baseline_scope == "e2e"),
         )
 
-        print(f"  FusedMoE (baseline):")
+        baseline_label = (
+            "FusedMoE (routing+experts)" if args.baseline_scope == "e2e" else
+            "FusedMoE (experts-only)"
+        )
+        print(f"  {baseline_label}:")
         print(f"    Mean: {baseline_stats['mean_ms']:.3f} ms")
         print(f"    Median: {baseline_stats['median_ms']:.3f} ms")
 
@@ -265,6 +394,7 @@ def main():
                 w13_scale, w2_scale,
                 num_warmup=args.num_warmup,
                 num_iters=args.num_iters,
+                use_cuda_graph=args.use_cuda_graph,
             )
 
             if monokernel_stats:

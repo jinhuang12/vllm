@@ -85,6 +85,61 @@ __device__ static void prepare_moe_topk(
 
     const uint32_t total_pairs = batch_size * Dims::TOP_K;
 
+    // Fast path for small batches: for tiny `total_pairs`, the full radix-style
+    // per-expert prefix scan is overkill. Use shared-memory atomics instead.
+    if (total_pairs <= 32) {
+        if (threadIdx.x < CoreDims::THREADS_PER_WARP) {
+            const std::uint32_t lane = threadIdx.x;
+
+            // Initialize per-expert counts.
+            for (unsigned e = lane; e < Dims::NUM_EXPERTS; e += CoreDims::THREADS_PER_WARP) {
+                total_counts[e] = 0;
+            }
+            __syncwarp();
+
+            // Count pairs per expert.
+            for (unsigned i = lane; i < total_pairs; i += CoreDims::THREADS_PER_WARP) {
+                uint8_t expert_id = shmem->topk_ids[i];
+                if (expert_id < Dims::NUM_EXPERTS) {
+                    atomicAdd(&total_counts[expert_id], 1u);
+                }
+            }
+            __syncwarp();
+
+            // Build expert ranges (sorted by expert_id) and initialize per-expert write cursors.
+            if (lane == 0) {
+                std::uint32_t sum = 0;
+                std::uint32_t expert_count = 0;
+                for (unsigned e = 0; e < Dims::NUM_EXPERTS; ++e) {
+                    std::uint32_t count = total_counts[e];
+                    if (count > 0) {
+                        shmem->experts[expert_count].first_token = sum;
+                        shmem->experts[expert_count].last_token = sum + count;
+                        shmem->experts[expert_count].id = e;
+                        expert_count++;
+
+                        counters[e][0] = sum;  // cursor
+                        sum += count;
+                    }
+                }
+                shmem->expert_count = expert_count;
+                shmem->total_pairs = total_pairs;
+            }
+            __syncwarp();
+
+            // Write sorted token-expert pair indices (order within expert is unspecified).
+            std::uint16_t* ordered = shmem->token_indexes;
+            for (unsigned i = lane; i < total_pairs; i += CoreDims::THREADS_PER_WARP) {
+                uint8_t expert_id = shmem->topk_ids[i];
+                if (expert_id < Dims::NUM_EXPERTS) {
+                    unsigned index = atomicAdd(&counters[expert_id][0], 1u);
+                    ordered[index] = (std::uint16_t)i;
+                }
+            }
+        }
+        return;
+    }
+
     // Implements a Radix sort on the first warp of each CUDA block.
     if (threadIdx.x < CoreDims::THREADS_PER_WARP) {
         // initialize counters

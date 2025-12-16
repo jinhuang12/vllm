@@ -50,11 +50,54 @@ struct MoEDimensions {
         ((N + BLOCK_SIZE_QUANT - 1) / BLOCK_SIZE_QUANT) : 1;            // 6 for Qwen3-30B
 
     struct KernelConfig {
-        // Grid size: one block per 16 rows of the down-projection result
+        // L40S SM count for saturation calculation
+        static constexpr std::uint32_t SM_COUNT = 142;
+
+        // Standard grid size: one block per 16 rows of the down-projection result
         // Down-projection outputs K elements per token, so we tile by K/16
-        // For Qwen3: HIDDEN_STATES=2048, so GRID_SIZE = 2048/16 = 128
-        // For Llama4: HIDDEN_STATES=5120, but uses 2*N/16 since 2*1024/16 = 128
-        static constexpr std::uint32_t GRID_SIZE = k / 16;
+        // For Qwen3: HIDDEN_STATES=2048, so STANDARD_GRID_SIZE = 2048/16 = 128
+        static constexpr std::uint32_t STANDARD_GRID_SIZE = k / 16;
+
+        // Split-H threshold: use Split-H for batch sizes <= this value
+        static constexpr std::uint32_t SPLIT_H_THRESHOLD = 4;
+
+        // Maximum split factor (cap to limit atomicAdd contention)
+        static constexpr std::uint32_t MAX_SPLIT_FACTOR = 16;
+
+        // Calculate split factor for Split-H mode
+        // Multiple blocks collaborate per (token, expert) pair
+        __host__ __device__ static constexpr std::uint32_t get_split_factor(std::uint32_t batch_size) {
+            if (batch_size > SPLIT_H_THRESHOLD) {
+                return 1;  // No split for larger batches
+            }
+            // Target 80% SM utilization
+            std::uint32_t total_pairs = batch_size * topk;
+            std::uint32_t target_blocks = (SM_COUNT * 8) / 10;  // 80% of SMs
+            std::uint32_t split = (target_blocks + total_pairs - 1) / total_pairs;
+            return split < MAX_SPLIT_FACTOR ? split : MAX_SPLIT_FACTOR;
+        }
+
+        // Dynamic grid size based on batch size for Split-H optimization
+        __host__ __device__ static constexpr std::uint32_t get_grid_size(std::uint32_t batch_size) {
+            if (batch_size <= SPLIT_H_THRESHOLD) {
+                // Split-H: multiple blocks collaborate per (token, expert) pair
+                std::uint32_t total_pairs = batch_size * topk;
+                std::uint32_t split_factor = get_split_factor(batch_size);
+                return total_pairs * split_factor;
+            } else {
+                // Standard: one block per K/16 slice
+                return STANDARD_GRID_SIZE;
+            }
+        }
+
+        // Check if Split-H mode should be used
+        __host__ __device__ static constexpr bool use_split_h(std::uint32_t batch_size) {
+            return batch_size <= SPLIT_H_THRESHOLD;
+        }
+
+        // Legacy constant for compatibility (use get_grid_size() for dynamic sizing)
+        static constexpr std::uint32_t GRID_SIZE = STANDARD_GRID_SIZE;
+
         // Block size: 6 calc + 2 prefetch = 256 threads (optimal for L40S)
         static constexpr std::uint32_t BLOCK_SIZE = 256;
     };

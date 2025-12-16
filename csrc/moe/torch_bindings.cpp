@@ -261,6 +261,42 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Get per-stage timing data from block quant monokernel (for profiling)
   m.def("moe_monokernel_block_quant_get_timing(Tensor! scratchpad, int batch_size) -> Tensor");
   m.impl("moe_monokernel_block_quant_get_timing", &moe_monokernel_block_quant_get_timing);
+
+  // ============================================================================
+  // MoE Monokernel for gpt-oss-120b (BF16, TP=4, L40S)
+  // ============================================================================
+  // Native BF16 monokernel for openai/gpt-oss-120b with TP=4 on L40S
+  // No quantization, simpler than FP8 but larger SMEM footprint
+
+  // Check if gpt-oss-120b monokernel is supported
+  m.def("moe_monokernel_gpt_oss_120b_supported() -> bool");
+  m.impl("moe_monokernel_gpt_oss_120b_supported", &moe_monokernel_gpt_oss_120b::moe_monokernel_gpt_oss_120b_supported);
+
+  // MoE Monokernel for gpt-oss-120b (BS <= 8)
+  m.def(
+      "moe_monokernel_gpt_oss_120b_BS8(Tensor activations_in, Tensor router_logits, "
+      "Tensor expert_weights_up, Tensor expert_weights_down, "
+      "Tensor! activations_out, Tensor! scratchpad) -> ()");
+  m.impl("moe_monokernel_gpt_oss_120b_BS8", torch::kCUDA,
+         &moe_monokernel_gpt_oss_120b::moe_monokernel_gpt_oss_120b_BS8_impl);
+
+  // MoE Monokernel for gpt-oss-120b (BS <= 32)
+  m.def(
+      "moe_monokernel_gpt_oss_120b_BS32(Tensor activations_in, Tensor router_logits, "
+      "Tensor expert_weights_up, Tensor expert_weights_down, "
+      "Tensor! activations_out, Tensor! scratchpad) -> ()");
+  m.impl("moe_monokernel_gpt_oss_120b_BS32", torch::kCUDA,
+         &moe_monokernel_gpt_oss_120b::moe_monokernel_gpt_oss_120b_BS32_impl);
+
+  // Get scratchpad size for gpt-oss-120b monokernel (BS=8)
+  m.def("moe_monokernel_gpt_oss_120b_scratchpad_size_BS8() -> int");
+  m.impl("moe_monokernel_gpt_oss_120b_scratchpad_size_BS8",
+         &moe_monokernel_gpt_oss_120b::moe_monokernel_gpt_oss_120b_scratchpad_size_BS8);
+
+  // Get scratchpad size for gpt-oss-120b monokernel (BS=32)
+  m.def("moe_monokernel_gpt_oss_120b_scratchpad_size_BS32() -> int");
+  m.impl("moe_monokernel_gpt_oss_120b_scratchpad_size_BS32",
+         &moe_monokernel_gpt_oss_120b::moe_monokernel_gpt_oss_120b_scratchpad_size_BS32);
 #endif
 }
 

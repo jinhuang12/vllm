@@ -69,7 +69,9 @@ def profile_monokernel(batch_size: int, warmup_iters: int = 3, profile_iters: in
         profile_iters: Number of iterations to profile
     """
     # Import here to allow script to be run without vllm installed (for help text)
-    from vllm._custom_ops import moe_monokernel_qwen3
+    from vllm import _custom_ops as ops
+    from vllm.platforms import current_platform
+    fp8_dtype = current_platform.fp8_dtype()
 
     # Qwen3-Coder-30B-A3B dimensions
     HIDDEN = 2048  # Hidden size
@@ -99,24 +101,25 @@ def profile_monokernel(batch_size: int, warmup_iters: int = 3, profile_iters: in
     )
 
     # Up-projection weights (FP8): [E, 2*N, K] - gate and x combined
-    w13 = torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN, device="cuda").to(
-        torch.float8_e4m3fn
-    )
-    w13_scale = torch.ones(
-        NUM_EXPERTS, 2 * INTERMEDIATE, device="cuda", dtype=torch.float32
-    )
+    w13 = torch.randn(
+        NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN, device="cuda", dtype=torch.float32
+    ).to(fp8_dtype)
+    # Block quantization scales (128x128 blocks): [E, ceil(2N/128)=12, ceil(K/128)=16]
+    w13_scale = torch.ones(NUM_EXPERTS, 12, 16, device="cuda", dtype=torch.float32)
 
     # Down-projection weights (FP8): [E, K, N]
-    w2 = torch.randn(NUM_EXPERTS, HIDDEN, INTERMEDIATE, device="cuda").to(
-        torch.float8_e4m3fn
-    )
-    w2_scale = torch.ones(NUM_EXPERTS, HIDDEN, device="cuda", dtype=torch.float32)
+    w2 = torch.randn(
+        NUM_EXPERTS, HIDDEN, INTERMEDIATE, device="cuda", dtype=torch.float32
+    ).to(fp8_dtype)
+    # Block quantization scales (128x128 blocks): [E, ceil(K/128)=16, ceil(N/128)=6]
+    w2_scale = torch.ones(NUM_EXPERTS, 16, 6, device="cuda", dtype=torch.float32)
 
     # Output tensor (BF16)
-    output = torch.zeros(batch_size, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty(batch_size, HIDDEN, device="cuda", dtype=torch.bfloat16)
 
     # Scratchpad for intermediate data
-    scratchpad = torch.zeros(70_000_000, device="cuda", dtype=torch.uint8)
+    scratchpad_size = ops.moe_monokernel_qwen3_block_quant_scratchpad_size(batch_size)
+    scratchpad = torch.empty(scratchpad_size, device="cuda", dtype=torch.uint8)
 
     print(f"Input shapes:")
     print(f"  x: {x.shape} ({x.dtype})")
@@ -124,13 +127,13 @@ def profile_monokernel(batch_size: int, warmup_iters: int = 3, profile_iters: in
     print(f"  w13: {w13.shape} ({w13.dtype})")
     print(f"  w2: {w2.shape} ({w2.dtype})")
     print(f"  output: {output.shape} ({output.dtype})")
-    print(f"  scratchpad: {scratchpad.shape[0] // 1024 // 1024} MB")
+    print(f"  scratchpad: {scratchpad.numel() // 1024 // 1024} MB")
     print()
 
     # Warmup iterations (NCU will skip these with --launch-skip)
     print(f"Running {warmup_iters} warmup iterations...")
     for i in range(warmup_iters):
-        moe_monokernel_qwen3(
+        ops.moe_monokernel_qwen3_block_quant(
             x, router_logits, w13, w13_scale, w2, w2_scale, output, scratchpad
         )
         torch.cuda.synchronize()
@@ -138,7 +141,7 @@ def profile_monokernel(batch_size: int, warmup_iters: int = 3, profile_iters: in
     # Profile iterations (NCU will capture these with --launch-count)
     print(f"Running {profile_iters} profile iterations...")
     for i in range(profile_iters):
-        moe_monokernel_qwen3(
+        ops.moe_monokernel_qwen3_block_quant(
             x, router_logits, w13, w13_scale, w2, w2_scale, output, scratchpad
         )
         torch.cuda.synchronize()

@@ -48,23 +48,26 @@ __device__ static void moe_request_down_activations(
     std::uint32_t warp = get_prefetch_warp<Dims>();
     std::uint32_t lane = get_thread<Dims>();
 
-    // Load T_TILE rows (8 rows for Qwen3, N=768 float elements each)
-    // With 4 prefetch warps and T_TILE=8, each warp handles 2 rows
+    // Load T_TILE rows (8 rows for Qwen3, N=768 FP8 elements each).
+    // With 2 prefetch warps and T_TILE=8, each warp handles 4 rows.
     for (std::uint32_t row = warp; row < CoreDims::T_TILE; row += CoreDims::PREFETCH_WARP_COUNT) {
-        // Clamp to valid tokens to avoid OOB access
-        std::uint32_t safe_row = min(row, num_valid_tokens > 0 ? num_valid_tokens - 1 : 0u);
-        std::uint16_t pair_idx = tokens[safe_row];
+        // Only load valid rows. For tiny per-expert tiles (common at BS=1/2),
+        // clamping would redundantly load the same row up to 8x.
+        if (row >= num_valid_tokens) {
+            continue;
+        }
+        std::uint16_t pair_idx = tokens[row];
 
-        const T_element* src = &scratchpad->temp[pair_idx * Dims::N];
-        T_element* dest = t_load_dest[row];
+        const AQ_element* src = &scratchpad->temp[pair_idx * Dims::N];
+        AQ_element* dest = t_load_dest[row];
 
-        // T_element is float (4 bytes), copy128 copies 16 bytes = 4 floats
-        // N = 768 floats, 768 / 4 = 192 vectors per row
+        // AQ_element is fp8 (1 byte), copy128 copies 16 bytes = 16 fp8 elements
+        // N = 768 fp8, 768 / 16 = 48 vectors per row
         // Each of 32 threads handles multiple vectors
-        constexpr std::uint32_t n_vec = Dims::N / 4;  // 4 floats per 16-byte copy
+        constexpr std::uint32_t n_vec = Dims::N / 16;  // 16 fp8 per 16-byte copy
 
         for (std::uint32_t vec = lane; vec < n_vec; vec += CoreDims::THREADS_PER_WARP) {
-            std::uint32_t col = vec * 4;  // 4 floats = 16 bytes, ALWAYS 16-byte aligned
+            std::uint32_t col = vec * 16;  // 16 fp8 = 16 bytes, ALWAYS 16-byte aligned
             copy128(dest[col], src[col], pipeline);
         }
     }
@@ -172,7 +175,7 @@ __device__ static inline std::uint32_t far_row_static(std::uint32_t w_row)
  * This is the Tensor Core version following Llama4's moe_down_mult pattern.
  * Computes: partial_result[w_row, :] = sum_n(activation[:, n] * weight[w_row, n]) * scale[w_row]
  *
- * Uses mma_fp8_tf32() for FP8 weights × FP32 activations → FP32 output.
+ * Uses mma_fp8_fp8() for FP8 weights × FP8 activations → FP32 output.
  *
  * Key differences from Llama4:
  * - Each thread processes activations from shm->t[t_index][thread/4] - single token row
@@ -228,16 +231,16 @@ __device__ static void moe_down_gemm_tile_tc(
             __nv_fp8x4_e4m3 w2 = *(__nv_fp8x4_e4m3*)&w[w_row   + thread / 4][base_col + 4 * (thread % 4) + 16];
             __nv_fp8x4_e4m3 w3 = *(__nv_fp8x4_e4m3*)&w[far_row + thread / 4][base_col + 4 * (thread % 4) + 16];
 
-            // Load FP32 activations: 16 bytes (4 floats) per thread
-            // t_row (thread / 4) selects which of the 8 token rows to use
-            float4 b0 = *(float4*)&t[t_row][base_col + 4 * (thread % 4) +  0];
-            float4 b1 = *(float4*)&t[t_row][base_col + 4 * (thread % 4) + 16];
+            // Load FP8 activations: 4 bytes (4 fp8) per thread, twice for 32 columns.
+            // t_row (thread / 4) selects which of the 8 token rows to use.
+            __nv_fp8x4_e4m3 a02 = *(__nv_fp8x4_e4m3*)&t[t_row][base_col + 4 * (thread % 4) +  0];
+            __nv_fp8x4_e4m3 a13 = *(__nv_fp8x4_e4m3*)&t[t_row][base_col + 4 * (thread % 4) + 16];
 
             // For block quantization: apply per-N-block scale during accumulation
             if constexpr (Dims::USE_BLOCK_QUANT) {
                 // Compute MMA result into temporaries
                 float t0 = 0.f, t1 = 0.f, t2 = 0.f, t3 = 0.f;
-                mma_fp8_tf32(t0, t1, t2, t3, w0, w1, w2, w3, b0, b1, 0.f, 0.f, 0.f, 0.f);
+                mma_fp8_fp8(t0, t1, t2, t3, w0, w1, w2, w3, a02, a13, 0.f, 0.f, 0.f, 0.f);
 
                 // Get scale for this N-block
                 // N-block index = base_col / BLOCK_SIZE_QUANT
@@ -251,7 +254,7 @@ __device__ static void moe_down_gemm_tile_tc(
                 d3 += t3 * block_scale;
             } else {
                 // Per-tensor/channel: accumulate without scaling here
-                mma_fp8_tf32(d0, d1, d2, d3, w0, w1, w2, w3, b0, b1, d0, d1, d2, d3);
+                mma_fp8_fp8(d0, d1, d2, d3, w0, w1, w2, w3, a02, a13, d0, d1, d2, d3);
             }
         }
 
@@ -355,21 +358,30 @@ __device__ static void moe_down_accumulate_tc(
             std::uint32_t k_idx2 = k_offset + w_row + k_local + 8;  // d2: token_row0
             std::uint32_t k_idx3 = k_offset + w_row + k_local + 8;  // d3: token_row1 (same K)
 
-            // Write outputs - d0/d2 go to token_row0, d1/d3 go to token_row1
+            // Write outputs - d0/d2 go to token_row0, d1/d3 go to token_row1.
+            //
+            // NOTE: For the current Qwen3 monokernel launch configuration, each CUDA
+            // block owns a unique K-slice (`k_offset = blockIdx.x * W_DOWN_TILE`)
+            // and no other block writes to the same output indices. Experts are
+            // processed sequentially within the block. Therefore, atomicAdd is
+            // unnecessary here and adds significant overhead for BS=1/2.
+            //
+            // If future experiments change the grid mapping (e.g. Split-H / K-slice
+            // sharing across blocks), this may need to revert to atomic accumulation.
             if (row0_valid) {
                 if (k_idx0 < Dims::HIDDEN_STATES) {
-                    atomicAdd(&scratchpad->output_accum[token_idx0 * Dims::HIDDEN_STATES + k_idx0], d0);
+                    scratchpad->output_accum[token_idx0 * Dims::HIDDEN_STATES + k_idx0] += d0;
                 }
                 if (k_idx2 < Dims::HIDDEN_STATES) {
-                    atomicAdd(&scratchpad->output_accum[token_idx0 * Dims::HIDDEN_STATES + k_idx2], d2);
+                    scratchpad->output_accum[token_idx0 * Dims::HIDDEN_STATES + k_idx2] += d2;
                 }
             }
             if (row1_valid) {
                 if (k_idx1 < Dims::HIDDEN_STATES) {
-                    atomicAdd(&scratchpad->output_accum[token_idx1 * Dims::HIDDEN_STATES + k_idx1], d1);
+                    scratchpad->output_accum[token_idx1 * Dims::HIDDEN_STATES + k_idx1] += d1;
                 }
                 if (k_idx3 < Dims::HIDDEN_STATES) {
-                    atomicAdd(&scratchpad->output_accum[token_idx1 * Dims::HIDDEN_STATES + k_idx3], d3);
+                    scratchpad->output_accum[token_idx1 * Dims::HIDDEN_STATES + k_idx3] += d3;
                 }
             }
         }
@@ -401,49 +413,132 @@ __device__ static void moe_down_projection_sequential(
 {
     using CoreDims = MoECoreDims<Dims>;
 
-    // Note: We use __syncthreads() for block-wide synchronization instead of
-    // cuda::pipeline because each thread has its own pipeline instance and
-    // cross-warp synchronization requires thread_scope_block.
+    // Double-buffered expert/pair-tile pipeline:
+    // - Prefetch warps stage (t, w, scale) into buffer_next while calc warps
+    //   compute buffer_curr.
+    // - This is most impactful for BS=1/2 where expert tiles are tiny and
+    //   prefetch latency dominates.
 
-    // Process each expert sequentially
-    for (std::uint32_t expert_ref_idx = 0; expert_ref_idx < shm->expert_count; ++expert_ref_idx) {
-        ExpertRef& expert_ref = shm->experts[expert_ref_idx];
-        std::uint32_t expert_id = expert_ref.id;
-        std::uint32_t first_pair = expert_ref.first_token;
-        std::uint32_t last_pair = expert_ref.last_token;
+    if (shm->expert_count == 0) {
+        return;
+    }
 
-        // Process pairs in chunks of T_TILE
-        for (std::uint32_t pair_offset = first_pair; pair_offset < last_pair; pair_offset += CoreDims::T_TILE) {
-            const std::uint16_t* pair_indices = &shm->token_indexes[pair_offset];
-            std::uint32_t num_valid_tokens = min((std::uint32_t)CoreDims::T_TILE, last_pair - pair_offset);
+    // State for the flattened (expert_ref_idx, pair_offset) iterator.
+    std::uint32_t curr_expert_ref_idx = 0;
+    ExpertRef curr_expert = shm->experts[curr_expert_ref_idx];
+    std::uint32_t curr_expert_id = curr_expert.id;
+    std::uint32_t curr_pair_offset = curr_expert.first_token;
+    std::uint32_t curr_last_pair = curr_expert.last_token;
 
-            // Prefetch warps load data using cp.async
-            if (is_prefetch_warp<Dims>()) {
-                cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();
-                pipeline.producer_acquire();
-                moe_request_down_activations(scratchpad, shm, pipeline, pair_indices, 0, num_valid_tokens);
-                moe_request_down_expert(expert_weights_down, expert_scales_down, shm, pipeline,
-                                        expert_id, k_offset, 0);
-                pipeline.producer_commit();
-                // Wait for our own async copies to complete
-                cuda::pipeline_consumer_wait_prior<0>(pipeline);
+    const std::uint16_t* curr_pair_indices = &shm->token_indexes[curr_pair_offset];
+    std::uint32_t curr_num_valid =
+        min((std::uint32_t)CoreDims::T_TILE, curr_last_pair - curr_pair_offset);
+
+    // Double buffer indices.
+    std::uint32_t buffer_curr = 0;
+    std::uint32_t buffer_next = 1;
+
+    // Per-thread pipeline (only used by prefetch warps).
+    cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();
+
+    // Prefetch first tile into buffer_curr.
+    if (is_prefetch_warp<Dims>()) {
+        pipeline.producer_acquire();
+        moe_request_down_activations(
+            scratchpad, shm, pipeline, curr_pair_indices, buffer_curr, curr_num_valid);
+        moe_request_down_expert(
+            expert_weights_down,
+            expert_scales_down,
+            shm,
+            pipeline,
+            curr_expert_id,cod
+            k_offset,
+            buffer_curr);
+        pipeline.producer_commit();
+        cuda::pipeline_consumer_wait_prior<0>(pipeline);
+    }
+    __syncthreads();
+
+    while (true) {
+        // Compute next tile info (flattened across experts, then pairs).
+        bool has_next = false;
+        std::uint32_t next_expert_ref_idx = curr_expert_ref_idx;
+        std::uint32_t next_expert_id = 0;
+        std::uint32_t next_pair_offset = 0;
+        std::uint32_t next_last_pair = 0;
+        const std::uint16_t* next_pair_indices = nullptr;
+        std::uint32_t next_num_valid = 0;
+
+        // Next pair tile within the same expert, otherwise advance to next expert.
+        if (curr_pair_offset + CoreDims::T_TILE < curr_last_pair) {
+            next_pair_offset = curr_pair_offset + CoreDims::T_TILE;
+            next_last_pair = curr_last_pair;
+            next_expert_id = curr_expert_id;
+            has_next = true;
+        } else {
+            next_expert_ref_idx = curr_expert_ref_idx + 1;
+            if (next_expert_ref_idx < shm->expert_count) {
+                ExpertRef next_expert = shm->experts[next_expert_ref_idx];
+                next_expert_id = next_expert.id;
+                next_pair_offset = next_expert.first_token;
+                next_last_pair = next_expert.last_token;
+                has_next = true;
             }
-
-            // Block-wide sync ensures all data is in shared memory
-            __syncthreads();
-
-            // Compute warps perform Tensor Core GEMM
-            if (is_calc_warp<Dims>()) {
-                moe_down_gemm_tile_tc<Dims>(shm, 0);
-            }
-
-            __syncthreads();
-
-            // Accumulate to FP32 output buffer
-            moe_down_accumulate_tc<Dims>(shm, scratchpad, pair_indices, k_offset, num_valid_tokens);
-
-            __syncthreads();
         }
+
+        if (has_next) {
+            next_pair_indices = &shm->token_indexes[next_pair_offset];
+            next_num_valid =
+                min((std::uint32_t)CoreDims::T_TILE, next_last_pair - next_pair_offset);
+        }
+
+        // Prefetch next tile while computing current.
+        if (has_next && is_prefetch_warp<Dims>()) {
+            pipeline.producer_acquire();
+            moe_request_down_activations(
+                scratchpad,
+                shm,
+                pipeline,
+                next_pair_indices,
+                buffer_next,
+                next_num_valid);
+            moe_request_down_expert(
+                expert_weights_down,
+                expert_scales_down,
+                shm,
+                pipeline,
+                next_expert_id,
+                k_offset,
+                buffer_next);
+            pipeline.producer_commit();
+            cuda::pipeline_consumer_wait_prior<0>(pipeline);
+        }
+
+        if (is_calc_warp<Dims>()) {
+            moe_down_gemm_tile_tc<Dims>(shm, buffer_curr);
+        }
+
+        __syncthreads();
+
+        moe_down_accumulate_tc<Dims>(
+            shm, scratchpad, curr_pair_indices, k_offset, curr_num_valid);
+
+        __syncthreads();
+
+        if (!has_next) {
+            break;
+        }
+
+        // Advance.
+        curr_expert_ref_idx = next_expert_ref_idx;
+        curr_expert_id = next_expert_id;
+        curr_pair_offset = next_pair_offset;
+        curr_last_pair = next_last_pair;
+        curr_pair_indices = next_pair_indices;
+        curr_num_valid = next_num_valid;
+
+        buffer_curr ^= 1;
+        buffer_next ^= 1;
     }
 }
 
@@ -473,7 +568,7 @@ __device__ void moe_down_projection_topk(
 {
     using CoreDims = MoECoreDims<Dims>;
 
-    // K offset for this block
+    // K offset for this block.
     std::uint32_t k_offset = blockIdx.x * CoreDims::W_DOWN_TILE;
 
     // Use sequential Tensor Core down-projection

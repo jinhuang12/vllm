@@ -240,6 +240,22 @@ __global__ void moe_kernel(
 
         // Store total pairs
         set_total_pairs<Dims>(batch_size, shm);
+
+        // Store routing results to scratchpad for broadcast to all blocks
+        // This allows all blocks to load routing data after grid.sync() instead of recomputing
+        const std::uint32_t total_pairs = batch_size * Dims::TOP_K;
+        for (std::uint32_t i = threadIdx.x; i < total_pairs; i += blockDim.x) {
+            scratchpad->routing_topk_ids[i] = shm->topk_ids[i];
+            scratchpad->routing_token_indexes[i] = shm->token_indexes[i];
+            scratchpad->routing_topk_weights[i] = shm->topk_weights[i];
+        }
+        for (std::uint32_t i = threadIdx.x; i < shm->expert_count; i += blockDim.x) {
+            scratchpad->routing_experts[i] = shm->experts[i];
+        }
+        if (threadIdx.x == 0) {
+            scratchpad->routing_expert_count = shm->expert_count;
+            scratchpad->routing_total_pairs = shm->total_pairs;
+        }
     }
 
     // ========================================================================
@@ -269,11 +285,24 @@ __global__ void moe_kernel(
     // ========================================================================
     // Phase 3: Up-projection (all blocks need routing data)
     // ========================================================================
-    // Re-compute routing data in each block (cheaper than global memory broadcast)
-    topk_route<Dims>(router_logits, batch_size, shm);
-    __syncthreads();
-
-    prepare_moe<Dims>(batch_size, shm);
+    // Load routing data from scratchpad (computed once by block 0 in Phase 1)
+    // This avoids recomputing routing 128x (once per block) - major performance fix
+    {
+        const std::uint32_t total_pairs = batch_size * Dims::TOP_K;
+        for (std::uint32_t i = threadIdx.x; i < total_pairs; i += blockDim.x) {
+            shm->topk_ids[i] = scratchpad->routing_topk_ids[i];
+            shm->token_indexes[i] = scratchpad->routing_token_indexes[i];
+            shm->topk_weights[i] = scratchpad->routing_topk_weights[i];
+        }
+        const std::uint32_t expert_count = scratchpad->routing_expert_count;
+        for (std::uint32_t i = threadIdx.x; i < expert_count; i += blockDim.x) {
+            shm->experts[i] = scratchpad->routing_experts[i];
+        }
+        if (threadIdx.x == 0) {
+            shm->expert_count = expert_count;
+            shm->total_pairs = scratchpad->routing_total_pairs;
+        }
+    }
     __syncthreads();
 
     // ========================================================================

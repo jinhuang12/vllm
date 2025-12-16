@@ -16,17 +16,6 @@
 namespace moe_monokernel {
 
 /**
- * @brief Computes the sigmoid activation function for a given input.
- *
- * @param x The input value.
- * @return The sigmoid of the input value.
- */
-__device__ static inline float sigmoid(float x)
-{
-    return 1.0f / (1.0f + std::exp(-x));
-}
-
-/**
  * @brief Computes softmax over TOP_K values and stores normalized weights
  *
  * @param values Array of TOP_K values
@@ -92,69 +81,109 @@ __device__ static inline bool insert_topk(
 }
 
 /**
- * @brief Selects the top-8 experts for each of up to 64 tokens based on router logits.
+ * @brief Warp-parallel top-k routing (E=128, TOP_K=8).
  *
- * This device function processes a batch of up to 64 tokens, each with up to 128 experts.
- * It takes as input a pointer to the router logits (in bfloat16 format) and determines,
- * for each token, the 8 experts with the highest routing scores.
- *
- * The routing weights are normalized using softmax over the top-8 values.
- *
- * The selection is done on each CUDA block redundantly such that the result can be placed in shared memory.
- *
- * @param router_logits Pointer to the input router logits array of shape [num_tokens, experts] in row-major order.
- *                      Individual elements are in __nv_bfloat16 format.
- * @param num_tokens Number of tokens
- * @param shmem Shared Memory struct to store the result to.
+ * Each warp processes one token at a time:
+ * - Each lane loads 4 logits (128 / 32 = 4)
+ * - Iteratively selects the global max 8 times using warp reductions
+ * - Computes softmax over the selected 8 logits
  */
 template <typename Dims>
-__device__ static void top8_BS64(const __nv_bfloat16 *__restrict__ router_logits,
-                uint32_t num_tokens,
-                MoE_SHM<Dims>* shmem)
+__device__ static void top8_warp_parallel(
+    const __nv_bfloat16* __restrict__ router_logits,
+    uint32_t num_tokens,
+    MoE_SHM<Dims>* __restrict__ shmem)
 {
     static_assert(Dims::TOP_K == 8, "This function is only for top-k=8 routing");
-    static_assert(Dims::BS <= 64, "Dispatch to incorrect implementation");
-    static_assert(Dims::BS * Dims::NUM_EXPERTS < UINT32_MAX, "Batch size or number of experts too high for uint32 indices.");
+    static_assert(Dims::NUM_EXPERTS == 128, "This implementation assumes E=128.");
 
-    constexpr uint32_t TOP_K = 8;
-    uint32_t thread_idx = threadIdx.x;
+    using CoreDims = MoECoreDims<Dims>;
 
-    // Each thread processes exactly one token (1:1 mapping)
-    // Only threads with thread_idx < num_tokens do work
-    if (thread_idx < num_tokens) {
-        uint32_t tokidx = thread_idx;
+    constexpr uint32_t TOP_K = Dims::TOP_K;
+    constexpr uint32_t VALUES_PER_LANE = Dims::NUM_EXPERTS / CoreDims::THREADS_PER_WARP;  // 4
+    static_assert(VALUES_PER_LANE == 4, "Unexpected values per lane");
 
-        // Initialize top-k tracking arrays (in registers)
-        float topk_values[TOP_K];
-        uint32_t topk_indices[TOP_K];
+    const uint32_t lane = get_thread<Dims>();
+    const uint32_t warp = get_any_warp<Dims>();
+
+    // One warp per token, striding by total warps in the block (calc + prefetch).
+    for (uint32_t tokidx = warp; tokidx < num_tokens;
+         tokidx += CoreDims::TOTAL_WARP_COUNT) {
+        float local_vals[VALUES_PER_LANE];
+        uint32_t local_idxs[VALUES_PER_LANE];
 
         #pragma unroll
-        for (uint32_t i = 0; i < TOP_K; ++i) {
-            topk_values[i] = -FLT_MAX;
-            topk_indices[i] = 0;
+        for (uint32_t i = 0; i < VALUES_PER_LANE; ++i) {
+            uint32_t expert = lane * VALUES_PER_LANE + i;
+            local_idxs[i] = expert;
+            local_vals[i] = (float)router_logits[tokidx * Dims::NUM_EXPERTS + expert];
         }
 
-        // Scan all experts for this token
-        for (uint32_t idx = 0; idx < Dims::NUM_EXPERTS; idx++) {
-            uint32_t index = tokidx * Dims::NUM_EXPERTS + idx;
-            float value = (float)router_logits[index];
-
-            // Insert into top-k if value is large enough
-            insert_topk<TOP_K>(topk_values, topk_indices, value, idx);
-        }
-
-        // Compute softmax over top-8 values
-        float weights[TOP_K];
-        softmax_topk<Dims>(topk_values, weights);
-
-        // Store results for this token
-        // Layout: [token_0_expert_0, token_0_expert_1, ..., token_0_expert_7, token_1_expert_0, ...]
-        uint32_t base_idx = tokidx * TOP_K;
+        // Lane 0 will write results for this token.
+        float topk_vals[TOP_K];
+        uint32_t topk_idxs[TOP_K];
 
         #pragma unroll
         for (uint32_t k = 0; k < TOP_K; ++k) {
-            shmem->topk_ids[base_idx + k] = (uint8_t)topk_indices[k];
-            shmem->topk_weights[base_idx + k] = weights[k];
+            // Select the best remaining value in this lane (4 candidates).
+            float best = local_vals[0];
+            uint32_t best_idx = local_idxs[0];
+            uint32_t best_pos = 0;
+
+            #pragma unroll
+            for (uint32_t i = 1; i < VALUES_PER_LANE; ++i) {
+                float v = local_vals[i];
+                if (v > best) {
+                    best = v;
+                    best_idx = local_idxs[i];
+                    best_pos = i;
+                }
+            }
+
+            // Warp reduce (max) to find the best expert among all 128.
+            float warp_best = best;
+            uint32_t warp_best_idx = best_idx;
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                float other = __shfl_down_sync(0xFFFFFFFF, warp_best, offset);
+                uint32_t other_idx =
+                    __shfl_down_sync(0xFFFFFFFF, warp_best_idx, offset);
+                if (other > warp_best) {
+                    warp_best = other;
+                    warp_best_idx = other_idx;
+                }
+            }
+
+            float global_best =
+                __shfl_sync(0xFFFFFFFF, warp_best, 0 /*srcLane*/);
+            uint32_t global_best_idx =
+                __shfl_sync(0xFFFFFFFF, warp_best_idx, 0 /*srcLane*/);
+
+            if (lane == 0) {
+                topk_vals[k] = global_best;
+                topk_idxs[k] = global_best_idx;
+            }
+
+            // Remove selected expert from the lane that owns it.
+            #pragma unroll
+            for (uint32_t i = 0; i < VALUES_PER_LANE; ++i) {
+                if (local_idxs[i] == global_best_idx) {
+                    local_vals[i] = -FLT_MAX;
+                }
+            }
+        }
+
+        if (lane == 0) {
+            float weights[TOP_K];
+            softmax_topk<Dims>(topk_vals, weights);
+
+            uint32_t base_idx = tokidx * TOP_K;
+            #pragma unroll
+            for (uint32_t k = 0; k < TOP_K; ++k) {
+                shmem->topk_ids[base_idx + k] =
+                    static_cast<uint8_t>(topk_idxs[k]);
+                shmem->topk_weights[base_idx + k] = weights[k];
+            }
         }
     }
 }
@@ -171,17 +200,7 @@ __device__ __forceinline__ void topk_route(const __nv_bfloat16 *__restrict__ rou
                 MoE_SHM<Dims>* shmem)
 {
     static_assert(Dims::TOP_K == 8, "This implementation is for top-k=8");
-
-    // Only calc warps (threads 0-255) should execute routing
-    // Prefetch warps would trigger assertion in get_calc_warp()
-    if (!is_calc_warp<Dims>()) {
-        return;
-    }
-
-    // Always use BS64 variant - it works with any CALC_WARP_COUNT
-    // The BS8 variant assumes 8 calc warps (warp-per-token), which doesn't work
-    // when benchmarking with fewer calc warps (e.g., 4c4p config)
-    top8_BS64(router_logits, num_tokens, shmem);
+    top8_warp_parallel<Dims>(router_logits, num_tokens, shmem);
 }
 
 // Store total number of pairs for this batch

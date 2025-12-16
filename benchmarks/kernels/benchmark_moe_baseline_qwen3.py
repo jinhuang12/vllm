@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.platforms import current_platform
 
 FP8_DTYPE = current_platform.fp8_dtype()
-`   `
+
 
 def create_test_tensors(
     batch_size: int,
