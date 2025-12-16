@@ -23,6 +23,26 @@ Monokernel optimization is beneficial when:
 | FP16 | 2 bytes | mma.f32.f16.f16 | Legacy compatibility |
 | MXFP4 | 0.5 bytes | Experimental | Future support |
 
+## Supported Models
+
+Reference implementations exist for these model architectures:
+
+| Model | top_k | Hardware | Quantization | Key Patterns |
+|-------|-------|----------|--------------|--------------|
+| **Llama-4-Scout** | 1 | H100 (sm_90a) | Per-tensor FP8 | Direct write, TMA prefetch |
+| **Qwen3-Coder-30B-A3B** | 8 | L40S (sm_89) | 128×128 block FP8 | FP32 accumulator, Split-H, cp.async |
+
+**Pattern Comparison**: See [examples/MODELS_COMPARISON.md](examples/MODELS_COMPARISON.md) for detailed code snippets showing:
+- Top-K routing (single vs multi-expert)
+- Output accumulation (direct write vs atomicAdd)
+- Scale loading (per-tensor vs block quantization)
+- MMA instruction selection
+- Split-H optimization for small batches
+
+**Future Support Prepared**:
+- DeepSeek (shared experts): Decision D patterns documented
+- Mixtral/standard MoE: Covered by existing Decision A/C branching
+
 ## Environment Requirement
 
 This skill uses **Task subagents** for parallel execution. The Task tool is only available in **Claude Code CLI/IDE** environments.
@@ -159,12 +179,13 @@ Location: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/state.json`
 
 | Document | Purpose |
 |----------|---------|
-| [algorithmic-branching.md](references/algorithmic-branching.md) | Decisions A-F: output path, sorter, weight timing, shared experts, kernel arch, GEMM strategy |
+| [MODELS_COMPARISON.md](examples/MODELS_COMPARISON.md) | Detailed code snippets comparing Llama 4 vs Qwen3 patterns |
+| [algorithmic-branching.md](references/algorithmic-branching.md) | Decisions A-G: output path, sorter, weight timing, shared experts, kernel arch, GEMM strategy, multi-expert accumulation |
 | [gpu-configs.md](references/gpu-configs.md) | Hardware specs, monokernel thresholds, TMA support |
 | [tiling-config.md](references/tiling-config.md) | SRAM Tetris formulas, dtype-aware tile size search |
 | [router-design.md](references/router-design.md) | Top-k selection implementation patterns |
 | [expert-grouping.md](references/expert-grouping.md) | Bitfield vs histogram token sorting |
-| [optimization-techniques.md](references/optimization-techniques.md) | T1-T13 patterns from Llama-4 patch |
+| [optimization-techniques.md](references/optimization-techniques.md) | T1-T14 optimization patterns (includes Split-H for small batches) |
 | [code-templates.md](references/code-templates.md) | C++/Python scaffolds, activation templates, block quant, timing |
 | [architecture-pattern.md](references/architecture-pattern.md) | Controller-worker, split-H latency kernel patterns |
 
@@ -188,23 +209,48 @@ Location: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/state.json`
 | Document | Purpose |
 |----------|---------|
 | [validation/README.md](validation/README.md) | Details on accuracy, benchmarking, profiling verification |
+| [validation/QWEN3_BASELINE.md](validation/QWEN3_BASELINE.md) | Qwen3 FP8 block-quant tolerances and performance targets |
 
 ## Quick Start
+
+### Example 1: Single Expert (top_k=1)
+
+```markdown
+User: "Use moe-monokernel-optimizer for Llama-4-Scout on p5.48xlarge TP=8"
+
+Key Decisions Applied:
+- Decision A: USE_ATOMICS = false (top_k=1 → direct write)
+- Decision C: APPLY_WEIGHT = before_activation (can fold into scale)
+- Decision G: No accumulation needed (single expert per token)
+- Hardware: H100 with TMA prefetch, 132 SMs
+```
+
+### Example 2: Multi Expert (top_k=8)
 
 ```markdown
 User: "Use moe-monokernel-optimizer for Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 on g6e.24xlarge TP=1"
 
+Key Decisions Applied:
+- Decision A: USE_ATOMICS = true (top_k=8 → atomicAdd for accumulation)
+- Decision C: APPLY_WEIGHT = after_activation (MUST apply after SiLU)
+- Decision G: FP32 scratchpad accumulator for 8 expert contributions
+- Hardware: L40S with cp.async (no TMA), 142 SMs, Split-H for BS≤4
+```
+
+### Workflow
+
+```markdown
 Orchestrator:
-1. Reads SKILL.md
-2. Spawns: Task("Phase 1: Gather constraints for Qwen3-Coder-30B-A3B-Instruct-FP8 on L40S...")
-   ⏺ Task(Phase 1...) ⎿ Done (constraints.md created)
+1. Reads SKILL.md, identifies top_k and hardware
+2. Spawns: Task("Phase 1: Gather constraints...")
+   ⏺ Task(Phase 1...) ⎿ Done (constraints.md with top_k, scale type)
 3. Spawns: Task("Phase 2: Create optimization plan...")
-   ⏺ Task(Phase 2...) ⎿ Done (optimization_plan.md created)
+   ⏺ Task(Phase 2...) ⎿ Done (applies Decisions A-G based on top_k)
 4. Spawns implementation stages in sequence:
-   ⏺ Task(router) ⎿ Done
-   ⏺ Task(prepare) ⎿ Done
-   ⏺ Task(up_projection) ⎿ Done
-   ...
+   ⏺ Task(routing_and_prepare) ⎿ Done
+   ⏺ Task(activation_quantization) ⎿ Done
+   ⏺ Task(gemm_implementation) ⎿ Done (includes accumulation strategy)
+   ⏺ Task(kernel_assembly) ⎿ Done
 5. Spawns: Task("Phase 4: Validate correctness and performance...")
    ⏺ Task(Phase 4...) ⎿ Done (validation_results.md created)
 6. Spawns: Task("Phase 5: Integrate into vLLM...")
