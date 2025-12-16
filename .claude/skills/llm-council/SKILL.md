@@ -1,6 +1,6 @@
 ---
 name: llm-council
-description: Use Gemini CLI and Codex CLI as a council of critics to review Claude's proposals, plans, and approaches. Triggers when (1) needing a second opinion on architecture or design decisions, (2) stuck on debugging after 3+ failed attempts, (3) reviewing complex implementation plans before execution, (4) validating assumptions across multiple AI models, (5) completing a major implementation phase before proceeding, (6) before finalizing any optimization plan or CUDA kernel design, (7) after generating significant code that will be committed. Use PROACTIVELY - the 30-60s latency catches issues that would cost hours to debug. Features read-only sandbox, web search verification, session ID tracking for robust resume, and graceful degradation when one CLI is unavailable.
+description: Use Gemini CLI and Codex CLI as a council of critics to review Claude's proposals, plans, and approaches. Triggers when (1) needing a second opinion on architecture or design decisions, (2) stuck on debugging after 3+ failed attempts, (3) reviewing complex implementation plans before execution, (4) validating assumptions across multiple AI models, (5) completing a major implementation phase before proceeding, (6) before finalizing any optimization plan or CUDA kernel design, (7) after generating significant code that will be committed. Use PROACTIVELY - the 30-60s latency catches issues that would cost hours to debug. Features full codebase access (YOLO mode), web search verification, session ID tracking for robust resume, and graceful degradation when one CLI is unavailable.
 ---
 
 # LLM Council
@@ -9,7 +9,7 @@ Consult Gemini and Codex as critics to review your proposals before implementati
 
 ## Features
 
-- **Read-only sandbox**: Critics can read files but cannot modify your codebase
+- **Full codebase access (YOLO mode)**: Critics have unrestricted access to modify files and execute commands
 - **Web search**: Critics can verify technical claims online (Google Search for Gemini, web_search for Codex)
 - **Session ID tracking**: Robust multi-round resume using explicit session IDs (not `--last`)
 - **Graceful degradation**: Continues with available critics if one CLI is unavailable
@@ -122,8 +122,8 @@ fi
 # Basic usage
 gemini "@file @dir/ prompt"           # Include files with @ syntax
 
-# Read-only sandbox with web search (recommended for critics)
-gemini -s --allowed-tools "read_file,list_directory,search_file_content,glob,google_web_search" "prompt"
+# YOLO mode (auto-approve all actions, recommended for critics)
+gemini -y "prompt"
 
 # Session management
 gemini --list-sessions                 # List available sessions
@@ -138,8 +138,8 @@ gemini --resume 5                      # Resume by index
 codex exec "prompt"
 codex exec --output-last-message out.md "prompt"
 
-# Read-only sandbox with web search (recommended for critics)
-codex exec -s read-only --search -C . "prompt"
+# Full access with web search (recommended for critics)
+codex exec --dangerously-bypass-approvals-and-sandbox --search -C . "prompt"
 
 # Session management
 codex exec resume <UUID> "follow-up"   # Resume by session ID (recommended)
@@ -250,14 +250,14 @@ if (warp == 0) {
 # Claude should programmatically build context.md with ALL session history
 
 # 2. Run critics with full file context
-gemini -p \
+gemini -y \
   "@.llm-council/critic_prompt.md \
    @.llm-council/context.md \
    You are Anonymous Critic #1. Review the proposal." \
   > .llm-council/tmp/critic_1.md 2>&1 &
 PID1=$!
 
-codex exec -C . \
+codex exec --dangerously-bypass-approvals-and-sandbox --search -C . \
   "$(cat .llm-council/critic_prompt.md)
 
 $(cat .llm-council/context.md)
@@ -350,12 +350,12 @@ bash scripts/run_deliberation.sh 3 3
 
 1. **CLI availability check**: Verifies Gemini and Codex are installed and functional
 2. **Critic #1 (Gemini)**:
-   - Read-only sandbox with web search enabled
+   - Web search enabled
    - Round 1: Fresh session, captures session ID for future rounds
    - Round 2+: Resumes via explicit session ID (`--resume <UUID>`)
 3. **Append to history**: Critic #1's feedback added to `history.md` before Critic #2 runs
 4. **Critic #2 (Codex)**:
-   - Read-only sandbox with web search enabled
+   - Web search enabled
    - Round 1: Fresh session, captures session ID from `~/.codex/sessions/`
    - Round 2+: Resumes via explicit session ID (`codex exec resume <UUID>`)
 5. **Graceful degradation**: If one CLI is unavailable, continues with available critic
@@ -383,9 +383,8 @@ This ensures the correct session is resumed even when running multiple deliberat
 
 | CLI | Flags | Purpose |
 |-----|-------|---------|
-| **Gemini** | `-s` | Sandbox mode |
-| **Gemini** | `--allowed-tools` | Whitelist: read_file, list_directory, search_file_content, glob, google_web_search |
-| **Codex** | `-s read-only` | Read-only sandbox |
+| **Gemini** | `-y` | YOLO mode (auto-approve all actions) |
+| **Codex** | `--dangerously-bypass-approvals-and-sandbox` | Skip approvals and sandbox |
 | **Codex** | `--search` | Enable web search |
 | **Codex** | `-C .` | Set working directory |
 
@@ -395,7 +394,7 @@ If you need more control than the script provides:
 
 ```bash
 # Round 1, Critic 1
-gemini -p \
+gemini -y \
   "@.llm-council/critic_prompt.md \
    @.llm-council/context.md \
    You are Critic #1. Round 1. Review the proposal." \
@@ -408,7 +407,7 @@ $(cat .llm-council/tmp/critic_1_r1.md)
 EOF
 
 # Round 1, Critic 2 (sees Critic 1's feedback in history)
-codex exec -C . \
+codex exec --dangerously-bypass-approvals-and-sandbox --search -C . \
   "$(cat .llm-council/critic_prompt.md)
 $(cat .llm-council/context.md)
 $(cat .llm-council/history.md)
@@ -426,7 +425,7 @@ For Round 2+, Codex uses `resume --last` to maintain conversation state:
 
 ```bash
 # Round 2, Critic 2 (resume session)
-codex exec resume --last \
+codex exec resume --last --dangerously-bypass-approvals-and-sandbox --search \
   "Round 2. Critic #1's new feedback: $(cat .llm-council/tmp/critic_1_r2.md)
    Review the updated proposal." \
   --output-last-message .llm-council/tmp/critic_2_r2.md
@@ -452,7 +451,7 @@ for f in .llm-council/critic_prompt.md .llm-council/context.md .llm-council/hist
 done
 
 # Test that Gemini can read the files (dry run)
-gemini -p \
+gemini -y \
   "@.llm-council/context.md \
    Confirm you received the context. List the section headers you see." \
   > .llm-council/tmp/gemini_context_check.md 2>&1
@@ -468,7 +467,8 @@ cat .llm-council/tmp/gemini_context_check.md
 ls -la ~/.codex/sessions/ | tail -10
 
 # Verify session was created after Round 1
-codex exec resume --last "What was the proposal you reviewed in Round 1? Summarize briefly." \
+codex exec resume --last --dangerously-bypass-approvals-and-sandbox --search \
+  "What was the proposal you reviewed in Round 1? Summarize briefly." \
   --output-last-message .llm-council/tmp/codex_session_check.md
 cat .llm-council/tmp/codex_session_check.md
 ```

@@ -13,7 +13,7 @@
 #
 # Features:
 #   - Graceful degradation: continues with available critics if one fails
-#   - Read-only sandbox: critics cannot modify files
+#   - Full access (YOLO mode): critics have unrestricted access to codebase
 #   - Web search: critics can verify claims online
 #   - Session ID tracking: robust resume by explicit session ID
 #
@@ -192,15 +192,15 @@ VOTE_2="VOTE: SKIPPED"
 # ══════════════════════════════════════════════════════════════════════════════
 # CRITIC 1: Gemini
 # ══════════════════════════════════════════════════════════════════════════════
-# Gemini: read-only sandbox with web search, session resume by ID for Round 2+
+# Gemini: full access (YOLO mode) with web search, session resume by ID for Round 2+
 CRITIC_1_OUTPUT="$COUNCIL_DIR/tmp/critic_1_r${ROUND}.md"
 
 if [ "$GEMINI_AVAILABLE" = true ]; then
     echo "[Round $ROUND] Running Critic #1 (Gemini)..."
-    echo "  Mode: read-only sandbox + web search"
+    echo "  Mode: full access (YOLO) + web search"
 
-    # Common Gemini flags for read-only access with web search
-    GEMINI_FLAGS="-s --allowed-tools read_file,list_directory,search_file_content,glob,google_web_search"
+    # Common Gemini flags for YOLO mode (auto-approve all actions)
+    GEMINI_FLAGS="-y"
 
     if [ "$ROUND" -eq 1 ]; then
         echo "  Session: Fresh (Round 1)"
@@ -275,15 +275,15 @@ echo ""
 # ══════════════════════════════════════════════════════════════════════════════
 # CRITIC 2: Codex
 # ══════════════════════════════════════════════════════════════════════════════
-# Codex: read-only sandbox with web search, session resume by ID for Round 2+
+# Codex: full access with web search, session resume by ID for Round 2+
 CRITIC_2_OUTPUT="$COUNCIL_DIR/tmp/critic_2_r${ROUND}.md"
 
 if [ "$CODEX_AVAILABLE" = true ]; then
     echo "[Round $ROUND] Running Critic #2 (Codex)..."
-    echo "  Mode: read-only sandbox + web search"
+    echo "  Mode: full access + web search"
 
-    # Common Codex flags for read-only access with web search
-    CODEX_FLAGS="-s read-only --search -C ."
+    # Common Codex flags for full access (dangerously bypass approvals and sandbox)
+    CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox --search -C ."
 
     if [ "$ROUND" -eq 1 ]; then
         echo "  Session: Fresh (Round 1)"

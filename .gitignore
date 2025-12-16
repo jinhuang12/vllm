@@ -181,12 +181,14 @@ cython_debug/
 .vscode/
 
 # Claude
-CLAUDE.md
-.claude/
+# CLAUDE.md
+.claude/plans/
+.claude/commands/
+.claude/settings.local.json
 
 # Codex
-AGENTS.md
-.codex/
+# AGENTS.md
+# .codex/
 
 # DS Store
 .DS_Store

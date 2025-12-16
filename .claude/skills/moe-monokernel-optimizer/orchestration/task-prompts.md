@@ -32,6 +32,24 @@ Append to ALL task prompts:
    - Exit with status "blocked"
 5. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
 
+**LLM Council Consultation**:
+You have access to the `llm-council` skill for getting second opinions from Gemini and Codex.
+
+**Invoke llm-council when**:
+- You're uncertain about the correct approach (proactive consultation)
+- You've tried 2+ approaches and none work (stuck detection)
+- You're about to implement complex MMA loops (high-risk verification)
+- Your implementation diverges significantly from the optimization plan (drift detection)
+
+**How to invoke**:
+```
+"Invoke llm-council to review {topic}.
+Context: {what you're trying to do}
+Questions: {specific concerns}"
+```
+
+**Bias toward consultation**: A 10-minute council review is cheaper than hours debugging a flawed approach. When in doubt, consult.
+
 **Context Preservation**:
 - Current phase: {current_phase}
 - Completed stages: {completed_stages}

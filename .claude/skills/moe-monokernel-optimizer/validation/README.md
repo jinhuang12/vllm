@@ -4,9 +4,10 @@ Validation scripts are located in the vLLM repository, not in this skill directo
 
 ## Script Locations
 
-All validation scripts should be in:
+Validation scripts are located in:
 ```
-{vllm_repo}/benchmarks/kernels/
+Test scripts:      {vllm_repo}/tests/kernels/moe/
+Benchmark scripts: {vllm_repo}/benchmarks/kernels/
 ```
 
 ## Required Scripts
@@ -106,7 +107,7 @@ print('Kernel loaded successfully')
 
 ### Full Correctness Test
 ```bash
-pytest benchmarks/kernels/test_moe_monokernel_{model}.py -v
+pytest tests/kernels/moe/test_moe_monokernel_{model}.py -v
 ```
 
 ### Performance Benchmark

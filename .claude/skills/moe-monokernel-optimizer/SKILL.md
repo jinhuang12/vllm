@@ -51,6 +51,46 @@ This skill uses **Task subagents** for parallel execution. The Task tool is only
 
 **If Task unavailable**: The orchestrator will implement phases sequentially (suboptimal but functional).
 
+## LLM Council Integration
+
+**IMPORTANT**: Use the `llm-council` skill proactively. The ~10 minute latency catches issues that would cost hours to debug.
+
+### When to Invoke llm-council
+
+Invoke llm-council skill when ANY of these occur:
+
+| Trigger | Detection | Action |
+|---------|-----------|--------|
+| Phase checkpoint | After Phase 1, 2, or 4 completion | Review constraints/plan/results |
+| Stage blocked | Task exits with "blocked" status | Escalation per failure-handling.md |
+| TODO/FIXME in code | Stage produces incomplete code | Shortcut detection |
+| Plan drift | Implementation diverges >20% from optimization_plan.md | Drift detection |
+| Persistent compile error | Same error after 2 orchestrator retries | Stuck detection |
+| Orchestrator uncertainty | Unsure about correct approach | Proactive consultation |
+
+**Bias toward consultation**: When in doubt, invoke the council. A 10-minute council review is cheaper than hours debugging a flawed implementation.
+
+### High-Risk Stages (Pre-Implementation Review)
+
+For these stages, invoke llm-council BEFORE implementation to review the approach:
+
+| Stage | Risk Factor | Council Review Focus |
+|-------|-------------|---------------------|
+| `gemm_implementation` | Most complex: triple buffering, MMA loops, K-chunking | Verify tile sizes, buffer strategy, MMA instruction selection |
+| Down-projection (top_k > 1) | Atomic contention with multi-expert accumulation | Review accumulation strategy, Split-H decision |
+
+This front-loads expert review rather than waiting for failures.
+
+### Council Invocation Template
+
+```
+"Invoke llm-council to review {topic} for {model} on {hardware}.
+Context: {brief description of current state}
+Questions: {specific concerns or decision points}"
+```
+
+See [orchestration/workflow.md](orchestration/workflow.md) for detailed templates and [orchestration/failure-handling.md](orchestration/failure-handling.md) for the 6-level escalation ladder.
+
 ## 5-Phase Workflow
 
 ### Phase 1: Gather Constraints (with vLLM Code Analysis)
@@ -104,7 +144,7 @@ Solve SRAM Tetris for tile sizes. See [references/tiling-config.md](references/t
 
 ### Phase 3: Implementation (4 Stages)
 
-Phase 3 is structured into **4 stages** (not 6) to keep GEMM work together:
+Phase 3 is structured into **4 stages** to keep GEMM work together:
 
 | Stage | Components | Rationale |
 |-------|------------|-----------|
