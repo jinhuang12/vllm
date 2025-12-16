@@ -459,7 +459,7 @@ Task("Implement routing and token preparation for {model_short} monokernel.
 - `references/router-design.md`
 - `references/expert-grouping.md` - **note the Decision F cross-reference**
 - `references/algorithmic-branching.md` - Decision F (GEMM strategy)
-- `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe_routing.cu' and 'moe_prepare.cu'
+- `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md` - search for 'moe_routing.cu' and 'moe_prepare.cu'
 
 **Objective**: Implement top-k routing AND token-by-expert sorting in one cohesive unit.
 
@@ -528,7 +528,7 @@ If weight_dtype is BF16/FP16, this stage can be minimal (just copy activations).
 **Read First**:
 - `{artifact_dir}/constraints.md` - check Data Types section
 - `{artifact_dir}/optimization_plan.md`
-- `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe_scale_inputs.cu'
+- `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md` - search for 'moe_scale_inputs.cu'
 
 **Implementation**:
 1. Create `{cuda_dir}/moe_scale_inputs.cu`
@@ -565,7 +565,7 @@ They share the same MMA infrastructure - implement common helpers once, apply to
 2. `{artifact_dir}/constraints.md` - dimensions, dtype
 3. `references/code-templates.md` - MMA templates section (FP8 AND BF16)
 4. `references/tiling-config.md` - SMEM layout
-5. `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe_up_projection.cu', 'moe_down_projection.cu'
+5. `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md`  - search for 'moe_up_projection.cu', 'moe_down_projection.cu'
 
 **Key Configuration**:
 - weight_dtype: {fp8/bf16/fp16}
@@ -729,7 +729,7 @@ Task("Assemble main kernel and output conversion for {model_short} monokernel.
 **Read First**:
 - `{artifact_dir}/optimization_plan.md`
 - `{cuda_dir}/moe_*.cu` - all previously implemented stages
-- `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe.cu' (main kernel)
+- `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md` - search for 'moe.cu' (main kernel)
 
 **Objective**: Wire all stages together into the main cooperative kernel.
 

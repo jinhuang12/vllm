@@ -43,14 +43,6 @@ Reference implementations exist for these model architectures:
 - DeepSeek (shared experts): Decision D patterns documented
 - Mixtral/standard MoE: Covered by existing Decision A/C branching
 
-## Environment Requirement
-
-This skill uses **Task subagents** for parallel execution. The Task tool is only available in **Claude Code CLI/IDE** environments.
-
-**To verify**: Check if `Task(...)` appears in your available tools.
-
-**If Task unavailable**: The orchestrator will implement phases sequentially (suboptimal but functional).
-
 ## LLM Council Integration
 
 **IMPORTANT**: Use the `llm-council` skill proactively. The ~10 minute latency catches issues that would cost hours to debug.
@@ -91,60 +83,138 @@ Questions: {specific concerns or decision points}"
 
 See [orchestration/workflow.md](orchestration/workflow.md) for detailed templates and [orchestration/failure-handling.md](orchestration/failure-handling.md) for the 6-level escalation ladder.
 
+## Execution Model: Orchestrator + Task Subagents
+
+**CRITICAL**: This skill uses a **strict orchestrator/subagent separation**. The orchestrator (you, the main Claude instance) MUST NOT implement phases directly. Instead, you coordinate by spawning Task subagents.
+
+### Orchestrator Role (YOU)
+
+You are the **orchestrator**. Your responsibilities:
+- Read this skill and understand the workflow
+- Create/load the state file
+- Spawn Task subagents for each phase using `Task("...")`
+- Update state based on Task outcomes
+- Handle failures per `orchestration/failure-handling.md`
+
+**YOU DO NOT**:
+- Write CUDA code directly
+- Implement any phase yourself
+- Skip Task spawning "for efficiency"
+- Paraphrase or summarize the task prompts
+
+### How to Spawn a Task
+
+Use the `Task` tool to spawn a subagent:
+
+```
+Task("Phase 1: Gather MoE monokernel constraints for Qwen/Qwen3-30B-A3B-FP8 on L40S with TP=1.
+
+**Ultimate Goal**: Successfully integrate optimized MoE monokernel...
+
+[Copy FULL task prompt from orchestration/task-prompts.md]
+")
+```
+
+**Alternative phrasings that trigger Task spawning**:
+- "Spawn a task to gather constraints for..."
+- "Delegate to a subagent: Phase 1..."
+- "Use the Task tool to..."
+
+**IMPORTANT**: 
+- Copy the FULL task prompt from `orchestration/task-prompts.md`
+- Fill in the template variables ({model_id}, {hardware}, {tp}, {dtype}, etc.)
+- Wait for Task completion before proceeding
+- Do NOT paraphrase or summarize - subagents need complete context
+
+### State File
+
+Location: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/state.json`
+
+Example for Qwen3-30B-A3B-FP8 on L40S with TP=1:
+`moe_monokernel_artifacts/qwen3-30b-a3b_l40s_fp8_tp1/state.json`
+
+```json
+{
+  "version": "1.0",
+  "model_id": "Qwen/Qwen3-30B-A3B-FP8",
+  "model_short": "qwen3-30b-a3b",
+  "hardware": "L40S",
+  "dtype": "fp8",
+  "tp": 1,
+  "artifact_dir": "moe_monokernel_artifacts/qwen3-30b-a3b_l40s_fp8_tp1",
+  "cuda_dir": "csrc/moe/moe_monokernel_qwen3-30b-a3b_l40s_fp8_tp1",
+  "phases": {
+    "1_constraints": {"status": "complete"},
+    "2_planning": {"status": "complete"},
+    "3_implementation": {
+      "status": "in_progress",
+      "current_stage": "up_projection",
+      "stages": {
+        "router": {"status": "complete"},
+        "prepare": {"status": "complete"},
+        "scale_inputs": {"status": "complete"},
+        "up_projection": {"status": "blocked", "attempts": 3}
+      }
+    }
+  },
+  "constraints": {
+    "K": 2048, "N": 768, "E": 128, "top_k": 8,
+    "num_shared_experts": 0,
+    "smem_limit_kb": 100, "sm_arch": "sm_89",
+    "weight_dtype": "fp8_e4m3", "activation_dtype": "bf16"
+  }
+}
+```
+
 ## 5-Phase Workflow
 
-### Phase 1: Gather Constraints (with vLLM Code Analysis)
+Artifact directory: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/`
+CUDA directory: `csrc/moe/moe_monokernel_{model}_{hardware}_{dtype}_{tp}/`
 
-**NEW**: Phase 1 now analyzes the actual vLLM implementation code for the target model, not just config.json. This catches semantic differences that config parameters don't capture.
+```
+Phase 1: Gather Constraints     → {artifact_dir}/constraints.md
+Phase 2: Optimization Planning  → {artifact_dir}/optimization_plan.md  
+Phase 3: Implementation         → {cuda_dir}/*.cu
+Phase 4: Validation             → {artifact_dir}/validation_results.md
+Phase 5: Integration            → vLLM dispatch path
+```
 
-The task:
-1. Locates the model's MoE implementation in vLLM source
-2. Traces the forward path (routing → expert execution → accumulation)
-3. Compares against Llama 4 reference semantics
-4. Extracts config.json parameters
-5. Synthesizes into constraints document
+### Phase 1: Gather Constraints
 
-**Output**: `{artifact_dir}/constraints.md`
+**Spawn Task** with prompt from `orchestration/task-prompts.md` § Phase 1.
 
-See [orchestration/task-prompts.md](orchestration/task-prompts.md) for full task specification.
+```
+Task: "Phase 1: Gather MoE monokernel constraints for {model_id} on {hardware} with TP={tp}, dtype={dtype}.
+[... full prompt from task-prompts.md ...]"
+```
+
+Collects:
+- Locates the model's MoE implementation in vLLM source
+- Traces the forward path (routing → expert execution → accumulation)
+- Compares against Llama 4 reference semantics
+- Model geometry (K, N, E, top_k, num_shared_experts)
+- Hardware specs from `references/gpu-configs.md`
+- vLLM parallelism (TP, EP)
+- **Data types** (weight_dtype, activation_dtype, scale_format)
 
 ### Phase 2: Optimization Planning
 
-Apply algorithmic branching decisions:
+**Spawn Task** with prompt from `orchestration/task-prompts.md` § Phase 2.
 
-**Decision A: Output Path**
-```
-IF top_k == 1:  USE_ATOMICS = false
-IF top_k > 1:   USE_ATOMICS = true
-```
+Makes decisions:
+- **Decision 0**: Saturation score (from `references/algorithmic-branching.md`)
+- **Decision 1**: Output path (atomics vs direct write)
+- **Decision 2**: Shared expert strategy (from `references/architecture-pattern.md`)
+- **Decision 3**: GEMM Strategy (Per-pair GEMV vs Expert-grouped GEMM)
+- **Decision 4**: SRAM Tetris (from `references/tiling-config.md`) - **dtype affects buffer sizes**
+- **Decision 5**: Warp configuration
+- **Decision 6**: MMA instruction selection (based on dtype)
 
-**Decision B: Sorter Strategy**
-```
-coalesce_size = E_local × dtype_bytes
-TOKENS_PER_WARP = 128 / coalesce_size if < 128 else 1
-```
+### Phase 3: Implementation
 
-**Decision C: Weight Application Order** (CRITICAL for correctness)
-```
-IF top_k == 1:  APPLY_WEIGHT = before_activation  (can fold into scale)
-IF top_k > 1:   APPLY_WEIGHT = after_activation   (MUST apply after SiLU)
-```
+Phase 3 is structured into **4 stages** to keep GEMM work together.
 
-**Decision F: GEMM Strategy** (Per-pair GEMV vs Expert-grouped GEMM)
-```
-λ = (BS_max × top_k) / E
-r_max = λ / (1 - e^{-λ})
-IF r_max >= 2.0:  USE_EXPERT_GROUPING = true   (Grouped-GEMM)
-IF r_max < 2.0:   USE_EXPERT_GROUPING = false  (Per-pair GEMV)
-```
-
-Solve SRAM Tetris for tile sizes. See [references/tiling-config.md](references/tiling-config.md).
-
-**Output**: `{artifact_dir}/optimization_plan.md`
-
-### Phase 3: Implementation (4 Stages)
-
-Phase 3 is structured into **4 stages** to keep GEMM work together:
+**Spawn Task for EACH stage sequentially**. DO NOT implement multiple stages in one Task.
 
 | Stage | Components | Rationale |
 |-------|------------|-----------|
@@ -153,13 +223,12 @@ Phase 3 is structured into **4 stages** to keep GEMM work together:
 | **gemm_implementation** | **up_proj + down_proj** | Share 90% of structure |
 | kernel_assembly | output + main kernel | Wire everything together |
 
-**Critical change**: `up_projection` and `down_projection` are implemented **together** because they share:
-- MMA instruction patterns
-- Warp specialization (8 calc, 4 prefetch)
-- Double-buffering logic
-- K-chunk iteration structure
-
-This prevents the "MMA loop TODO" problem where a task generates infrastructure but runs out of context before completing the compute loops.
+**For each stage**, spawn:
+```
+Task("Phase 3, Stage {stage_name}: Implement {stage_name} for {model} monokernel.
+[COPY FULL prompt from task-prompts.md § Phase 3 → {stage_name}]
+")
+```
 
 **Activation Function Handling**:
 - Common activations (SiLU, GELU, ReLU): Use templates from [references/code-templates.md](references/code-templates.md)
@@ -167,16 +236,12 @@ This prevents the "MMA loop TODO" problem where a task generates infrastructure 
 
 **GEMM Stage Self-Verification**: Tasks must verify no TODOs in MMA loops before completing. See [orchestration/task-prompts.md](orchestration/task-prompts.md).
 
-**Output**: CUDA files in `csrc/moe/moe_monokernel_{config}/`
-
 ### Phase 4: Validation
 
 Compare monokernel output against stock `fused_moe`:
 - Numerical correctness (max diff < 1e-2)
 - Performance benchmarking (MoE layer & end to end) across batch sizes
 - Use [validation/README.md](validation/README.md) for more details
-
-**Output**: `{artifact_dir}/validation_results.md`
 
 ### Phase 5: Integration
 
@@ -186,34 +251,6 @@ Wire monokernel into vLLM:
 - Python wrapper
 - MoE layer fast-path dispatch
 
-**Output**: Git patch and integration instructions
-
-## State File
-
-Location: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/state.json`
-
-```json
-{
-  "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
-  "hardware": "l40s",
-  "dtype": "fp8",
-  "tp": 1,
-  "current_phase": "3_implementation",
-  "phases": {
-    "1_constraints": {"status": "complete"},
-    "2_planning": {"status": "complete"},
-    "3_implementation": {"status": "in_progress"},
-    "4_validation": {"status": "pending"},
-    "5_integration": {"status": "pending"}
-  },
-  "stages": {
-    "routing_and_prepare": {"status": "complete"},
-    "activation_quantization": {"status": "complete"},
-    "gemm_implementation": {"status": "in_progress"},
-    "kernel_assembly": {"status": "pending"}
-  }
-}
-```
 
 ## Reference Materials
 
@@ -257,44 +294,34 @@ Location: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/state.json`
 
 ```markdown
 User: "Use moe-monokernel-optimizer for Llama-4-Scout on p5.48xlarge TP=8"
-
-Key Decisions Applied:
-- Decision A: USE_ATOMICS = false (top_k=1 → direct write)
-- Decision C: APPLY_WEIGHT = before_activation (can fold into scale)
-- Decision G: No accumulation needed (single expert per token)
-- Hardware: H100 with TMA prefetch, 132 SMs
 ```
 
 ### Example 2: Multi Expert (top_k=8)
 
 ```markdown
 User: "Use moe-monokernel-optimizer for Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 on g6e.24xlarge TP=1"
-
-Key Decisions Applied:
-- Decision A: USE_ATOMICS = true (top_k=8 → atomicAdd for accumulation)
-- Decision C: APPLY_WEIGHT = after_activation (MUST apply after SiLU)
-- Decision G: FP32 scratchpad accumulator for 8 expert contributions
-- Hardware: L40S with cp.async (no TMA), 142 SMs, Split-H for BS≤4
 ```
 
-### Workflow
+### Resume
 
-```markdown
+```
+User: "Resume MoE optimization"
 Orchestrator:
-1. Reads SKILL.md, identifies top_k and hardware
-2. Spawns: Task("Phase 1: Gather constraints...")
-   ⏺ Task(Phase 1...) ⎿ Done (constraints.md with top_k, scale type)
-3. Spawns: Task("Phase 2: Create optimization plan...")
-   ⏺ Task(Phase 2...) ⎿ Done (applies Decisions A-G based on top_k)
-4. Spawns implementation stages in sequence:
-   ⏺ Task(routing_and_prepare) ⎿ Done
-   ⏺ Task(activation_quantization) ⎿ Done
-   ⏺ Task(gemm_implementation) ⎿ Done (includes accumulation strategy)
-   ⏺ Task(kernel_assembly) ⎿ Done
-5. Spawns: Task("Phase 4: Validate correctness and performance...")
-   ⏺ Task(Phase 4...) ⎿ Done (validation_results.md created)
-6. Spawns: Task("Phase 5: Integrate into vLLM...")
-   ⏺ Task(Phase 5...) ⎿ Done (integration patch created)
+1. Find state file in moe_monokernel_artifacts/*/state.json
+2. Load state, identify current phase/stage
+3. If blocked: check orchestration/failure-handling.md for next action
+4. Spawn appropriate Task to continue (DO NOT implement yourself)
+```
+
+### Status Check
+
+```
+User: "What's the monokernel status?"
+Orchestrator:
+1. Load state file
+2. Report: "Phase 3, stage up_projection blocked after 3 attempts"
+3. Suggest: "Shall I invoke llm-council for a second opinion?"
+
 ```
 
 ## Validation Checklist
