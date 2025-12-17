@@ -363,6 +363,18 @@ Orchestrator:
    - subagent_type: "general-purpose"
 ```
 
+### Resume After Context Compaction
+
+The `PreCompact` and `SessionStart` hooks in `.claude/settings.local.json` automatically:
+1. Save checkpoint state before compaction
+2. Inject orchestrator role context after compaction
+
+If hooks didn't fire or you need a manual reminder:
+1. **Read this skill file** (you're doing this now)
+2. **Load state**: `cat moe_monokernel_artifacts/*/state.json`
+3. **You are the ORCHESTRATOR** - spawn Tasks, don't implement directly
+4. **Spawn next Task** with FULL prompt from `orchestration/task-prompts.md`
+
 ### Status Check
 
 ```

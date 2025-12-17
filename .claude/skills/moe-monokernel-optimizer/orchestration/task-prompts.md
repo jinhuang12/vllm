@@ -46,21 +46,35 @@ To invoke: Use the Skill tool with `llm-council`. The skill has its own context 
 **State Management** (CRITICAL - Tasks have no shared memory):
 1. **Read state first**: `cat {artifact_dir}/state.json` to understand current progress
 2. **Update state when done**: Before completing, update the appropriate phase/stage status
-3. **Write state back**: Save updated state.json with new status and timestamp
+3. **Write state back**: Save updated state.json with new status, timestamp, AND orchestrator metadata:
 ```json
 {
   "phases": {
     "{current_phase}": {"status": "complete", "completed_at": "{timestamp}"}
+  },
+  "orchestrator": {
+    "last_completed_task": "{task_description}",
+    "next_action": "{next_phase_or_stage}",
+    "resume_hint": "Read state.json, then spawn Task for {next_phase_or_stage}"
   }
 }
 ```
 
-**Context Preservation**:
+**Context Preservation** (for orchestrator compaction recovery):
 - Current phase: {current_phase}
 - Completed stages: {completed_stages}
 - Remaining stages: {remaining_stages}
 - State file: {artifact_dir}/state.json
 - CUDA directory: {cuda_dir}
+- Skill file: `.claude/skills/moe-monokernel-optimizer/SKILL.md`
+- Task prompts: `.claude/skills/moe-monokernel-optimizer/orchestration/task-prompts.md`
+
+**After Context Compaction**:
+If the orchestrator's context is compacted and you need to resume:
+1. Re-read state.json to understand current progress
+2. Re-read SKILL.md to understand the workflow
+3. The orchestrator spawns Tasks - it does not implement directly
+4. Check `orchestrator.resume_hint` in state.json for next action
 ```
 
 ---
@@ -524,10 +538,41 @@ else:
    - Expert reference struct population
    - Pair index computation for GEMM stages
 
-**Validation**:
+**Validation (BLOCKING - REQUIRED before completing)**:
+
+1. **Build**:
 ```bash
 cmake --build --preset release --target install
 ```
+
+2. **Correctness Test** - Run this validation inline:
+```python
+import torch
+from vllm.model_executor.layers.fused_moe import fused_topk
+
+# Test parameters from constraints
+batch_size, E, top_k = 8, {E}, {top_k}
+router_logits = torch.randn(batch_size, E, device='cuda', dtype=torch.bfloat16)
+
+# Reference: vLLM fused_topk
+ref_weights, ref_ids = fused_topk(router_logits, topk=top_k, renormalize={renormalize})
+
+# Your routing implementation (adapt import to your kernel name)
+from vllm._custom_ops import moe_monokernel_{model_short}_routing
+mono_weights, mono_ids = moe_monokernel_{model_short}_routing(router_logits, top_k)
+
+# Validate - IDs must match exactly (same top-k selection)
+assert torch.equal(mono_ids, ref_ids), f"TopK IDs mismatch: mono={mono_ids[:2]} vs ref={ref_ids[:2]}"
+
+# Weights should be close (floating point tolerance)
+torch.testing.assert_close(mono_weights, ref_weights, atol=1e-5, rtol=1e-5)
+print("Stage 1 routing_and_prepare validation: PASS")
+```
+
+3. **If validation fails** → Exit with status "blocked" and include:
+   - The assertion error message
+   - Sample mismatched values
+   - Your hypothesis for the discrepancy
 
 {common_behavioral_footer}
 ```
@@ -564,6 +609,45 @@ If FP8/INT8:
 If BF16/FP16 (no quantization needed):
 - Simple passthrough or direct copy to SMEM
 - No scale folding needed
+
+**Validation (BLOCKING - REQUIRED before completing)**:
+
+1. **Build**:
+```bash
+cmake --build --preset release --target install
+```
+
+2. **Correctness Test** (FP8/INT8 only - skip for BF16/FP16):
+```python
+import torch
+
+# Test parameters from constraints
+batch_size, K = 8, {K}
+activations = torch.randn(batch_size, K, device='cuda', dtype=torch.bfloat16) / 10
+
+# Reference: Torch dynamic quantization
+FP8_MAX = 448.0  # E4M3 max value
+ref_scale = activations.abs().amax(dim=-1, keepdim=True) / FP8_MAX
+ref_quantized = (activations / ref_scale).clamp(-FP8_MAX, FP8_MAX)
+
+# Your quantization implementation
+from vllm._custom_ops import moe_monokernel_{model_short}_quantize
+mono_quantized, mono_scale = moe_monokernel_{model_short}_quantize(activations)
+
+# Validate scales match (critical for GEMM correctness)
+torch.testing.assert_close(mono_scale, ref_scale, atol=1e-3, rtol=1e-3)
+
+# Validate dequantized values (roundtrip)
+ref_dequant = ref_quantized * ref_scale
+mono_dequant = mono_quantized.float() * mono_scale
+torch.testing.assert_close(mono_dequant, ref_dequant.float(), atol=0.5, rtol=0.1)
+print("Stage 2 activation_quantization validation: PASS")
+```
+
+3. **If validation fails** → Exit with status "blocked" and include:
+   - Scale comparison values
+   - Maximum dequantization error
+   - Your hypothesis for the discrepancy
 
 {common_behavioral_footer}
 ```
@@ -713,34 +797,111 @@ for (uint32_t k_chunk = 0; k_chunk < K_CHUNKS_DOWN; k_chunk++) {
 
 ---
 
-## MANDATORY VERIFICATION (DO NOT SKIP)
+## VALIDATION (BLOCKING - REQUIRED before completing)
 
-Before completing this task, you MUST verify:
+Before completing this task, you MUST pass ALL of these validations:
 
-1. **Search for incomplete code**:
+### 1. Build Check
 ```bash
+cmake --build --preset release --target install
+```
+
+### 2. Code Completeness Check
+```bash
+# Search for incomplete code markers
 grep -n 'TODO\|FIXME\|XXX\|unimplemented' {cuda_dir}/moe_*_projection.cu
 ```
-If ANY results in MMA loops or compute paths → You are NOT done. Exit BLOCKED.
+**If ANY results** in MMA loops or compute paths → Exit BLOCKED. Do not proceed.
 
-2. **Verify MMA calls exist**:
+### 3. MMA Implementation Check
 ```bash
-grep -c 'mma_' {cuda_dir}/moe_up_projection.cu    # Should be > 0
-grep -c 'mma_' {cuda_dir}/moe_down_projection.cu  # Should be > 0
+# Verify MMA calls exist in both projections
+UP_MMA=$(grep -c 'mma_' {cuda_dir}/moe_up_projection.cu)
+DOWN_MMA=$(grep -c 'mma_' {cuda_dir}/moe_down_projection.cu)
+echo "Up projection MMA calls: $UP_MMA"
+echo "Down projection MMA calls: $DOWN_MMA"
 ```
-If count is 0 → MMA loop not implemented. Exit BLOCKED.
+**If either count is 0** → MMA loop not implemented. Exit BLOCKED.
 
-3. **Verify K-chunk loops are complete**:
-   - Every `for (k_chunk ...)` loop must contain actual MMA calls inside
-   - Not just buffer swaps or syncs
+### 4. Correctness Test (CRITICAL)
+Run this validation to compare against torch.matmul reference:
+```python
+import torch
+import time
 
-**If you cannot complete the MMA loops**:
+# Test parameters from constraints
+batch_size, K, N, E, top_k = 8, {K}, {N}, {E}, {top_k}
+
+# Create test inputs
+torch.manual_seed(42)  # Reproducibility
+activations = torch.randn(batch_size, K, device='cuda', dtype=torch.bfloat16) / 10
+topk_ids = torch.randint(0, E, (batch_size, top_k), device='cuda')
+topk_weights = torch.softmax(torch.randn(batch_size, top_k, device='cuda'), dim=-1)
+w_up = torch.randn(E, 2*N, K, device='cuda', dtype={weight_dtype}) / 10
+w_down = torch.randn(E, K, N, device='cuda', dtype={weight_dtype}) / 10
+
+# Reference: Naive torch implementation (known correct)
+ref_output = torch.zeros(batch_size, K, device='cuda', dtype=torch.float32)
+for b in range(batch_size):
+    for i in range(top_k):
+        expert_id = topk_ids[b, i].item()
+        weight = topk_weights[b, i].item()
+        # Up projection: [K] -> [2*N]
+        up_out = torch.matmul(activations[b].float(), w_up[expert_id].float().T)
+        gate, x = up_out[:N], up_out[N:]
+        # Activation: SiLU-gated (adjust if model uses different activation)
+        activated = torch.nn.functional.silu(gate) * x * weight
+        # Down projection: [N] -> [K]
+        down_out = torch.matmul(activated, w_down[expert_id].float().T)
+        ref_output[b] += down_out
+
+# Your GEMM implementation (adapt import to your kernel)
+from vllm._custom_ops import moe_monokernel_{model_short}_gemm
+mono_output = moe_monokernel_{model_short}_gemm(
+    activations, topk_ids, topk_weights, w_up, w_down
+)
+
+# Correctness validation with dtype-appropriate tolerance
+# BF16: atol=1e-2, rtol=1e-2 | FP8: atol=1.0, rtol=0.1
+torch.testing.assert_close(mono_output, ref_output, atol={atol}, rtol={rtol})
+print("GEMM correctness: PASS")
+```
+**If assertion fails** → Exit BLOCKED with the error message and max diff values.
+
+### 5. Performance Sanity Check (CRITICAL - catches naive implementations)
+```python
+# This catches "naive GEMM" that is correct but 100x+ slower
+torch.cuda.synchronize()
+start = time.perf_counter()
+for _ in range(100):
+    moe_monokernel_{model_short}_gemm(activations, topk_ids, topk_weights, w_up, w_down)
+torch.cuda.synchronize()
+elapsed_ms = (time.perf_counter() - start) / 100 * 1000
+
+print(f"GEMM latency: {elapsed_ms:.2f}ms for BS=8")
+
+# Sanity threshold: < 10ms for small batch sizes
+# Naive loop implementation would be 50-200ms
+if elapsed_ms > 10.0:
+    print(f"WARNING: GEMM too slow ({elapsed_ms:.2f}ms)")
+    print("This likely indicates:")
+    print("  - MMA instructions not being used (naive for-loop GEMM)")
+    print("  - Missing tensor core utilization")
+    print("  - Incorrect memory access patterns")
+    raise AssertionError(f"GEMM performance unacceptable: {elapsed_ms:.2f}ms > 10ms threshold")
+
+print(f"GEMM performance sanity check: PASS ({elapsed_ms:.2f}ms)")
+```
+**If performance fails** → Exit BLOCKED. This indicates MMA loops are not properly implemented.
+
+### If ANY validation fails:
 - Do NOT exit with status "complete"
 - Exit with status "blocked"
-- Document in blocker file:
-  - What specific part you couldn't implement
-  - What reference you tried to follow
-  - What went wrong
+- Document in `{artifact_dir}/blockers/gemm_implementation_blocker.md`:
+  - Which specific validation failed
+  - The error message or performance numbers
+  - What you tried and why it didn't work
+  - Your hypothesis for the root cause
 
 {common_behavioral_footer}
 ```
@@ -807,10 +968,77 @@ __global__ void moe_kernel(...) {
    - Kernel configuration
    - Launch parameter computation
 
-**Validation**:
+**Validation (BLOCKING - REQUIRED before completing)**:
+
+### 1. Build Check
 ```bash
 cmake --build --preset release --target install
 ```
+
+### 2. Full Kernel Integration Test
+Run this validation to test the complete assembled kernel against vLLM's fused_moe:
+```python
+import torch
+from vllm.model_executor.layers.fused_moe import fused_moe
+
+# Test parameters from constraints
+batch_size, K, N, E, top_k = 8, {K}, {N}, {E}, {top_k}
+
+# Create test inputs
+torch.manual_seed(42)  # Reproducibility
+activations = torch.randn(batch_size, K, device='cuda', dtype=torch.bfloat16) / 10
+router_logits = torch.randn(batch_size, E, device='cuda', dtype=torch.bfloat16)
+w_up = torch.randn(E, 2*N, K, device='cuda', dtype={weight_dtype}) / 10
+w_down = torch.randn(E, K, N, device='cuda', dtype={weight_dtype}) / 10
+
+# Reference: vLLM fused_moe (the production baseline)
+ref_output = fused_moe(
+    activations, w_up, w_down, router_logits,
+    topk=top_k, renormalize={renormalize}
+)
+
+# Your full assembled monokernel
+from vllm._custom_ops import moe_monokernel_{model_short}
+mono_output = moe_monokernel_{model_short}(
+    activations, router_logits, w_up, w_down
+)
+
+# Validate with appropriate tolerance
+# This tests the full pipeline: routing -> quant -> GEMM -> output
+torch.testing.assert_close(mono_output, ref_output, atol=1e-2, rtol=1e-2)
+print("Full kernel integration test: PASS")
+
+# Test across multiple batch sizes
+for bs in [1, 4, 16, 32, 64]:
+    test_act = torch.randn(bs, K, device='cuda', dtype=torch.bfloat16) / 10
+    test_router = torch.randn(bs, E, device='cuda', dtype=torch.bfloat16)
+
+    ref = fused_moe(test_act, w_up, w_down, test_router, topk=top_k, renormalize={renormalize})
+    mono = moe_monokernel_{model_short}(test_act, test_router, w_up, w_down)
+
+    torch.testing.assert_close(mono, ref, atol=1e-2, rtol=1e-2)
+    print(f"  BS={bs}: PASS")
+
+print("All batch sizes validated: PASS")
+```
+
+### 3. Smoke Test (Kernel Launches Without Crash)
+```python
+# Quick sanity check that kernel launches work
+for bs in [1, 8, 64]:
+    x = torch.randn(bs, {K}, device='cuda', dtype=torch.bfloat16)
+    r = torch.randn(bs, {E}, device='cuda', dtype=torch.bfloat16)
+    out = moe_monokernel_{model_short}(x, r, w_up, w_down)
+    assert out.shape == (bs, {K}), f"Wrong output shape: {out.shape}"
+print("Smoke test: PASS")
+```
+
+### If ANY validation fails:
+- Exit with status "blocked"
+- Document in `{artifact_dir}/blockers/kernel_assembly_blocker.md`:
+  - Which batch size failed
+  - The error message or shape mismatch
+  - Maximum difference from reference
 
 {common_behavioral_footer}
 ```

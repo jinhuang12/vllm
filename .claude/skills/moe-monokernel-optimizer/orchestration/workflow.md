@@ -118,70 +118,53 @@ Phase 3 has **4 stages** (not 6) to keep related GEMM work together:
 
 ## Compile and Test Cadence
 
-### After Each Stage: Quick Compile Check
+**IMPORTANT**: All validations are **BLOCKING**. A stage cannot be marked complete unless its validation passes. See `orchestration/task-prompts.md` for full validation code.
+
+### Stage Validation Summary
+
+| Stage | Validation Type | Blocking? | Reference |
+|-------|-----------------|-----------|-----------|
+| routing_and_prepare | Compare vs fused_topk | **YES** | task-prompts.md Stage 1 |
+| activation_quantization | Compare vs torch dynamic quant | **YES** (FP8 only) | task-prompts.md Stage 2 |
+| gemm_implementation | Correctness + Performance sanity | **YES** | task-prompts.md Stage 3 |
+| kernel_assembly | Full kernel vs fused_moe | **YES** | task-prompts.md Stage 4 |
+
+### After Each Stage: Validation Must Pass
+
+Each stage has inline validation code in its task prompt. The Task must:
+1. Run the validation code
+2. If validation fails → Exit with status "blocked"
+3. If validation passes → May mark stage "complete"
+
+### Stage 1 (routing_and_prepare): Routing Validation
+- Compare topk_ids and topk_weights against `vllm.model_executor.layers.fused_moe.fused_topk`
+- IDs must match exactly (same expert selection)
+- Weights must be close (atol=1e-5, rtol=1e-5)
+
+### Stage 2 (activation_quantization): Quantization Validation
+- Skip for BF16/FP16 (no quantization)
+- For FP8: Compare scales and dequantized values against torch reference
+- Tolerance: atol=0.5, rtol=0.1 for dequantized values
+
+### Stage 3 (gemm_implementation): CRITICAL Validation
+
+**This is the most important validation** - catches "naive GEMM" implementations.
+
+1. **Code completeness**: No TODO/FIXME/XXX in MMA loops
+2. **MMA verification**: grep -c 'mma_' must be > 0 for both projections
+3. **Correctness**: Compare against torch.matmul reference
+4. **Performance sanity**: Must complete in < 10ms for BS=8 (catches naive loop implementations)
+
 ```bash
-cmake --build --preset release --target install 2>&1 | head -50
-# Just verify no compile errors
-# Don't run tests yet
+# Quick check (orchestrator can verify)
+grep -c 'mma_' csrc/moe/moe_monokernel_*/moe_up_projection.cu    # Must be > 0
+grep -c 'mma_' csrc/moe/moe_monokernel_*/moe_down_projection.cu  # Must be > 0
 ```
 
-### After Stage 2 (routing_and_prepare + activation_quantization): Input Pipeline Test
-```bash
-# Compile
-cmake --build --preset release --target install
-
-# Smoke test input pipeline
-python -c "
-import torch
-# Test that routing and quantization work
-from vllm._custom_ops import moe_monokernel_{model}_routing_test
-result = moe_monokernel_{model}_routing_test(batch_size=4)
-assert result is not None
-print('Input pipeline smoke test: PASS')
-"
-```
-
-### After Stage 3 (gemm_implementation): TODO CHECK + GEMM Test
-
-**CRITICAL**: Before advancing, verify no TODOs in GEMM kernels:
-```bash
-# Check for incomplete implementations
-if grep -n 'TODO\|FIXME\|XXX' csrc/moe/moe_monokernel_*/moe_*_projection.cu; then
-    echo "ERROR: TODOs found in GEMM kernels - stage NOT complete"
-    echo "Task should have exited BLOCKED, not COMPLETE"
-    exit 1
-fi
-
-# Verify MMA calls exist
-UP_MMA=$(grep -c 'mma_' csrc/moe/moe_monokernel_*/moe_up_projection.cu)
-DOWN_MMA=$(grep -c 'mma_' csrc/moe/moe_monokernel_*/moe_down_projection.cu)
-if [ "$UP_MMA" -eq 0 ] || [ "$DOWN_MMA" -eq 0 ]; then
-    echo "ERROR: MMA loops not implemented (up=$UP_MMA, down=$DOWN_MMA)"
-    exit 1
-fi
-
-echo "GEMM implementation verified: up=$UP_MMA mma calls, down=$DOWN_MMA mma calls"
-```
-
-### After Stage 4 (kernel_assembly): Full Smoke Test
-```bash
-# Compile
-cmake --build --preset release --target install
-
-# Smoke test full kernel
-python -c "
-import torch
-from vllm._custom_ops import moe_monokernel_{model}
-# Small tensor test
-bs, k, n, e = 4, {K}, {N}, {E}
-x = torch.randn(bs, k, dtype=torch.bfloat16, device='cuda')
-router = torch.randn(bs, e, dtype=torch.bfloat16, device='cuda')
-# ... setup weights ...
-result = moe_monokernel_{model}(x, router, ...)
-assert result.shape == (bs, k)
-print('Full kernel smoke test: PASS')
-"
-```
+### Stage 4 (kernel_assembly): Integration Validation
+- Test full kernel against `fused_moe` reference
+- Test across batch sizes: 1, 4, 16, 32, 64
+- Tolerance: atol=1e-2, rtol=1e-2
 
 ## Orchestrator Decision Points
 
