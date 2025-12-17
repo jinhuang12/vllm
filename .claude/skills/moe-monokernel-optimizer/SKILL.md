@@ -138,6 +138,21 @@ Each Task runs **independently with no shared memory**. Every task prompt MUST i
 - Wait for Task completion before proceeding
 - Do NOT paraphrase or summarize - subagents need complete context
 
+**CRITICAL - Expand `{common_behavioral_footer}`**:
+Each phase prompt ends with `{common_behavioral_footer}`. You MUST replace this placeholder with the **FULL content** from the "Common Behavioral Footer" section at the top of `task-prompts.md`. This is approximately 50 lines including:
+- LLM Council Consultation (with "To invoke" instructions)
+- Behavioral Expectations (ALL 6 items):
+  1. Read before write
+  2. Review plan with llm-council (revise until accepted)
+  3. Compile often (with error handling)
+  4. Stuck handling (document blockers, exit blocked)
+  5. Review implementation with llm-council
+  6. Stay goal-aligned
+- State Management (all 3 items)
+- Context Preservation section
+
+**DO NOT abbreviate the footer**. Items 2-5 (llm-council review loops, compile errors, stuck handling, implementation review) are critical for quality control. Skipping them causes subagents to produce incomplete work without proper review cycles.
+
 ### State File
 
 Location: `moe_monokernel_artifacts/{model}_{hardware}_{dtype}_{tp}/state.json`

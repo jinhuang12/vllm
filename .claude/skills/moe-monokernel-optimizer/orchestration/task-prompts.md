@@ -40,8 +40,8 @@ To invoke: Use the Skill tool with `llm-council`. The skill has its own context 
      - Hypotheses for root cause
      - What you tried and why it didn't work
    - Exit with status "blocked"
-5. **Review implementation with llm-council**: Review the implementation with `llm-council` & address any valid findings.   
-5. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
+5. **Review implementation with llm-council**: Review the implementation with `llm-council` & address any valid findings.
+6. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
 
 **State Management** (CRITICAL - Tasks have no shared memory):
 1. **Read state first**: `cat {artifact_dir}/state.json` to understand current progress
@@ -589,9 +589,10 @@ They share the same MMA infrastructure - implement common helpers once, apply to
 **Read First** (IN THIS ORDER):
 1. `{artifact_dir}/optimization_plan.md` - Decisions C, F (weight timing, MMA details)
 2. `{artifact_dir}/constraints.md` - dimensions, dtype
-3. `references/code-templates.md` - MMA templates section (FP8 AND BF16)
-4. `references/tiling-config.md` - SMEM layout
-5. `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md`  - search for 'moe_up_projection.cu', 'moe_down_projection.cu'
+3. `assets/MOE_MONOKERNEL_OPTIMIZATION_GUIDE.md` - **13 optimization techniques** (warp specialization, triple buffering, bank conflict mitigation, custom MMA patterns, bitfield deduplication)
+4. `references/code-templates.md` - MMA templates section (FP8 AND BF16)
+5. `references/tiling-config.md` - SMEM layout
+6. `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md`  - search for 'moe_up_projection.cu', 'moe_down_projection.cu'
 
 **Key Configuration**:
 - weight_dtype: {fp8/bf16/fp16}
