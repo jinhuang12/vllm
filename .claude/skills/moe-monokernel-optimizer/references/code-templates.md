@@ -822,19 +822,25 @@ If the model uses an activation function not in templates above:
 ```markdown
 **When encountering unknown activation in Phase 3 (up-projection):**
 
-1. Use Task to explore:
-   Task("Investigate {activation_name} activation function for CUDA MoE kernel:
-   
+1. **Use Task tool to explore** with:
+   - `description`: "Explore {activation_name} activation"
+   - `subagent_type`: "general-purpose"
+   - `prompt`: See below
+
+   ```
+   Investigate {activation_name} activation function for CUDA MoE kernel:
+
    1. Find the mathematical formula in vLLM source or model documentation
    2. Search for efficient CUDA implementations (check CUTLASS, cuDNN, Triton)
    3. Determine how it interacts with gated architecture (is it gate*act(up) or act(gate)*up?)
    4. Check for numerical stability concerns (overflow, underflow, NaN)
    5. Look for any model-specific variations
-   
+
    Output findings to {artifact_dir}/activation_exploration.md with:
    - Mathematical formula
    - Recommended CUDA implementation
-   - Test cases for numerical validation")
+   - Test cases for numerical validation
+   ```
 
 2. Based on exploration findings, implement the activation function
 

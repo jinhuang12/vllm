@@ -12,46 +12,21 @@
 | 3 failed attempts | "Debug {stage} - failed 3 times" | Fresh perspective beats spinning |
 | Phase 4 (validation) | "Interpret benchmark results for {model}" | Sanity check performance conclusions |
 
-### Council Invocation Template
+### How to Invoke Council
 
-```python
-# After completing a major phase
-def invoke_council_checkpoint(phase, model, hardware):
-    context = f"""
-    ## MoE Monokernel Council Review
+Use the Skill tool with `llm-council`. The llm-council skill has its own instructions for preparing context and running reviews.
 
-    **Phase Completed**: {phase}
-    **Model**: {model}
-    **Hardware**: {hardware}
-
-    ## Artifacts
-    - Constraints: $(cat {artifact_dir}/constraints.md)
-    - Plan: $(cat {artifact_dir}/optimization_plan.md)
-
-    ## Questions
-    1. Are there any issues with our approach?
-    2. What might we have missed?
-    3. Any concerns before proceeding to next phase?
-    """
-
-    invoke_skill("llm-council", topic=f"MoE {phase} review", context=context)
-```
+**Example natural language trigger**:
+"I've completed Phase 1 for {model}. Before proceeding to planning, let me invoke the llm-council skill to review the constraints."
 
 ### Council for Blocked Tasks
 
-When a task exits with status "blocked" after 3 attempts, **automatically** invoke council:
+When a task exits with status "blocked" after 3 attempts, invoke council for external review:
 
-```python
-def on_task_blocked(stage, blocker_file):
-    if attempts >= 3 and not council_invoked:
-        council_context = build_council_context(stage, blocker_file)
-        council_feedback = invoke_skill("llm-council",
-            topic=f"MoE {stage} implementation blocked",
-            context=council_context,
-            mode="single-round"
-        )
-        save_feedback_and_retry(stage, council_feedback)
-```
+1. Read the blocker file: `{artifact_dir}/blockers/{stage}_blocker.md`
+2. State: "The {stage} has failed 3 times. I'll invoke llm-council for a fresh perspective."
+3. Use the Skill tool with `llm-council`
+4. Review feedback and spawn a new retry Task with council insights
 
 ---
 
@@ -210,6 +185,8 @@ print('Full kernel smoke test: PASS')
 
 ## Orchestrator Decision Points
 
+**Note**: The Python code blocks below are **illustrative pseudo-code** showing the orchestrator's decision logic. They are not executable APIs. The orchestrator (Claude) implements this logic by reading state files, using the Task tool, and using the Skill tool.
+
 ### Stage Order (4 stages)
 ```python
 STAGE_ORDER = [
@@ -287,9 +264,10 @@ def on_task_blocked(state, stage, blocker_file):
         spawn_stage_task(stage, retry=True)
     
     elif not state.stages[stage].llm_council_invoked:
-        # Invoke council
+        # Invoke council using Skill tool with "llm-council"
         state.stages[stage].llm_council_invoked = True
-        council_feedback = invoke_llm_council(blocker_file, state)
+        # Claude uses Skill tool, reviews feedback, saves to artifact_dir
+        council_feedback = get_council_feedback_from_skill_output()
         save_council_feedback(stage, council_feedback)
         spawn_stage_task(stage, council_context=council_feedback)
     
@@ -305,24 +283,11 @@ def on_task_blocked(state, stage, blocker_file):
 ```
 
 ### On Phase Transition
-```python
-def advance_to_phase(new_phase):
-    state.phases[current_phase].status = "complete"
-    state.phases[new_phase].status = "in_progress"
-    state.current_phase = new_phase
-    save_state()
-    
-    # Update TodoWrite to reflect progress
-    todo_update = f"""
-    ## MoE Monokernel Progress
-    - [x] Phase 1: Constraints gathered
-    - [x] Phase 2: Optimization planned
-    - [x] Phase 3: Implementation complete
-    - [ ] Phase 4: Validation (CURRENT)
-    - [ ] Phase 5: Integration
-    """
-    # Preserve existing todos, add/update monokernel section
-```
+
+When advancing to a new phase:
+1. Update state.json with new phase status
+2. Update TodoWrite using proper JSON format (see TodoWrite Integration section above)
+3. Spawn Task for the new phase
 
 ## Resume Protocol
 
@@ -369,35 +334,57 @@ def resume_workflow():
 
 ## TodoWrite Integration
 
-The orchestrator maintains a dedicated section in TodoWrite:
+Use the TodoWrite tool to track progress. The tool requires a JSON array of todo objects.
 
-```markdown
-## MoE Monokernel: {model} on {hardware}
-
-### Current Focus
-{current_stage_or_phase}: {brief_description}
-
-### Progress
-- [x] Constraints: {artifact_dir}/constraints.md
-- [x] Plan: {artifact_dir}/optimization_plan.md
-- [x] router: csrc/moe/moe_monokernel_{model}/moe_routing.cu
-- [x] prepare: csrc/moe/moe_monokernel_{model}/moe_prepare.cu
-- [ ] scale_inputs: IN PROGRESS
-- [ ] up_projection
-- [ ] down_projection
-- [ ] output_conversion
-- [ ] Validation
-- [ ] Integration
-
-### Blockers
-{if any, with links to blocker files}
-
-### Next Steps
-1. {immediate_next_action}
-2. {following_action}
+**TodoWrite Format**:
+```json
+[
+  {
+    "content": "Phase 1: Gather constraints for {model}",
+    "status": "completed",
+    "activeForm": "Gathering constraints"
+  },
+  {
+    "content": "Phase 2: Create optimization plan",
+    "status": "completed",
+    "activeForm": "Creating optimization plan"
+  },
+  {
+    "content": "Phase 3 routing_and_prepare: Implement routing",
+    "status": "in_progress",
+    "activeForm": "Implementing routing and prepare"
+  },
+  {
+    "content": "Phase 3 activation_quantization: Implement scale_inputs",
+    "status": "pending",
+    "activeForm": "Implementing activation quantization"
+  },
+  {
+    "content": "Phase 3 gemm_implementation: Implement up/down projection",
+    "status": "pending",
+    "activeForm": "Implementing GEMM kernels"
+  },
+  {
+    "content": "Phase 3 kernel_assembly: Assemble main kernel",
+    "status": "pending",
+    "activeForm": "Assembling kernel"
+  },
+  {
+    "content": "Phase 4: Validate monokernel",
+    "status": "pending",
+    "activeForm": "Validating monokernel"
+  },
+  {
+    "content": "Phase 5: Integrate into vLLM",
+    "status": "pending",
+    "activeForm": "Integrating into vLLM"
+  }
+]
 ```
 
-**Important**: When updating todos after council feedback or retry:
-- Never remove existing non-monokernel todos
-- Update only the MoE Monokernel section
-- Preserve the link to ultimate goal in each Task prompt
+**Status Values**:
+- `"pending"` - Not yet started
+- `"in_progress"` - Currently working on (limit to ONE at a time)
+- `"completed"` - Successfully finished
+
+**Update Pattern**: After completing a phase/stage, mark it `"completed"` and mark the next `"in_progress"`.

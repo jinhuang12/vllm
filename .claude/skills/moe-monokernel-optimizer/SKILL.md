@@ -73,15 +73,11 @@ For these stages, invoke llm-council BEFORE implementation to review the approac
 
 This front-loads expert review rather than waiting for failures.
 
-### Council Invocation Template
+### How to Invoke llm-council
 
-```
-"Invoke llm-council to review {topic} for {model} on {hardware}.
-Context: {brief description of current state}
-Questions: {specific concerns or decision points}"
-```
+The llm-council skill is **model-invoked**. When you need a second opinion, use the `Skill` tool to invoke `llm-council`. The llm-council skill has its own instructions for preparing context and running the review.
 
-See [orchestration/workflow.md](orchestration/workflow.md) for detailed templates and [orchestration/failure-handling.md](orchestration/failure-handling.md) for the 6-level escalation ladder.
+See [orchestration/failure-handling.md](orchestration/failure-handling.md) for the 6-level escalation ladder.
 
 ## Execution Model: Orchestrator + Task Subagents
 
@@ -92,7 +88,7 @@ See [orchestration/workflow.md](orchestration/workflow.md) for detailed template
 You are the **orchestrator**. Your responsibilities:
 - Read this skill and understand the workflow
 - Create/load the state file
-- Spawn Task subagents for each phase using `Task("...")`
+- Spawn Task subagents for each phase using the Task tool
 - Update state based on Task outcomes
 - Handle failures per `orchestration/failure-handling.md`
 
@@ -104,23 +100,39 @@ You are the **orchestrator**. Your responsibilities:
 
 ### How to Spawn a Task
 
-Use the `Task` tool to spawn a subagent:
+Use the **Task tool** with these required parameters:
 
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `description` | Yes | Short description (3-5 words) |
+| `prompt` | Yes | Full task instructions |
+| `subagent_type` | Yes | Agent type (see table below) |
+
+**Subagent Types by Phase**:
+
+| Phase | Subagent Type | Rationale |
+|-------|---------------|-----------|
+| Phase 1: Constraints | `Explore` | Primarily code analysis and reading |
+| Phase 2: Planning | `Plan` | Design and decision-making |
+| Phase 3: Implementation | `general-purpose` | Writing CUDA code, running compiles |
+| Phase 4: Validation | `general-purpose` | Running tests and benchmarks |
+| Phase 5: Integration | `general-purpose` | Modifying build system and Python |
+
+**Task Invocation Example**:
 ```
-Task("Phase 1: Gather MoE monokernel constraints for Qwen/Qwen3-30B-A3B-FP8 on L40S with TP=1.
-
-**Ultimate Goal**: Successfully integrate optimized MoE monokernel...
-
-[Copy FULL task prompt from orchestration/task-prompts.md]
-")
+Use the Task tool with:
+- description: "Phase 1: Gather MoE constraints"
+- subagent_type: "Explore"
+- prompt: [Copy FULL prompt from orchestration/task-prompts.md § Phase 1]
 ```
 
-**Alternative phrasings that trigger Task spawning**:
-- "Spawn a task to gather constraints for..."
-- "Delegate to a subagent: Phase 1..."
-- "Use the Task tool to..."
+**CRITICAL - State Management**:
+Each Task runs **independently with no shared memory**. Every task prompt MUST include:
+1. Path to read state: `{artifact_dir}/state.json`
+2. Instructions to update state before completing
+3. All context needed (tasks cannot access prior task memory)
 
-**IMPORTANT**: 
+**IMPORTANT**:
 - Copy the FULL task prompt from `orchestration/task-prompts.md`
 - Fill in the template variables ({model_id}, {hardware}, {tp}, {dtype}, etc.)
 - Wait for Task completion before proceeding
@@ -181,11 +193,15 @@ Phase 5: Integration            → vLLM dispatch path
 
 ### Phase 1: Gather Constraints
 
+**Subagent Type**: `general-purpose`
+
 **Spawn Task** with prompt from `orchestration/task-prompts.md` § Phase 1.
 
 ```
-Task: "Phase 1: Gather MoE monokernel constraints for {model_id} on {hardware} with TP={tp}, dtype={dtype}.
-[... full prompt from task-prompts.md ...]"
+Task tool parameters:
+- description: "Phase 1: Gather MoE constraints for {model_id}"
+- subagent_type: "general-purpose"
+- prompt: [Full prompt from task-prompts.md § Phase 1]
 ```
 
 Collects:
@@ -199,7 +215,16 @@ Collects:
 
 ### Phase 2: Optimization Planning
 
+**Subagent Type**: `general-purpose`
+
 **Spawn Task** with prompt from `orchestration/task-prompts.md` § Phase 2.
+
+```
+Task tool parameters:
+- description: "Phase 2: Plan {model_id} optimization"
+- subagent_type: "general-purpose"
+- prompt: [Full prompt from task-prompts.md § Phase 2]
+```
 
 Makes decisions:
 - **Decision 0**: Saturation score (from `references/algorithmic-branching.md`)
@@ -212,6 +237,8 @@ Makes decisions:
 
 ### Phase 3: Implementation
 
+**Subagent Type**: `general-purpose` (for all stages)
+
 Phase 3 is structured into **4 stages** to keep GEMM work together.
 
 **Spawn Task for EACH stage sequentially**. DO NOT implement multiple stages in one Task.
@@ -223,11 +250,12 @@ Phase 3 is structured into **4 stages** to keep GEMM work together.
 | **gemm_implementation** | **up_proj + down_proj** | Share 90% of structure |
 | kernel_assembly | output + main kernel | Wire everything together |
 
-**For each stage**, spawn:
+**For each stage**, spawn Task with:
 ```
-Task("Phase 3, Stage {stage_name}: Implement {stage_name} for {model} monokernel.
-[COPY FULL prompt from task-prompts.md § Phase 3 → {stage_name}]
-")
+Task tool parameters:
+- description: "Phase 3 {stage_name}: {model} monokernel"
+- subagent_type: "general-purpose"
+- prompt: [COPY FULL prompt from task-prompts.md § Phase 3 → {stage_name}]
 ```
 
 **Activation Function Handling**:
@@ -304,13 +332,20 @@ User: "Use moe-monokernel-optimizer for Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 on
 
 ### Resume
 
+**Note**: Tasks have no memory of previous executions. Each task starts fresh.
+
 ```
 User: "Resume MoE optimization"
 Orchestrator:
-1. Find state file in moe_monokernel_artifacts/*/state.json
-2. Load state, identify current phase/stage
-3. If blocked: check orchestration/failure-handling.md for next action
-4. Spawn appropriate Task to continue (DO NOT implement yourself)
+1. Find state file: ls moe_monokernel_artifacts/*/state.json
+2. Read state, identify current phase/stage
+3. Report status to user
+4. If blocked: check orchestration/failure-handling.md for next action
+5. Spawn NEW Task with:
+   - Full context from task-prompts.md
+   - Path to state.json for reading/updating
+   - Any blocker content if retrying
+   - subagent_type: "general-purpose"
 ```
 
 ### Status Check

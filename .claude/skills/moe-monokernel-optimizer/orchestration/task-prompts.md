@@ -32,23 +32,26 @@ Append to ALL task prompts:
    - Exit with status "blocked"
 5. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
 
+**State Management** (CRITICAL - Tasks have no shared memory):
+1. **Read state first**: `cat {artifact_dir}/state.json` to understand current progress
+2. **Update state when done**: Before completing, update the appropriate phase/stage status
+3. **Write state back**: Save updated state.json with new status and timestamp
+```json
+{
+  "phases": {
+    "{current_phase}": {"status": "complete", "completed_at": "{timestamp}"}
+  }
+}
+```
+
 **LLM Council Consultation**:
-You have access to the `llm-council` skill for getting second opinions from Gemini and Codex.
+Use the `llm-council` skill for second opinions. Invoke when:
+- Uncertain about the correct approach
+- Tried 2+ approaches that didn't work
+- About to implement complex MMA loops
+- Implementation diverges from optimization plan
 
-**Invoke llm-council when**:
-- You're uncertain about the correct approach (proactive consultation)
-- You've tried 2+ approaches and none work (stuck detection)
-- You're about to implement complex MMA loops (high-risk verification)
-- Your implementation diverges significantly from the optimization plan (drift detection)
-
-**How to invoke**:
-```
-"Invoke llm-council to review {topic}.
-Context: {what you're trying to do}
-Questions: {specific concerns}"
-```
-
-**Bias toward consultation**: A 10-minute council review is cheaper than hours debugging a flawed approach. When in doubt, consult.
+To invoke: Use the Skill tool with `llm-council`. The skill has its own context preparation instructions.
 
 **Context Preservation**:
 - Current phase: {current_phase}
@@ -62,8 +65,13 @@ Questions: {specific concerns}"
 
 ## Phase 1: Gather Constraints (with vLLM Code Analysis)
 
+**Task Tool Parameters**:
+- `description`: "Phase 1: Gather MoE constraints for {model_id}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Phase 1: Gather MoE monokernel constraints for {model_id} on {hardware} with TP={tp}, dtype={dtype}.
+Phase 1: Gather MoE monokernel constraints for {model_id} on {hardware} with TP={tp}, dtype={dtype}.
 
 **Ultimate Goal**: Successfully integrate optimized MoE monokernel for {model_id} on {hardware}, targeting decode batch sizes ≤64.
 
@@ -288,15 +296,19 @@ Read these documents for optimization patterns:
 ```
 
 {common_behavioral_footer}
-")
 ```
 
 ---
 
 ## Phase 2: Optimization Planning
 
+**Task Tool Parameters**:
+- `description`: "Phase 2: Plan {model_id} optimization"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Phase 2: Create optimization plan for {model_id} monokernel.
+Phase 2: Create optimization plan for {model_id} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -430,7 +442,6 @@ struct Config_{model_short} {{
 ```
 
 {common_behavioral_footer}
-")
 ```
 
 ---
@@ -448,8 +459,13 @@ Phase 3 is restructured into 4 stages (not 6) to keep related work together:
 
 ### Stage 1: Routing and Prepare
 
+**Task Tool Parameters**:
+- `description`: "Phase 3 routing_and_prepare: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Implement routing and token preparation for {model_short} monokernel.
+Implement routing and token preparation for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -512,13 +528,17 @@ cmake --build --preset release --target install
 ```
 
 {common_behavioral_footer}
-")
 ```
 
 ### Stage 2: Activation Quantization (Conditional)
 
+**Task Tool Parameters**:
+- `description`: "Phase 3 activation_quantization: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Implement activation quantization for {model_short} monokernel.
+Implement activation quantization for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -544,7 +564,6 @@ If BF16/FP16 (no quantization needed):
 - No scale folding needed
 
 {common_behavioral_footer}
-")
 ```
 
 ### Stage 3: GEMM Implementation (CRITICAL - Up + Down Together)
@@ -552,8 +571,13 @@ If BF16/FP16 (no quantization needed):
 This is the most complex stage. **Up-projection and down-projection are implemented together**
 because they share 90% of their structure (MMA patterns, warp specialization, double buffering).
 
+**Task Tool Parameters**:
+- `description`: "Phase 3 gemm_implementation: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Implement GEMM kernels (up-projection AND down-projection) for {model_short} monokernel.
+Implement GEMM kernels (up-projection AND down-projection) for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -716,13 +740,17 @@ If count is 0 → MMA loop not implemented. Exit BLOCKED.
   - What went wrong
 
 {common_behavioral_footer}
-")
 ```
 
 ### Stage 4: Kernel Assembly
 
+**Task Tool Parameters**:
+- `description`: "Phase 3 kernel_assembly: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Assemble main kernel and output conversion for {model_short} monokernel.
+Assemble main kernel and output conversion for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -782,15 +810,19 @@ cmake --build --preset release --target install
 ```
 
 {common_behavioral_footer}
-")
 ```
 
 ---
 
 ## Phase 4: Validation
 
+**Task Tool Parameters**:
+- `description`: "Phase 4: Validate {model_short} monokernel"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Validate {model_short} monokernel correctness and performance.
+Validate {model_short} monokernel correctness and performance.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -852,15 +884,19 @@ Write to `{artifact_dir}/validation_results.md`:
 ```
 
 {common_behavioral_footer}
-")
 ```
 
 ---
 
 ## Phase 5: Integration
 
+**Task Tool Parameters**:
+- `description`: "Phase 5: Integrate {model_short} monokernel into vLLM"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-Task("Integrate {model_short} monokernel into vLLM.
+Integrate {model_short} monokernel into vLLM.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -890,5 +926,4 @@ Task("Integrate {model_short} monokernel into vLLM.
 - Integration instructions in `{artifact_dir}/integration.md`
 
 {common_behavioral_footer}
-")
 ```

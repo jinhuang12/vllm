@@ -90,7 +90,7 @@ capture_gemini_session_id() {
 capture_codex_session_id() {
     # Capture the most recent Codex session ID from filesystem
     # Sessions stored at: ~/.codex/sessions/YYYY/MM/DD/rollout-TIMESTAMP-UUID.jsonl
-    sleep 1  # Allow session file to be written
+    sleep 5  # Allow session file to be written (Codex may take a few seconds)
     local session_file
     session_file=$(find ~/.codex/sessions -name "*.jsonl" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1 || echo "")
     if [ -n "$session_file" ]; then
@@ -317,6 +317,7 @@ Provide your independent assessment following the response format in the critic 
         if [ -n "$CODEX_SESSION" ]; then
             echo "  Session: Resume by ID (${CODEX_SESSION:0:8}...)"
 
+            # Note: codex exec resume does not support --output-last-message, so capture stdout
             codex exec resume "$CODEX_SESSION" \
               "Round $ROUND of $MAX_ROUNDS - Revision Review
 
@@ -338,9 +339,10 @@ Focus on:
 
 Vote: ACCEPT (no blocking issues remain) or REJECT (blocking issues still exist)
 Follow the response format from the original critic prompt." \
-              --output-last-message "$CRITIC_2_OUTPUT"
+              > "$CRITIC_2_OUTPUT" 2>&1
         else
             echo "  WARNING: No session ID found, using --last fallback"
+            # Note: codex exec resume does not support --output-last-message, so capture stdout
             codex exec resume --last \
               "Round $ROUND of $MAX_ROUNDS - Revision Review
 
@@ -362,7 +364,7 @@ Focus on:
 
 Vote: ACCEPT (no blocking issues remain) or REJECT (blocking issues still exist)
 Follow the response format from the original critic prompt." \
-              --output-last-message "$CRITIC_2_OUTPUT"
+              > "$CRITIC_2_OUTPUT" 2>&1
             capture_codex_session_id
         fi
     fi

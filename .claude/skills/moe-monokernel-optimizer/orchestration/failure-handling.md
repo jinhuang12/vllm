@@ -240,24 +240,14 @@ $(grep -A 100 "{relevant_function}" assets/LLAMA4_MONOKERNEL_PATCH.md)
 
 ### Invoking Council
 
-```python
-# Orchestrator invokes llm-council skill
-council_context_file = "{artifact_dir}/council_context_{round}.md"
-write_file(council_context_file, council_context)
+Use the Skill tool with `llm-council`. The llm-council skill has its own context preparation instructions.
 
-# Use llm-council skill
-# This skill queries Gemini and Codex in parallel
-council_result = invoke_skill(
-    skill="llm-council",
-    topic=f"MoE monokernel {stage_name} implementation blocked",
-    context_file=council_context_file,
-    mode="single-round"  # or "deliberation" for complex issues
-)
-
-# Save council feedback
-council_feedback_file = f"{artifact_dir}/council_feedback_{round}.md"
-write_file(council_feedback_file, council_result)
-```
+**Steps**:
+1. Prepare context: Write council context to `{artifact_dir}/council_context_{round}.md`
+2. State intent: "I'll invoke llm-council to review this blocked stage."
+3. Use Skill tool with `llm-council`
+4. Review output from `.llm-council/tmp/critic_*.md`
+5. Save synthesis to `{artifact_dir}/council_feedback_{round}.md`
 
 ### Synthesizing Recommendation
 
@@ -417,28 +407,14 @@ To restore optimized version:
 
 ### Continuing After Fallback
 
-Fallback doesn't block progress:
+Fallback doesn't block progress.
 
-```python
-def implement_fallback(stage):
-    # 1. Create fallback implementation
-    fallback_task = spawn_task(
-        prompt=FALLBACK_PROMPT.format(stage=stage),
-        timeout=shorter_timeout  # Fallback should be simpler
-    )
-    
-    # 2. Document limitation
-    write_fallback_doc(stage)
-    
-    # 3. Update state
-    state.stages[stage].status = "complete"  # Not "failed"
-    state.stages[stage].is_fallback = True
-    state.stages[stage].fallback_reason = "..."
-    
-    # 4. Continue to next stage
-    next_stage = get_next_stage(stage)
-    spawn_stage_task(next_stage)
-```
+**Steps** (illustrative - orchestrator implements this logic using the Task tool):
+
+1. **Spawn fallback Task**: Use Task tool with `subagent_type: "general-purpose"` to implement simplified version
+2. **Document limitation**: Write fallback docs to `{artifact_dir}/fallback_{stage}.md`
+3. **Update state**: Mark stage as `"complete"` with `is_fallback: true`
+4. **Continue**: Spawn next stage Task
 
 ---
 
