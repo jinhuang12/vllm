@@ -283,7 +283,7 @@ if [ "$CODEX_AVAILABLE" = true ]; then
     echo "  Mode: full access + web search"
 
     # Common Codex flags for full access (dangerously bypass approvals and sandbox)
-    CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox --search -C ."
+    CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox -C ."
 
     if [ "$ROUND" -eq 1 ]; then
         echo "  Session: Fresh (Round 1)"
