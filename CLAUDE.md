@@ -415,7 +415,7 @@ elapsed_ms = start_event.elapsed_time(end_event) / num_iters
 
 ## LLM Council Usage Policy
 
-For complex development tasks (especially CUDA kernel development), **proactively** invoke the `llm-council` skill to get a second opinion from Gemini and Codex. The 30-60s latency is worth it to catch issues early.
+For complex development tasks (especially CUDA kernel development), **proactively** invoke the `llm-council` skill to get a second opinion from Gemini and Codex. Each deliberation round takes **~20-30 minutes** (Gemini and Codex do deep codebase exploration), but this catches issues that would cost hours to debug.
 
 ### When to Use llm-council
 
@@ -447,8 +447,22 @@ When spawning Task subagents for implementation, include council checkpoints:
 
 | Cost | Benefit |
 |------|---------|
-| 30-60s latency per invocation | Catches architectural flaws early |
+| ~20-30 min per deliberation round | Catches architectural flaws early |
 | ~2-5K tokens per round | Avoids hours of debugging wrong approach |
 | Requires CLI setup | Diverse perspectives (3 different models) |
 
-**Rule of thumb**: If you're about to spend >30 minutes on implementation, spend 60 seconds getting council feedback first.
+**Rule of thumb**: If you're about to spend >2 hours on implementation, invest ~30 min getting council feedback first.
+
+### IMPORTANT: Background Execution Required
+
+Because each deliberation round takes 20-30 minutes and the Bash tool's max timeout is 10 minutes, **ALWAYS run deliberation in background mode**:
+
+```
+Bash tool with:
+  command: "bash .claude/skills/llm-council/scripts/run_deliberation.sh 1 3"
+  run_in_background: true
+
+# Check results with TaskOutput when complete
+```
+
+See `.claude/skills/llm-council/SKILL.md` for detailed execution patterns.

@@ -1,11 +1,58 @@
 ---
 name: llm-council
-description: Use Gemini CLI and Codex CLI as a council of critics to review Claude's proposals, plans, and approaches. Triggers when (1) needing a second opinion on architecture or design decisions, (2) stuck on debugging after 3+ failed attempts, (3) reviewing complex implementation plans before execution, (4) validating assumptions across multiple AI models, (5) completing a major implementation phase before proceeding, (6) before finalizing any optimization plan or CUDA kernel design, (7) after generating significant code that will be committed. Use PROACTIVELY - the 30-60s latency catches issues that would cost hours to debug. Features full codebase access (YOLO mode), web search verification, session ID tracking for robust resume, and graceful degradation when one CLI is unavailable.
+description: Use Gemini CLI and Codex CLI as a council of critics to review Claude's proposals, plans, and approaches. Triggers when (1) needing a second opinion on architecture or design decisions, (2) stuck on debugging after 2+ failed attempts, (3) reviewing complex implementation plans before execution, (4) validating assumptions across multiple AI models, (5) completing a major implementation phase before proceeding, (6) before finalizing any optimization plan or CUDA kernel design, (7) after generating significant code that will be committed. Use PROACTIVELY - each round takes ~20-30 minutes but catches issues that would cost hours to debug. Features full codebase access (YOLO mode), web search verification, session ID tracking for robust resume, and graceful degradation when one CLI is unavailable.
 ---
 
 # LLM Council
 
 Consult Gemini and Codex as critics to review your proposals before implementation.
+
+## CRITICAL: Long-Running Command Handling
+
+**Each deliberation round takes 20-30 minutes** because Gemini and Codex perform deep codebase exploration and web searches.
+
+### Why This Matters
+- The Bash tool's maximum timeout is **600,000ms (10 minutes)** - NOT enough for deliberation
+- Default timeout is only 2 minutes, which will fail immediately
+
+### Required Approach: Background Execution
+
+**ALWAYS use `run_in_background: true`** when invoking deliberation scripts:
+
+```
+# CORRECT: Run in background, check results later
+Bash tool with:
+  command: "bash .claude/skills/llm-council/scripts/run_deliberation.sh 1 3"
+  run_in_background: true
+  description: "Run council deliberation round 1 (20-30 min)"
+
+# Then use TaskOutput to check status periodically
+TaskOutput tool with:
+  task_id: <shell_id from above>
+  block: false  # Non-blocking check
+  timeout: 30000
+
+# Or wait for completion (up to 45 min)
+TaskOutput tool with:
+  task_id: <shell_id>
+  block: true
+  timeout: 2700000  # 45 minutes in ms
+```
+
+### Do NOT Do This
+```
+# WRONG: Will timeout after 2-10 minutes
+Bash tool with:
+  command: "bash .claude/skills/llm-council/scripts/run_deliberation.sh 1 3"
+  timeout: 600000  # Max 10 min - still not enough!
+```
+
+### Execution Pattern
+
+1. **Start deliberation in background** → get shell_id
+2. **Do other work** or wait
+3. **Check status with TaskOutput** (non-blocking or blocking)
+4. **Read results from `.llm-council/history.md`** when complete
 
 ## Features
 

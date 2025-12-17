@@ -2,12 +2,23 @@
 
 Validation scripts are located in the vLLM repository, not in this skill directory.
 
+## Validation Workflow (3 Stages)
+
+| Stage | Purpose | Tool |
+|-------|---------|------|
+| **4.1 Correctness** | Verify numerical accuracy | pytest / manual test |
+| **4.2 Kernel-Level** | Pure kernel performance (CUDA graphs) | benchmark script |
+| **4.3 E2E Latency** | Real inference impact | `vllm bench latency` |
+
+**See also**: [E2E_LATENCY_GUIDE.md](E2E_LATENCY_GUIDE.md) for detailed E2E benchmark instructions.
+
 ## Script Locations
 
 Validation scripts are located in:
 ```
 Test scripts:      {vllm_repo}/tests/kernels/moe/
 Benchmark scripts: {vllm_repo}/benchmarks/kernels/
+E2E benchmarks:    vllm bench latency (CLI tool)
 ```
 
 ## Required Scripts
@@ -61,6 +72,16 @@ Model-agnostic - works for any monokernel.
 """
 Breaks down latency by MoE stage (router, prepare, scale, gemm1, gemm2).
 Requires clock64() instrumentation in kernel (optional).
+"""
+```
+
+### 6. E2E Latency Benchmark (CLI Tool)
+Uses `vllm bench latency` - no script needed.
+
+```bash
+"""
+Measures real inference latency with all optimizations enabled.
+Tests monokernel impact on actual vLLM serving performance.
 """
 ```
 
@@ -158,3 +179,37 @@ ncu --import moe_monokernel_{model}_bs64.ncu-rep --csv > moe_{model}_bs64.csv
 # Analyze
 python benchmarks/kernels/analyze_ncu_moe.py moe_{model}_bs64.csv
 ```
+
+### E2E Latency Benchmark
+
+See [E2E_LATENCY_GUIDE.md](E2E_LATENCY_GUIDE.md) for full details.
+
+```bash
+# Quick comparison (batch_size=8, decode-heavy workload)
+
+# Baseline
+vllm bench latency \
+    --model {model_id} \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --input-len 64 --output-len 512 \
+    --batch-size 8 \
+    --num-iters 10 \
+    --output-json /tmp/baseline.json
+
+# Monokernel
+VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
+    --model {model_id} \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --input-len 64 --output-len 512 \
+    --batch-size 8 \
+    --num-iters 10 \
+    --output-json /tmp/monokernel.json
+```
+
+**Key points:**
+- Monokernel is a **decode optimization** (batch_size ≤ 64 tokens through MoE)
+- Use `--input-len 64 --output-len 512` for decode-heavy workload
+- Representative batch sizes: 4 (best), 8 (typical), 32 (marginal)
+- Expect 2-11% improvement depending on batch size

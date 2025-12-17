@@ -113,8 +113,62 @@ ncu --set full \
 ncu --import profile_moe_qwen3.ncu-rep --csv > profile_moe_qwen3.csv
 ```
 
+## E2E Latency Benchmark Results (December 2024)
+
+Benchmarked using `vllm bench latency` on L40S with CUDA graphs and torch.compile enabled.
+
+**Config**: input_len=64, output_len=512 (decode-heavy workload)
+
+| Batch Size | Baseline (s) | Monokernel (s) | Speedup | Improvement |
+|------------|-------------|----------------|---------|-------------|
+| 1 | 5.10 | 4.74 | **1.08x** | 7.1% |
+| 4 | 8.40 | 7.48 | **1.12x** | 11.0% |
+| 8 | 10.95 | 10.20 | **1.07x** | 6.9% |
+| 16 | 14.76 | 13.65 | **1.08x** | 7.6% |
+| 32 | 18.79 | 17.95 | **1.05x** | 4.5% |
+| 64 | 22.82 | 22.41 | **1.02x** | 1.8% |
+
+**Key Insights**:
+- Monokernel is a **decode-phase optimization** (activates when batch_size ≤ 64 tokens through MoE)
+- Best improvement at **batch_size=4** (11% faster)
+- Consistent improvement across all supported batch sizes (1-64)
+- Improvement decreases as batch size increases (GEMM compute dominates)
+
+### Running E2E Latency Benchmarks
+
+```bash
+# Baseline
+vllm bench latency \
+    --model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --input-len 64 --output-len 512 \
+    --batch-size 8 \
+    --num-iters 20 \
+    --output-json /tmp/baseline_bs8.json
+
+# Monokernel
+VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
+    --model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --input-len 64 --output-len 512 \
+    --batch-size 8 \
+    --num-iters 20 \
+    --output-json /tmp/monokernel_bs8.json
+```
+
+### Why Decode-Heavy Workloads?
+
+The monokernel only activates when **batch_size ≤ 64 tokens** pass through the MoE layer:
+- During **prefill** with input_len=1024: 1024 tokens → monokernel NOT used (fallback)
+- During **decode** with batch_size=8: 8 tokens → monokernel IS used
+
+This is why we use `--input-len 64 --output-len 512` (decode-heavy) to showcase monokernel impact.
+
 ## Known Issues
 
 1. **BS=1/2 Split-H**: Very small batches may show higher variance due to atomicAdd contention
 2. **FP8 Outliers**: Some expert combinations produce larger errors than others
 3. **Warmup Required**: First invocation may be slower due to CUDA lazy initialization
+4. **Prefill Not Optimized**: Monokernel only helps decode phase when batch_size ≤ 64

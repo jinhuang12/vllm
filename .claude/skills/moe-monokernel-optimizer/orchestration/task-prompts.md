@@ -16,20 +16,31 @@ Example: For Qwen3-30B-A3B-FP8 on L40S with TP=1:
 Append to ALL task prompts:
 
 ```markdown
+**LLM Council Consultation**:
+Use the `llm-council` skill for second opinions. Invoke when:
+- Uncertain about the correct approach
+- Tried 2+ approaches that didn't work
+
+To invoke: Use the Skill tool with `llm-council`. The skill has its own context preparation instructions.
+
 **Behavioral Expectations**:
-1. **Read before write**: Read all referenced documents before implementing
-2. **Compile often**: Run `cmake --build --preset release --target install` after each major change
-3. **On compile error**:
-   - Read the full error message
-   - Identify root cause (typo, missing include, dimension mismatch, type error)
-   - Fix and retry (up to 3 attempts per distinct error)
-4. **On stuck** (same error 3+ times):
+1. **Read before write**: Read all referenced documents before drafting an implementation plan
+2. **Review plan with llm-council**: Invoke `llm-council` to have the draft plan reviewed
+   - Revise until accepted: If plan is REJECTED & the rejection reasons are valid, revise the plan & do another round of llm-council review until accepted by all critics
+3. **Compile often**: Run `cmake --build --preset release --target install` after each major change:
+   - On compile error:
+    - Read the full error message
+    - Identify root cause (typo, missing include, dimension mismatch, type error)
+    - Fix and retry (up to 2 attempts per distinct error)
+    - Consult with `llm-council` if unable to fix after 2 attempts
+4. **Stuck** (error 2+ times even after consulting `llm-council`):
    - Document in `{artifact_dir}/blockers/{component}_blocker.md`:
      - Error message (full)
      - Attempts made with different approaches
      - Hypotheses for root cause
      - What you tried and why it didn't work
    - Exit with status "blocked"
+5. **Review implementation with llm-council**: Review the implementation with `llm-council` & address any valid findings.   
 5. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
 
 **State Management** (CRITICAL - Tasks have no shared memory):
@@ -43,15 +54,6 @@ Append to ALL task prompts:
   }
 }
 ```
-
-**LLM Council Consultation**:
-Use the `llm-council` skill for second opinions. Invoke when:
-- Uncertain about the correct approach
-- Tried 2+ approaches that didn't work
-- About to implement complex MMA loops
-- Implementation diverges from optimization plan
-
-To invoke: Use the Skill tool with `llm-council`. The skill has its own context preparation instructions.
 
 **Context Preservation**:
 - Current phase: {current_phase}
@@ -814,73 +816,208 @@ cmake --build --preset release --target install
 
 ---
 
-## Phase 4: Validation
+## Phase 4: Validation (3 Stages)
+
+Phase 4 validates the monokernel through three complementary approaches:
+
+| Stage | Purpose | Tool |
+|-------|---------|------|
+| 4.1 Correctness | Verify numerical accuracy | pytest / manual test |
+| 4.2 Kernel-Level | Pure kernel performance (CUDA graphs) | benchmark script |
+| 4.3 E2E Latency | Real inference impact | `vllm bench latency` |
+
+**Key Insight**: The monokernel is a **decode-phase optimization** that only activates when batch_size ≤ 64 tokens pass through the MoE layer. Use decode-heavy workloads to showcase impact.
+
+---
+
+### Stage 4.1: Correctness Verification
 
 **Task Tool Parameters**:
-- `description`: "Phase 4: Validate {model_short} monokernel"
+- `description`: "Phase 4.1: Correctness test for {model_short} monokernel"
 - `subagent_type`: "general-purpose"
 - `prompt`: [Copy the full prompt below]
 
 ```markdown
-Validate {model_short} monokernel correctness and performance.
+Verify {model_short} monokernel numerical correctness.
 
 **Ultimate Goal**: {ultimate_goal}
 
 **Read First**:
-- `{artifact_dir}/constraints.md`
-- `assets/benchmark_template.py` - adapt for this model
+- `{artifact_dir}/constraints.md` - model dimensions and dtype
+- `validation/QWEN3_BASELINE.md` - tolerance reference
 
-**Objective**: Verify numerical correctness and measure speedup.
+**Tolerance by dtype**:
+- FP32: atol=1e-3, rtol=1e-3
+- BF16/FP16: atol=1e-2, rtol=1e-2
+- FP8 block-quant: atol=300, rtol=0.5
 
-**Step 1: Correctness Test**
+**Test Implementation**:
 ```python
-# Compare monokernel vs stock fused_moe
 import torch
 from vllm._custom_ops import moe_monokernel_{model_short}
 from vllm.model_executor.layers.fused_moe import fused_moe
 
-# Create test inputs
-x = torch.randn(BS, K, dtype=torch.bfloat16, device='cuda')
-router = torch.randn(BS, E, dtype=torch.bfloat16, device='cuda')
-# ... setup weights ...
+# Test across batch sizes
+for BS in [1, 8, 64]:
+    # Create inputs (dimensions from constraints.md)
+    x = torch.randn(BS, {K}, dtype=torch.bfloat16, device='cuda') / 10
+    router = torch.randn(BS, {E}, dtype=torch.bfloat16, device='cuda')
+    # ... setup weights from constraints ...
 
-# Run both
-mono_out = moe_monokernel_{model_short}(x, router, ...)
-stock_out = fused_moe(x, router, ...)
+    # Run both paths
+    mono_out = moe_monokernel_{model_short}(x, router, ...)
+    stock_out = fused_moe(x, router, ...)
 
-# Compare
-diff = (mono_out - stock_out).abs().max()
-assert diff < 1e-2, f'Numerical mismatch: {diff}'
-print(f'Max diff: {diff} - PASS')
+    # Compare with dtype-appropriate tolerance
+    torch.testing.assert_close(mono_out, stock_out, atol={atol}, rtol={rtol})
+    print(f'BS={BS}: Max diff={diff:.4f} - PASS')
 ```
 
-**Step 2: Performance Benchmark**
-Adapt `assets/benchmark_template.py` for this model:
-- Update dimensions (K, N, E, top_k)
-- Update batch sizes to test
-- Run and collect results
+**Output**: Update `{artifact_dir}/state.json` with:
+```json
+"validation_results": {
+  "correctness": {
+    "status": "pass",
+    "max_abs_diff": 0.0XXX,
+    "batch_sizes_tested": [1, 8, 64]
+  }
+}
+```
 
-**Step 3: Document Results**
-Write to `{artifact_dir}/validation_results.md`:
+{common_behavioral_footer}
+```
+
+---
+
+### Stage 4.2: Kernel-Level Benchmark (CUDA Graphs)
+
+**Task Tool Parameters**:
+- `description`: "Phase 4.2: Kernel benchmark for {model_short} monokernel"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
+```markdown
+Benchmark {model_short} monokernel kernel-level performance under CUDA graphs.
+
+**Ultimate Goal**: {ultimate_goal}
+
+**Read First**:
+- `{artifact_dir}/constraints.md` - model dimensions
+- `benchmarks/kernels/benchmark_moe_monokernel_qwen3.py` - reference implementation
+
+**Why CUDA Graphs**: Eliminates kernel launch overhead for apples-to-apples comparison between monokernel (1 kernel) and baseline (5-7 kernels).
+
+**Run Benchmark**:
+```bash
+# Adapt existing benchmark or create new one
+python benchmarks/kernels/benchmark_moe_monokernel_{model_short}.py \
+    --batch-sizes 1 4 8 16 32 64 \
+    --use-cuda-graph \
+    --baseline-scope e2e \
+    --num-iters 100 \
+    --output /tmp/{model_short}_kernel_benchmark
+```
+
+**Baseline Scope = e2e**: Includes routing (topk_softmax) + expert computation (fused_experts) in baseline timing, matching what monokernel fuses.
+
+**Expected Output Format**:
+```
+BS=1: monokernel=X.XXms, baseline=Y.YYms, speedup=Z.ZZx
+BS=8: monokernel=X.XXms, baseline=Y.YYms, speedup=Z.ZZx
+...
+```
+
+**Output**: Update `{artifact_dir}/state.json` with kernel-level results.
+
+{common_behavioral_footer}
+```
+
+---
+
+### Stage 4.3: E2E Latency Benchmark
+
+**Task Tool Parameters**:
+- `description`: "Phase 4.3: E2E latency benchmark for {model_short} monokernel"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
+```markdown
+Benchmark {model_short} monokernel E2E inference latency using vLLM CLI.
+
+**Ultimate Goal**: {ultimate_goal}
+
+**Read First**:
+- `{artifact_dir}/constraints.md` - model ID and TP setting
+- `validation/E2E_LATENCY_GUIDE.md` - detailed guide
+
+**Key Understanding**:
+- Monokernel is a **decode optimization** (batch_size ≤ 64 tokens through MoE)
+- During prefill with input_len=1024: monokernel NOT used (>64 tokens)
+- During decode with batch_size=8: monokernel IS used (8 tokens)
+- Use decode-heavy workloads: `--input-len 64 --output-len 512`
+
+**Run E2E Benchmarks**:
+```bash
+# Test representative batch sizes: 4 (best), 8 (typical), 32 (marginal)
+for BS in 4 8 32; do
+    echo "=== Testing batch_size=$BS ==="
+
+    # Baseline
+    vllm bench latency \
+        --model {model_id} \
+        --tensor-parallel-size {tp} \
+        --max-model-len 4096 \
+        --input-len 64 --output-len 512 \
+        --batch-size $BS \
+        --num-iters 10 \
+        --output-json /tmp/baseline_bs${BS}.json 2>&1 | grep "Avg latency"
+
+    # Monokernel
+    VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
+        --model {model_id} \
+        --tensor-parallel-size {tp} \
+        --max-model-len 4096 \
+        --input-len 64 --output-len 512 \
+        --batch-size $BS \
+        --num-iters 10 \
+        --output-json /tmp/monokernel_bs${BS}.json 2>&1 | grep "Avg latency"
+done
+```
+
+**Expected Results** (Qwen3-FP8 on L40S reference):
+| Batch Size | Expected Improvement |
+|------------|---------------------|
+| 4 | ~11% (best) |
+| 8 | ~7% |
+| 32 | ~4-5% |
+
+**Document Results**: Write to `{artifact_dir}/validation_results.md`:
 ```markdown
 # Validation Results
 
 ## Correctness
 - Max absolute diff: {value}
-- Status: PASS/FAIL
+- Status: PASS
 
-## Performance
-| Batch Size | Stock (ms) | Monokernel (ms) | Speedup |
-|------------|------------|-----------------|---------|
-| 1 | {x} | {y} | {z}x |
-| 4 | ... | ... | ... |
-| 8 | ... | ... | ... |
-| 16 | ... | ... | ... |
-| 32 | ... | ... | ... |
-| 64 | ... | ... | ... |
+## Kernel-Level Performance (CUDA Graphs)
+| Batch Size | Baseline (ms) | Monokernel (ms) | Speedup |
+|------------|--------------|-----------------|---------|
+| 1 | X.XX | Y.YY | Z.ZZx |
+| ... | ... | ... | ... |
+
+## E2E Latency (vllm bench latency)
+Config: input_len=64, output_len=512, {hardware}
+
+| Batch Size | Baseline (s) | Monokernel (s) | Speedup | Improvement |
+|------------|-------------|----------------|---------|-------------|
+| 4 | X.XX | Y.YY | Z.ZZx | N% |
+| 8 | X.XX | Y.YY | Z.ZZx | N% |
+| 32 | X.XX | Y.YY | Z.ZZx | N% |
 
 ## Recommendation
-{Which batch sizes benefit from monokernel}
+- Enable monokernel for batch_size ≤ {threshold}
+- Expected improvement: {X}% for typical serving load
+- Best use case: Low-concurrency serving (chat, code completion)
 ```
 
 {common_behavioral_footer}

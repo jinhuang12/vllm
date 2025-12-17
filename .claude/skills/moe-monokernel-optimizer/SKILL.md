@@ -112,8 +112,8 @@ Use the **Task tool** with these required parameters:
 
 | Phase | Subagent Type | Rationale |
 |-------|---------------|-----------|
-| Phase 1: Constraints | `Explore` | Primarily code analysis and reading |
-| Phase 2: Planning | `Plan` | Design and decision-making |
+| Phase 1: Constraints | `general-purpose` | Primarily code analysis and reading |
+| Phase 2: Planning | `general-purpose` | Design and decision-making |
 | Phase 3: Implementation | `general-purpose` | Writing CUDA code, running compiles |
 | Phase 4: Validation | `general-purpose` | Running tests and benchmarks |
 | Phase 5: Integration | `general-purpose` | Modifying build system and Python |
@@ -122,7 +122,7 @@ Use the **Task tool** with these required parameters:
 ```
 Use the Task tool with:
 - description: "Phase 1: Gather MoE constraints"
-- subagent_type: "Explore"
+- subagent_type: "general-purpose"
 - prompt: [Copy FULL prompt from orchestration/task-prompts.md § Phase 1]
 ```
 
