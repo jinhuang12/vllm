@@ -57,6 +57,168 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Phase 4 Validation Failure Handling
+
+Validation failures are **distinct from implementation failures**. When Phase 4 
+validation fails, the workflow triggers an investigation task rather than the 
+standard 6-level escalation ladder.
+
+### Why Different?
+
+| Implementation Failure | Validation Failure |
+|-----------------------|-------------------|
+| Code doesn't compile or crashes | Code runs but produces wrong/slow results |
+| Error message often points to fix | Root cause unclear, needs diagnosis |
+| Retry with fix may help immediately | Retry without diagnosis is wasted effort |
+| Uses Level 1-6 escalation ladder | Uses Investigation workflow |
+
+### When Does Investigation Trigger?
+
+| Stage | Failure Condition | Investigation Type |
+|-------|------------------|-------------------|
+| 4.1 Correctness | `max_diff > tolerance` | `correctness` |
+| 4.2 Kernel Perf | `speedup < 1.0x` at any batch size | `kernel_perf` |
+| 4.3 E2E Latency | `improvement ≤ 5%` (BS≤8) or `≤ 0%` (BS>8) | `e2e_perf` |
+
+### Investigation Workflow
+
+```
+Validation fails with status "needs_investigation"
+                    │
+                    ▼
+        ┌─────────────────────┐
+        │ Orchestrator spawns │
+        │ investigation task  │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │ Investigation runs  │
+        │ bounded diagnostics │
+        │ (max 2 NCU, 3 hyp.) │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │ Draft fix proposal  │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │ Council reviews     │
+        │ proposal            │
+        └──────────┬──────────┘
+                   │
+        ┌──────────┴──────────┐
+        │                     │
+        ▼                     ▼
+    ACCEPTED              REJECTED
+        │                     │
+        │              ┌──────┴──────┐
+        │              │ Revise      │
+        │              │ (max 2x)    │
+        │              └──────┬──────┘
+        │                     │
+        │         ┌───────────┤
+        │         │           │
+        │         ▼           ▼
+        │     ACCEPTED    Still rejected
+        │         │           │
+        └────┬────┘           │
+             │                ▼
+             ▼         escalate_human
+        Decision
+        Matrix
+```
+
+### Investigation Bounds (HARD LIMITS)
+
+These limits prevent infinite debugging loops:
+
+| Resource | Limit | Rationale |
+|----------|-------|-----------|
+| NCU profiling runs | 2 | Expensive, diminishing returns after first analysis |
+| Hypothesis-test cycles | 3 | Forces focused diagnosis, prevents rabbit holes |
+| Council review rounds | 2 | Forces convergence on fix or escalation |
+| Total investigation scope | 1 cycle | Single comprehensive investigation, then decide |
+
+If any limit is exceeded without resolution → `escalate_human`
+
+### Investigation Artifacts
+
+All investigation outputs are stored in `{artifact_dir}/investigation/`:
+
+```
+investigation/
+├── correctness_analysis.md    # 4.1: Divergence analysis, binary search results
+├── stage_breakdown.json       # 4.2: Per-stage latency comparison
+├── ncu_bs1.csv               # 4.2: NCU metrics at batch size 1
+├── ncu_bs8.csv               # 4.2: NCU metrics at batch size 8
+├── perf_analysis.md          # 4.2: Performance bottleneck analysis
+├── e2e_analysis.md           # 4.3: E2E investigation findings
+└── fix_proposal.md           # Council-reviewed fix proposal (all types)
+```
+
+### Decision Matrix
+
+After council approves the investigation findings:
+
+| Root Cause Category | Decision | Orchestrator Action |
+|--------------------|----------|---------------------|
+| **Implementation bug** (wrong logic, missing step, typo) | `phase_3` | Reset target stage to `pending`, spawn task with fix context |
+| **Algorithmic decision wrong** (wrong tiling, sorter, output path) | `phase_2` | Reset Phase 2, re-plan with new constraints |
+| **Expected behavior** (model doesn't benefit, MoE not bottleneck) | `document_proceed` | Document limitation, proceed to Phase 5 |
+| **Measurement/environment issue** (wrong baseline, thermal throttling) | `rerun_validation` | Re-spawn the failing validation stage |
+| **Cannot determine** (investigation inconclusive) | `escalate_human` | Set status to `escalated`, report to user |
+
+### State Transitions After Investigation
+
+```
+investigation.decision = "phase_3"
+    └── state.phases.3_implementation.status = "in_progress"
+        state.phases.3_implementation.stages.{target}.status = "pending"
+        state.phases.4_validation.status = "pending"
+        → Spawn stage task with fix_context
+
+investigation.decision = "phase_2"
+    └── state.phases.2_planning.status = "in_progress"
+        state.phases.3_implementation.status = "pending"
+        state.phases.4_validation.status = "pending"
+        → Spawn Phase 2 task with additional_constraints
+
+investigation.decision = "document_proceed"
+    └── state.phases.4_validation.status = "complete"
+        state.phases.4_validation.limitation = limitation_doc
+        → Append to validation_results.md, advance to Phase 5
+
+investigation.decision = "rerun_validation"
+    └── state.phases.4_validation.stages.{failing}.status = "pending"
+        state.phases.4_validation.investigation = null
+        → Spawn validation task for failing stage
+
+investigation.decision = "escalate_human"
+    └── state.phases.4_validation.status = "escalated"
+        → Print report, pause workflow
+```
+
+### Full Investigation Task Prompts
+
+See: `orchestration/investigation-prompts.md`
+
+Each investigation type has a detailed task prompt with:
+- Specific diagnostic steps
+- Required profiling commands  
+- Hypothesis formation framework
+- Proposal format for council review
+- Decision criteria
+
+---
+
+## Implementation Failure Handling (Levels 1-6)
+
+The following escalation ladder applies to **implementation failures** in Phases 1-3 
+and Phase 5. It does NOT apply to Phase 4 validation failures.
+
 ---
 
 ## Level 1: Task Self-Fix

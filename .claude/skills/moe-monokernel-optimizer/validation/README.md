@@ -12,6 +12,77 @@ Validation scripts are located in the vLLM repository, not in this skill directo
 
 **See also**: [E2E_LATENCY_GUIDE.md](E2E_LATENCY_GUIDE.md) for detailed E2E benchmark instructions.
 
+## Validation Failure Investigation
+
+When a validation stage fails, the orchestrator spawns an investigation task 
+to diagnose the root cause before deciding on next action. This replaces the 
+generic "blocked" behavior used in implementation phases.
+
+### Success Criteria Summary
+
+**Stage 4.1 (Correctness)**:
+| Data Type | Absolute Tolerance | Relative Tolerance |
+|-----------|-------------------|-------------------|
+| FP32 | 1e-3 | 1e-3 |
+| BF16/FP16 | 1e-2 | 1e-2 |
+| FP8 block-quant | 300 | 0.5 |
+
+**Stage 4.2 (Kernel Performance)**:
+- **STRICT**: `speedup >= 1.0x` at ALL tested batch sizes
+- No regressions allowed under CUDA graphs
+- Batch sizes tested: 1, 4, 8, 16, 32, 64
+
+**Stage 4.3 (E2E Latency)**:
+| Batch Size | Required Improvement |
+|------------|---------------------|
+| 1, 4, 8 | > 5% |
+| 16, 32, 64 | > 0% |
+
+### Investigation Triggers
+
+| Stage | Exit Status | Trigger Condition |
+|-------|-------------|-------------------|
+| 4.1 | `needs_investigation` | `max_diff > tolerance` for any batch size |
+| 4.2 | `needs_investigation` | `speedup < 1.0x` for any batch size |
+| 4.3 | `needs_investigation` | Improvement below threshold |
+
+### Investigation Types
+
+| Type | Focus | Key Diagnostics |
+|------|-------|-----------------|
+| `correctness` | Logic bugs, scale errors | Binary search for divergence point, intermediate value comparison |
+| `kernel_perf` | Performance regression | Per-stage profiling, NCU analysis, bottleneck identification |
+| `e2e_perf` | E2E improvement below target | Monokernel activation check, MoE time fraction analysis |
+
+### Investigation Task Prompts
+
+See: `orchestration/investigation-prompts.md`
+
+### Investigation Artifacts
+
+Location: `{artifact_dir}/investigation/`
+
+| File | Purpose | Created By |
+|------|---------|------------|
+| `correctness_analysis.md` | 4.1 failure root cause | correctness investigation |
+| `stage_breakdown.json` | Per-stage latency comparison | kernel_perf investigation |
+| `ncu_bs{N}.csv` | Nsight Compute metrics | kernel_perf investigation |
+| `perf_analysis.md` | 4.2 failure root cause | kernel_perf investigation |
+| `e2e_analysis.md` | 4.3 failure root cause | e2e_perf investigation |
+| `fix_proposal.md` | Council-reviewed fix proposal | all investigations |
+
+### Decision Matrix
+
+After investigation completes with council approval:
+
+| Decision | Meaning | Next Action |
+|----------|---------|-------------|
+| `phase_3` | Implementation bug found | Back to specific Phase 3 stage |
+| `phase_2` | Algorithmic decision wrong | Re-plan with new constraints |
+| `document_proceed` | Expected/acceptable behavior | Document limitation, proceed |
+| `rerun_validation` | Measurement issue fixed | Re-run failing stage |
+| `escalate_human` | Cannot determine cause | Pause for human review |
+
 ## Script Locations
 
 Validation scripts are located in:

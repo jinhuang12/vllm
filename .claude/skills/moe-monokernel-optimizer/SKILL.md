@@ -279,12 +279,27 @@ Task tool parameters:
 
 **GEMM Stage Self-Verification**: Tasks must verify no TODOs in MMA loops before completing. See [orchestration/task-prompts.md](orchestration/task-prompts.md).
 
-### Phase 4: Validation
+### Phase 4: Validation & Investigation
 
-Compare monokernel output against stock `fused_moe`:
-- Numerical correctness (max diff < 1e-2)
-- Performance benchmarking (MoE layer & end to end) across batch sizes
-- Use [validation/README.md](validation/README.md) for more details
+Validate monokernel against stock `fused_moe` in 3 stages:
+
+| Stage | Check | Success Criteria |
+|-------|-------|------------------|
+| 4.1 Correctness | Numerical accuracy | `max_diff < tolerance` (dtype-specific) |
+| 4.2 Kernel-Level | Performance under CUDA graphs | `speedup >= 1.0x` at all batch sizes |
+| 4.3 E2E Latency | Real inference impact | `>5%` improvement (BS≤8), `>0%` (BS>8) |
+
+**On failure**: Orchestrator spawns investigation task (1 bounded cycle).
+Investigation diagnoses root cause → council reviews fix proposal → decision:
+
+| Decision | Action |
+|----------|--------|
+| `phase_3` | Back to Phase 3 (specific stage with fix context) |
+| `phase_2` | Back to Phase 2 (re-plan with new constraints) |
+| `document_proceed` | Document limitation, proceed to Phase 5 |
+| `escalate_human` | Pause for human review |
+
+See [validation/README.md](validation/README.md) and [orchestration/investigation-prompts.md](orchestration/investigation-prompts.md).
 
 ### Phase 5: Integration
 
@@ -323,6 +338,7 @@ Wire monokernel into vLLM:
 | [task-prompts.md](orchestration/task-prompts.md) | Full behavioral specs for all phases/stages |
 | [workflow.md](orchestration/workflow.md) | Phase state machine, stage grouping, compile cadence |
 | [failure-handling.md](orchestration/failure-handling.md) | 6-level escalation ladder, blocker format, council protocol |
+| [investigation-prompts.md](orchestration/investigation-prompts.md) | Phase 4 investigation task prompts (correctness, kernel-perf, e2e-perf) |
 
 ## Validation
 
@@ -388,6 +404,7 @@ Orchestrator:
 
 ## Validation Checklist
 
+### Implementation (Phase 3)
 - [ ] vLLM code analysis completed (Phase 1)
 - [ ] Semantic differences from Llama 4 documented
 - [ ] Weight application order correct (Decision C)
@@ -397,5 +414,10 @@ Orchestrator:
 - [ ] `static_assert` all dimension divisibility constraints
 - [ ] SMEM usage < SMEM_limit - 8KB margin
 - [ ] Grid size ≤ SM count (for cooperative launch)
-- [ ] Correctness test vs stock `fused_moe` output (max diff < 1e-2)
-- [ ] Performance improvement documented across batch sizes
+
+### Validation (Phase 4)
+- [ ] **4.1 Correctness**: `max_diff < tolerance` for all batch sizes [1, 8, 64]
+- [ ] **4.2 Kernel Performance**: `speedup >= 1.0x` at all batch sizes (no regressions)
+- [ ] **4.3 E2E Latency**: `>5%` improvement at BS≤8, `>0%` at BS>8
+- [ ] If any validation failed → investigation completed with decision
+- [ ] If `document_proceed` → limitation documented in validation_results.md

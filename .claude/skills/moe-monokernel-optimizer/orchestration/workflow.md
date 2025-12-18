@@ -88,6 +88,87 @@ When a task exits with status "blocked" after 3 attempts, invoke council for ext
                     (any phase can fail → report)
 ```
 
+## Phase 4 Validation Flow (with Investigation)
+
+Phase 4 validation has a distinct failure handling path that triggers investigation
+rather than the standard escalation ladder used in implementation phases.
+
+### Validation Stage Flow
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Phase 4: Validation                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  4.1 Correctness ──┬── pass ──→ 4.2 Kernel Perf                 │
+│                    │                    │                        │
+│                    └── fail             ├── pass ──→ 4.3 E2E    │
+│                         │               │                │       │
+│                         ▼               └── fail         ├─ pass │
+│               ┌─────────────────┐            │           │       │
+│               │ investigate-    │            ▼           │       │
+│               │ correctness     │   ┌─────────────────┐  │       │
+│               └────────┬────────┘   │ investigate-    │  │       │
+│                        │            │ kernel-perf     │  │       │
+│                        ▼            └────────┬────────┘  │       │
+│               ┌─────────────────┐            │           │       │
+│               │ council-review  │            ▼           │       │
+│               └────────┬────────┘   ┌─────────────────┐  │       │
+│                        │            │ council-review  │  │       │
+│                        │            └────────┬────────┘  │       │
+│                        │                     │           │       │
+│                        └─────────┬───────────┘           │       │
+│                                  │                       │       │
+│                                  ▼                       │       │
+│                        ┌─────────────────┐               │       │
+│                        │ Decision Matrix │               │       │
+│                        └────────┬────────┘               │       │
+│                                 │                        │       │
+│     ┌───────────┬───────────────┼───────────┬───────────┤       │
+│     ▼           ▼               ▼           ▼           ▼       │
+│  Phase 3    Phase 2    Document &     Re-run      Escalate     │
+│  (stage)   (re-plan)    Proceed        4.X       to human      │
+│     │           │            │           │            │         │
+│     └───────────┴────────────┴───────────┘            │         │
+│                              │                        │         │
+│                              ├── 4.3 fail ──┐         │         │
+│                              │              ▼         │         │
+│                              │     investigate-e2e    │         │
+│                              │              │         │         │
+│                              │              ▼         │         │
+│                              │     council-review     │         │
+│                              │              │         │         │
+│                              │              ▼         │         │
+│                              │     Decision Matrix ───┘         │
+│                              │              │                   │
+│                              ▼              │                   │
+│                      Phase 5 Integration ◄──┘                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Investigation Triggers
+
+| Stage | Failure Condition | Investigation Type |
+|-------|------------------|-------------------|
+| 4.1 Correctness | `max_diff > tolerance` | `correctness` |
+| 4.2 Kernel Perf | `speedup < 1.0x` at any BS | `kernel_perf` |
+| 4.3 E2E Latency | `improvement ≤ 5%` (BS≤8) or `≤ 0%` (BS>8) | `e2e_perf` |
+
+### Decision Matrix
+
+After investigation completes with council approval:
+
+| Decision | When | Orchestrator Action |
+|----------|------|---------------------|
+| `phase_3` | Implementation bug identified | Reset target stage to `pending`, spawn task with fix context |
+| `phase_2` | Algorithmic decision wrong | Reset Phase 2, spawn planning task with new constraints |
+| `document_proceed` | Expected behavior, acceptable limitation | Document in validation_results.md, proceed to Phase 5 |
+| `rerun_validation` | Measurement/environment issue fixed | Re-spawn the failing validation stage |
+| `escalate_human` | Cannot determine root cause | Set status to `escalated`, report to user |
+
+See `orchestration/investigation-prompts.md` for full investigation task prompts.
+```
+
 ## Phase 3 Stage Structure (Revised)
 
 Phase 3 has **4 stages** (not 6) to keep related GEMM work together:
@@ -115,6 +196,9 @@ Phase 3 has **4 stages** (not 6) to keep related GEMM work together:
 | `complete` | Successfully finished |
 | `blocked` | Failed after max attempts, needs council |
 | `failed` | Permanently failed (even after council + fallback) |
+| `needs_investigation` | Validation failed, awaiting investigation task |
+| `investigating` | Investigation task in progress |
+| `escalated` | Cannot resolve automatically, needs human review |
 
 ## Compile and Test Cadence
 
@@ -272,6 +356,171 @@ When advancing to a new phase:
 2. Update TodoWrite using proper JSON format (see TodoWrite Integration section above)
 3. Spawn Task for the new phase
 
+### Orchestrator Logic for Phase 4 Validation
+
+**Note**: The Python code blocks below are **illustrative pseudo-code** showing the 
+orchestrator's decision logic. They are not executable APIs.
+```python
+def on_validation_stage_complete(state, stage, result):
+    """Handle validation stage completion."""
+    
+    if result.status == "complete":
+        # Validation passed - advance to next stage or Phase 5
+        next_stage = get_next_validation_stage(stage)
+        if next_stage:
+            state.phases["4_validation"].stages[next_stage].status = "in_progress"
+            spawn_validation_task(next_stage)
+        else:
+            # All validation passed
+            state.phases["4_validation"].status = "complete"
+            advance_to_phase("5_integration")
+    
+    elif result.status == "needs_investigation":
+        # Validation failed - spawn investigation task
+        investigation_type = {
+            "4_1_correctness": "correctness",
+            "4_2_kernel_perf": "kernel_perf",
+            "4_3_e2e_latency": "e2e_perf"
+        }[stage]
+        
+        state.phases["4_validation"].status = "investigating"
+        state.phases["4_validation"].investigation = {
+            "type": investigation_type,
+            "started_at": now(),
+            "hypothesis_cycles": 0,
+            "ncu_runs": 0,
+            "council_reviews": 0,
+            "root_cause": None,
+            "proposed_fix": None,
+            "decision": None
+        }
+        
+        # Spawn investigation task from investigation-prompts.md
+        spawn_investigation_task(investigation_type, failure_context=result)
+
+
+def on_investigation_complete(state, result):
+    """Handle investigation task completion."""
+    
+    decision = result.decision
+    investigation = state.phases["4_validation"].investigation
+    
+    # Update investigation record
+    investigation.root_cause = result.root_cause
+    investigation.proposed_fix = result.proposed_fix
+    investigation.decision = decision
+    
+    if decision == "phase_3":
+        # Implementation bug - go back to specific stage
+        target_stage = result.target_stage
+        
+        state.phases["3_implementation"].status = "in_progress"
+        state.phases["3_implementation"].stages[target_stage].status = "pending"
+        state.phases["4_validation"].status = "pending"
+        
+        # Spawn task with fix context from investigation
+        spawn_stage_task(
+            target_stage,
+            additional_context=f"""
+## Fix Context from Investigation
+
+{result.fix_proposal}
+
+## Previous Failure
+{result.root_cause}
+"""
+        )
+    
+    elif decision == "phase_2":
+        # Algorithmic decision wrong - re-plan
+        state.phases["2_planning"].status = "in_progress"
+        state.phases["3_implementation"].status = "pending"
+        state.phases["4_validation"].status = "pending"
+        
+        spawn_phase_task(
+            "2_planning",
+            additional_constraints=f"""
+## Additional Constraints from Investigation
+
+The previous optimization plan resulted in validation failure.
+
+### Findings
+{result.findings}
+
+### Required Changes
+{result.required_changes}
+"""
+        )
+    
+    elif decision == "document_proceed":
+        # Expected behavior - document and continue
+        state.phases["4_validation"].status = "complete"
+        state.phases["4_validation"].limitation = result.limitation_doc
+        
+        # Append limitation to validation_results.md
+        limitation_section = f"""
+
+## Known Limitations
+
+{result.limitation_doc}
+
+### Recommendation
+{result.recommendation}
+"""
+        append_to_file(f"{artifact_dir}/validation_results.md", limitation_section)
+        
+        advance_to_phase("5_integration")
+    
+    elif decision == "rerun_validation":
+        # Measurement issue fixed - retry validation
+        failing_stage = investigation.type.replace("_", "_")  # e.g., "correctness" -> "4_1_correctness"
+        stage_map = {
+            "correctness": "4_1_correctness",
+            "kernel_perf": "4_2_kernel_perf",
+            "e2e_perf": "4_3_e2e_latency"
+        }
+        target_stage = stage_map[investigation.type]
+        
+        state.phases["4_validation"].status = "in_progress"
+        state.phases["4_validation"].stages[target_stage].status = "pending"
+        state.phases["4_validation"].investigation = None  # Clear investigation
+        
+        spawn_validation_task(target_stage)
+    
+    elif decision == "escalate_human":
+        # Cannot resolve - escalate to user
+        state.phases["4_validation"].status = "escalated"
+        
+        report = f"""
+## MoE Monokernel: Human Review Required
+
+The automated investigation could not determine a fix.
+
+### Investigation Summary
+- Type: {investigation.type}
+- Hypothesis cycles: {investigation.hypothesis_cycles}
+- NCU profiling runs: {investigation.ncu_runs}
+- Council reviews: {investigation.council_reviews}
+
+### Findings
+{result.findings}
+
+### Recommendation
+{result.recommendation}
+
+### Investigation Artifacts
+Location: {artifact_dir}/investigation/
+
+### Next Steps
+1. Review investigation artifacts
+2. Provide guidance to resume, OR
+3. Manually fix and re-run validation, OR
+4. Abandon monokernel for this model
+"""
+        print(report)
+        # Workflow pauses - user must intervene
+```
+
 ## Resume Protocol
 
 When user triggers resume:
@@ -313,6 +562,24 @@ def resume_workflow():
                 break
     else:
         spawn_phase_task(state.current_phase)
+
+    # Handle investigation status
+    if state.phases.get("4_validation", {}).get("status") == "investigating":
+        investigation = state.phases["4_validation"].get("investigation", {})
+        report += f"\n### Investigation in Progress\n"
+        report += f"- Type: {investigation.get('type')}\n"
+        report += f"- Hypothesis cycles: {investigation.get('hypothesis_cycles', 0)}\n"
+        report += f"- Council reviews: {investigation.get('council_reviews', 0)}\n"
+        
+        # Resume investigation task
+        spawn_investigation_task(investigation.get("type"))
+        return
+    
+    if state.phases.get("4_validation", {}).get("status") == "escalated":
+        report += "\n### ⚠️ ESCALATED - Human Review Required\n"
+        report += "See investigation artifacts in {artifact_dir}/investigation/\n"
+        print(report)
+        return  # Don't auto-resume, wait for user guidance    
 ```
 
 ## TodoWrite Integration

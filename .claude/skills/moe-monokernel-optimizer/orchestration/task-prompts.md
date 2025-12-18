@@ -1263,16 +1263,42 @@ for BS in [1, 8, 64]:
     print(f'BS={BS}: Max diff={diff:.4f} - PASS')
 ```
 
-**Output**: Update `{artifact_dir}/state.json` with:
+**Output**: Update `{artifact_dir}/state.json`:
+
+**If PASS** (all batch sizes within tolerance):
 ```json
-"validation_results": {
-  "correctness": {
-    "status": "pass",
-    "max_abs_diff": 0.0XXX,
-    "batch_sizes_tested": [1, 8, 64]
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_1_correctness": {
+        "status": "complete",
+        "max_abs_diff": 0.00X,
+        "batch_sizes_tested": [1, 8, 64]
+      }
+    }
   }
 }
 ```
+
+**If FAIL** (any batch size exceeds tolerance):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_1_correctness": {
+        "status": "needs_investigation",
+        "max_abs_diff": 0.XXX,
+        "tolerance": {atol},
+        "failing_batch_sizes": [8, 64],
+        "failure_details": "Description of where divergence occurs (e.g., 'Output diverges after down-projection, error grows with batch size')"
+      }
+    }
+  }
+}
+```
+Exit with status `"needs_investigation"` (NOT `"blocked"`).
+
+The orchestrator will spawn an investigation task. See `orchestration/investigation-prompts.md`.
 
 {implementation_behavioral_footer}
 ```
@@ -1317,7 +1343,56 @@ BS=8: monokernel=X.XXms, baseline=Y.YYms, speedup=Z.ZZx
 ...
 ```
 
-**Output**: Update `{artifact_dir}/state.json` with kernel-level results.
+**Success Criteria (STRICT)**:
+- Monokernel must be **faster than or equal to** baseline at ALL tested batch sizes
+- Required: `speedup >= 1.0x` at every batch size
+- NO regressions allowed under CUDA graphs (launch overhead is eliminated)
+- If ANY batch size shows `speedup < 1.0x` → FAIL
+
+**Output**: Update `{artifact_dir}/state.json`:
+
+**If PASS** (all batch sizes show speedup >= 1.0x):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_2_kernel_perf": {
+        "status": "complete",
+        "results": {
+          "bs_1": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_4": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_8": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_16": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_32": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_64": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ}
+        },
+        "min_speedup": 1.XX,
+        "max_speedup": X.XX
+      }
+    }
+  }
+}
+```
+
+**If FAIL** (any batch size shows speedup < 1.0x):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_2_kernel_perf": {
+        "status": "needs_investigation",
+        "results": { ... },
+        "failing_batch_sizes": [1, 4],
+        "worst_speedup": 0.XXx,
+        "worst_batch_size": N
+      }
+    }
+  }
+}
+```
+Exit with status `"needs_investigation"` (NOT `"blocked"`).
+
+The orchestrator will spawn a kernel performance investigation task. See `orchestration/investigation-prompts.md`.
 
 {implementation_behavioral_footer}
 ```
@@ -1380,6 +1455,56 @@ done
 | 4 | ~11% (best) |
 | 8 | ~7% |
 | 32 | ~4-5% |
+
+**Success Criteria**:
+| Batch Size | Required Improvement |
+|------------|---------------------|
+| 1, 4, 8 | > 5% |
+| 16, 32, 64 | > 0% (not slower) |
+
+Calculate improvement:
+```python
+improvement_pct = (baseline_latency - monokernel_latency) / baseline_latency * 100
+```
+
+**Output**: Update `{artifact_dir}/state.json`:
+
+**If PASS** (all batch sizes meet threshold):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_3_e2e_latency": {
+        "status": "complete",
+        "results": {
+          "bs_4": {"baseline_s": X.XX, "monokernel_s": Y.YY, "improvement_pct": Z.Z},
+          "bs_8": {"baseline_s": X.XX, "monokernel_s": Y.YY, "improvement_pct": Z.Z},
+          "bs_32": {"baseline_s": X.XX, "monokernel_s": Y.YY, "improvement_pct": Z.Z}
+        }
+      }
+    }
+  }
+}
+```
+
+**If FAIL** (any batch size below threshold):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_3_e2e_latency": {
+        "status": "needs_investigation",
+        "results": { ... },
+        "failing_batch_sizes": [4, 8],
+        "failure_reason": "BS=4 improvement 3.2% < required 5%"
+      }
+    }
+  }
+}
+```
+Exit with status `"needs_investigation"` (NOT `"blocked"`).
+
+The orchestrator will spawn an E2E performance investigation task. See `orchestration/investigation-prompts.md`.
 
 **Document Results**: Write to `{artifact_dir}/validation_results.md`:
 ```markdown
