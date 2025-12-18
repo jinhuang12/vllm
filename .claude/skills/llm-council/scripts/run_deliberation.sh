@@ -78,12 +78,16 @@ check_cli_availability() {
 capture_gemini_session_id() {
     # Capture the most recent Gemini session ID
     local session_id
-    session_id=$(gemini --list-sessions 2>/dev/null | head -1 | grep -oP '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' || echo "")
+    session_id=$(gemini --list-sessions 2>/dev/null | grep -oE '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' | tail -1 || echo "")
     if [ -n "$session_id" ]; then
         echo "$session_id" > "$COUNCIL_DIR/tmp/session_gemini.txt"
         echo "  Session ID saved: ${session_id:0:8}..."
     else
-        echo "  WARNING: Could not capture Gemini session ID"
+        # Fallback to "latest" so resume still works even if UUID parsing fails.
+        if [ ! -f "$COUNCIL_DIR/tmp/session_gemini.txt" ]; then
+            echo "latest" > "$COUNCIL_DIR/tmp/session_gemini.txt"
+        fi
+        echo "  WARNING: Could not capture Gemini session ID (fallback: latest)"
     fi
 }
 
@@ -113,6 +117,23 @@ get_gemini_session_id() {
 
 get_codex_session_id() {
     cat "$COUNCIL_DIR/tmp/session_codex.txt" 2>/dev/null || echo ""
+}
+
+# Helper: Parse VOTE line from critic output (accepts markdown emphasis).
+parse_vote() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        echo "VOTE: UNKNOWN"
+        return 0
+    fi
+    local raw vote
+    raw=$(grep -oE 'VOTE[[:space:]:-]*[*_`[:space:]]*(ACCEPT|REJECT)' "$file" 2>/dev/null | head -1 || true)
+    vote=$(printf "%s" "$raw" | tr '[:lower:]' '[:upper:]' | grep -oE 'ACCEPT|REJECT' | head -1 || true)
+    if [ -n "$vote" ]; then
+        echo "VOTE: $vote"
+    else
+        echo "VOTE: UNKNOWN"
+    fi
 }
 
 # Helper function: Validate critic output
@@ -253,7 +274,7 @@ Follow the response format from the original critic prompt." \
     # Validate Critic 1's output
     if validate_critic_output "$CRITIC_1_OUTPUT" "Critic #1 (Gemini)"; then
         CRITIC_1_RAN=true
-        VOTE_1=$(grep -o 'VOTE: [A-Z]*' "$CRITIC_1_OUTPUT" 2>/dev/null | head -1 || echo "VOTE: UNKNOWN")
+        VOTE_1=$(parse_vote "$CRITIC_1_OUTPUT")
         echo "[Round $ROUND] Critic #1 complete. $VOTE_1"
 
         # Append Critic 1's feedback to history BEFORE Critic 2 runs
@@ -372,7 +393,7 @@ Follow the response format from the original critic prompt." \
     # Validate Critic 2's output
     if validate_critic_output "$CRITIC_2_OUTPUT" "Critic #2 (Codex)"; then
         CRITIC_2_RAN=true
-        VOTE_2=$(grep -o 'VOTE: [A-Z]*' "$CRITIC_2_OUTPUT" 2>/dev/null | head -1 || echo "VOTE: UNKNOWN")
+        VOTE_2=$(parse_vote "$CRITIC_2_OUTPUT")
         echo "[Round $ROUND] Critic #2 complete. $VOTE_2"
 
         # Append Critic 2's feedback to history
@@ -394,6 +415,14 @@ echo ""
 # ══════════════════════════════════════════════════════════════════════════════
 # ROUND SUMMARY
 # ══════════════════════════════════════════════════════════════════════════════
+# Re-parse votes from final outputs (defensive against partial writes)
+if [ "$CRITIC_1_RAN" = true ]; then
+    VOTE_1=$(parse_vote "$CRITIC_1_OUTPUT")
+fi
+if [ "$CRITIC_2_RAN" = true ]; then
+    VOTE_2=$(parse_vote "$CRITIC_2_OUTPUT")
+fi
+
 echo "════════════════════════════════════════════════════════════════════"
 echo "  Round $ROUND Summary"
 echo "════════════════════════════════════════════════════════════════════"

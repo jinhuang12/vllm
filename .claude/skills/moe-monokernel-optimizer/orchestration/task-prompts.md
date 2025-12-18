@@ -11,22 +11,160 @@ Example: For Qwen3-30B-A3B-FP8 on L40S with TP=1:
 - Artifacts: `moe_monokernel_artifacts/qwen3-30b-a3b_l40s_fp8_tp1/`
 - CUDA: `csrc/moe/moe_monokernel_qwen3-30b-a3b_l40s_fp8_tp1/`
 
-## Common Behavioral Footer
+## Planning Phases Behavioral Footer
 
-Append to ALL task prompts:
+**Use for**: Phase 1 (Constraints), Phase 2 (Optimization Planning)
+
+**Rationale**: Planning phases produce the plan/document itself - there's no separate "approach" to review before writing. Only final output review is required.
+
+Append to Phase 1 and Phase 2 task prompts:
 
 ```markdown
-**LLM Council Consultation**:
-Use the `llm-council` skill for second opinions. Invoke when:
-- Uncertain about the correct approach
-- Tried 2+ approaches that didn't work
+## MANDATORY: LLM Council Review (BLOCKING)
 
-To invoke: Use the Skill tool with `llm-council`. The skill has its own context preparation instructions.
+**THIS IS NOT OPTIONAL. ALL TASKS MUST GO THROUGH LLM-COUNCIL REVIEW BEFORE COMPLETION.**
+
+You MUST invoke the `llm-council` skill to review your **output** before marking this task complete.
+DO NOT skip this step. DO NOT mark the task as complete without council approval.
+
+### When to Invoke llm-council:
+1. **AFTER completing the output** - Review your generated document (constraints.md, optimization_plan.md)
+2. **When stuck** - After 2+ failed attempts at the same problem
+3. **When uncertain** - About completeness, correctness, or implications
+
+### How to Invoke:
+Use the Skill tool with skill name `llm-council`. The skill has its own context preparation instructions.
+
+### Review Loop (MANDATORY):
+1. Complete your draft work (document or plan)
+2. Invoke `llm-council` to review the output
+3. If REJECTED with valid reasons → Revise and re-submit for another review
+4. If ACCEPTED → You may proceed to mark task complete
+5. **DO NOT mark task complete if review was skipped or rejected**
+
+### Completion Checklist:
+Before marking this task complete, verify:
+- [ ] llm-council was invoked to review the output
+- [ ] Review feedback was addressed
+- [ ] Final output was ACCEPTED by council (or rejection reasons were invalid)
+
+---
+
+**Behavioral Expectations**:
+1. **Read before write**: Read all referenced documents before drafting
+2. **BLOCKING: Final review with llm-council**: Review your output AFTER completing it
+   - This is MANDATORY - do not skip
+   - Revise until accepted: If REJECTED with valid reasons, revise and re-submit
+   - Only mark complete after approval
+3. **Stuck** (error 2+ times even after consulting `llm-council`):
+   - Document in `{artifact_dir}/blockers/{component}_blocker.md`:
+     - Error message (full)
+     - Attempts made with different approaches
+     - Hypotheses for root cause
+     - What you tried and why it didn't work
+   - Exit with status "blocked"
+4. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
+
+**State Management** (CRITICAL - Tasks have no shared memory):
+1. **Read state first**: `cat {artifact_dir}/state.json` to understand current progress
+2. **Update state when done**: Before completing, update the appropriate phase/stage status
+3. **Track llm-council review**: Record review status in state (MANDATORY)
+4. **Write state back**: Save updated state.json with new status, timestamp, council review, AND orchestrator metadata:
+```json
+{
+  "phases": {
+    "{current_phase}": {
+      "status": "complete",
+      "completed_at": "{timestamp}",
+      "llm_council_review": {
+        "invoked": true,
+        "outcome": "ACCEPTED",
+        "revision_count": 0,
+        "summary": "Brief summary of council feedback"
+      }
+    }
+  },
+  "orchestrator": {
+    "last_completed_task": "{task_description}",
+    "next_action": "{next_phase_or_stage}",
+    "resume_hint": "Read state.json, then spawn Task for {next_phase_or_stage}"
+  }
+}
+```
+
+**IMPORTANT**: If `llm_council_review.invoked` is false or missing, the task is NOT properly complete.
+
+**Context Preservation** (for orchestrator compaction recovery):
+- Current phase: {current_phase}
+- Completed stages: {completed_stages}
+- Remaining stages: {remaining_stages}
+- State file: {artifact_dir}/state.json
+- CUDA directory: {cuda_dir}
+- Skill file: `.claude/skills/moe-monokernel-optimizer/SKILL.md`
+- Task prompts: `.claude/skills/moe-monokernel-optimizer/orchestration/task-prompts.md`
+
+**After Context Compaction**:
+If the orchestrator's context is compacted and you need to resume:
+1. Re-read state.json to understand current progress
+2. Re-read SKILL.md to understand the workflow
+3. The orchestrator spawns Tasks - it does not implement directly
+4. Check `orchestrator.resume_hint` in state.json for next action
+```
+
+---
+
+## Implementation Phases Behavioral Footer
+
+**Use for**: Phase 3 (Implementation stages), Phase 4 (Validation stages), Phase 5 (Integration)
+
+**Rationale**: Implementation phases benefit from TWO review checkpoints - one to validate the approach BEFORE coding, and one to validate the final implementation AFTER coding.
+
+Append to Phase 3, Phase 4, and Phase 5 task prompts:
+
+```markdown
+## MANDATORY: LLM Council Review (BLOCKING) - TWO CHECKPOINTS
+
+**THIS IS NOT OPTIONAL. IMPLEMENTATION TASKS REQUIRE TWO REVIEW CHECKPOINTS.**
+
+### Checkpoint 1: BEFORE Implementation (Approach Review)
+After reading references and designing your approach, invoke `llm-council` to review your **planned approach** BEFORE writing implementation code.
+
+### Checkpoint 2: AFTER Implementation (Final Review)
+After completing code/validation, invoke `llm-council` to review your **final implementation** before marking task complete.
+
+### When to Invoke llm-council:
+1. **Checkpoint 1 (BEFORE coding)**: After designing approach, before writing code
+2. **Checkpoint 2 (AFTER coding)**: Before marking task complete
+3. **When stuck** - After 2+ failed attempts at the same problem
+4. **When uncertain** - About approach, correctness, or implementation decisions
+
+### How to Invoke:
+Use the Skill tool with skill name `llm-council`. The skill has its own context preparation instructions.
+
+### Review Loop (MANDATORY - Both checkpoints required):
+1. Draft your approach/plan
+2. **Checkpoint 1**: Invoke `llm-council` to review approach
+3. If REJECTED → Revise approach and re-submit until ACCEPTED
+4. Implement based on approved approach
+5. **Checkpoint 2**: Invoke `llm-council` to review final implementation
+6. If REJECTED → Revise and re-submit until ACCEPTED
+7. **Only mark task complete after BOTH checkpoints pass**
+
+### Completion Checklist:
+Before marking this task complete, verify:
+- [ ] llm-council Checkpoint 1 (approach) was invoked and ACCEPTED
+- [ ] Implementation completed based on approved approach
+- [ ] llm-council Checkpoint 2 (implementation) was invoked and ACCEPTED
+- [ ] All validation tests passed (if applicable)
+
+---
 
 **Behavioral Expectations**:
 1. **Read before write**: Read all referenced documents before drafting an implementation plan
-2. **Review plan with llm-council**: Invoke `llm-council` to have the draft plan reviewed
-   - Revise until accepted: If plan is REJECTED & the rejection reasons are valid, revise the plan & do another round of llm-council review until accepted by all critics
+2. **BLOCKING: Checkpoint 1 - Review approach with llm-council**: Before coding
+   - This is MANDATORY - do not skip
+   - Revise until accepted: If REJECTED with valid reasons, revise and re-submit
+   - Only proceed to implementation after approach is approved
 3. **Compile often**: Run `cmake --build --preset release --target install` after each major change:
    - On compile error:
     - Read the full error message
@@ -40,17 +178,38 @@ To invoke: Use the Skill tool with `llm-council`. The skill has its own context 
      - Hypotheses for root cause
      - What you tried and why it didn't work
    - Exit with status "blocked"
-5. **Review implementation with llm-council**: Review the implementation with `llm-council` & address any valid findings.
+5. **BLOCKING: Checkpoint 2 - Review implementation with llm-council**: Before completing
+   - This is MANDATORY - do not skip
+   - Revise until accepted: If REJECTED with valid reasons, revise and re-submit
+   - Only mark complete after both checkpoints pass
 6. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
 
 **State Management** (CRITICAL - Tasks have no shared memory):
 1. **Read state first**: `cat {artifact_dir}/state.json` to understand current progress
 2. **Update state when done**: Before completing, update the appropriate phase/stage status
-3. **Write state back**: Save updated state.json with new status, timestamp, AND orchestrator metadata:
+3. **Track llm-council reviews**: Record BOTH checkpoint statuses in state (MANDATORY)
+4. **Write state back**: Save updated state.json with new status, timestamp, council reviews, AND orchestrator metadata:
 ```json
 {
   "phases": {
-    "{current_phase}": {"status": "complete", "completed_at": "{timestamp}"}
+    "{current_phase}": {
+      "status": "complete",
+      "completed_at": "{timestamp}",
+      "llm_council_review": {
+        "checkpoint_1_approach": {
+          "invoked": true,
+          "outcome": "ACCEPTED",
+          "revision_count": 0,
+          "summary": "Brief summary of approach review feedback"
+        },
+        "checkpoint_2_implementation": {
+          "invoked": true,
+          "outcome": "ACCEPTED",
+          "revision_count": 0,
+          "summary": "Brief summary of implementation review feedback"
+        }
+      }
+    }
   },
   "orchestrator": {
     "last_completed_task": "{task_description}",
@@ -59,6 +218,8 @@ To invoke: Use the Skill tool with `llm-council`. The skill has its own context 
   }
 }
 ```
+
+**IMPORTANT**: If either checkpoint's `invoked` is false or missing, the task is NOT properly complete.
 
 **Context Preservation** (for orchestrator compaction recovery):
 - Current phase: {current_phase}
@@ -311,7 +472,7 @@ Read these documents for optimization patterns:
 - [ ] T13: Cooperative grid sync
 ```
 
-{common_behavioral_footer}
+{planning_behavioral_footer}
 ```
 
 ---
@@ -457,7 +618,7 @@ struct Config_{model_short} {{
 {For each stage, note any model-specific adaptations needed}
 ```
 
-{common_behavioral_footer}
+{planning_behavioral_footer}
 ```
 
 ---
@@ -574,7 +735,7 @@ print("Stage 1 routing_and_prepare validation: PASS")
    - Sample mismatched values
    - Your hypothesis for the discrepancy
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
 
 ### Stage 2: Activation Quantization (Conditional)
@@ -649,7 +810,7 @@ print("Stage 2 activation_quantization validation: PASS")
    - Maximum dequantization error
    - Your hypothesis for the discrepancy
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
 
 ### Stage 3: GEMM Implementation (CRITICAL - Up + Down Together)
@@ -903,7 +1064,7 @@ print(f"GEMM performance sanity check: PASS ({elapsed_ms:.2f}ms)")
   - What you tried and why it didn't work
   - Your hypothesis for the root cause
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
 
 ### Stage 4: Kernel Assembly
@@ -1040,7 +1201,7 @@ print("Smoke test: PASS")
   - The error message or shape mismatch
   - Maximum difference from reference
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
 
 ---
@@ -1113,7 +1274,7 @@ for BS in [1, 8, 64]:
 }
 ```
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
 
 ---
@@ -1158,7 +1319,7 @@ BS=8: monokernel=X.XXms, baseline=Y.YYms, speedup=Z.ZZx
 
 **Output**: Update `{artifact_dir}/state.json` with kernel-level results.
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
 
 ---
@@ -1249,7 +1410,7 @@ Config: input_len=64, output_len=512, {hardware}
 - Best use case: Low-concurrency serving (chat, code completion)
 ```
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
 
 ---
@@ -1291,5 +1452,5 @@ Integrate {model_short} monokernel into vLLM.
 - Git patch or diff showing all changes
 - Integration instructions in `{artifact_dir}/integration.md`
 
-{common_behavioral_footer}
+{implementation_behavioral_footer}
 ```
