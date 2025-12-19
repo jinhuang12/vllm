@@ -501,19 +501,64 @@ Phase 2: Create optimization plan for {model_id} monokernel.
    - `references/tiling-config.md`
    - `references/code-templates.md` (especially activation templates)
 
-2. Apply Decision A (Output Path):
+2. Apply Decision 0 (Saturation Analysis):
+   ```
+   BS_max = {max decode batch size, e.g., 64}
+   top_k = {top_k from constraints}
+   E_global = {total experts}
+   saturation = (BS_max * top_k) / SM_count
+   ```
+
+3. Apply Decision 0b (M_avg Analysis):
+   ```
+   M_avg = BS * top_k / E_global  # per-expert M under uniform routing
+   # M_avg < 8: prefer token-major or split kernels
+   # M_avg 8-16: hybrid or benchmark both
+   # M_avg >= 16: expert-major may be viable
+   ```
+
+4. Apply Decision 0c (Ownership + Fusion Boundary):
+   Based on M_avg and saturation:
+   - **Token-major**: M_avg < 8, prefer split kernels (no grid.sync)
+   - **Expert-major**: M_avg >= 16, monokernel viable if barrier budget <= 1-2
+   - **Hybrid**: M_avg 8-16, benchmark both approaches
+
+   **Fusion boundary decision**:
+   - If routing/prepare share < 15% of layer time → split kernels preferred
+   - If barrier budget > 2 grid.sync → split kernels required
+   - If cooperative launch not feasible → split kernels required
+
+   **OUTPUT**: `fusion_boundary = "monokernel"` or `fusion_boundary = "split"`
+
+5. Apply Decision 0d (Baseline Reference Profiling) - Optional but Recommended:
+   If hardware available, profile vLLM FusedMoE under CUDA graphs:
+   ```bash
+   # Measure combined routing + experts time for batch sizes [1, 8, 64]
+   ```
+   Document: routing_us, expert_us, total_us per batch size
+
+6. Apply Decision 0e (Baseline Delta Requirements):
+   ```
+   target_improvement = 0.05 if BS <= 8 else 0.01
+   required_savings_us = baseline_total_us * target_improvement
+   ```
+   If required_savings_us is implausible (e.g., > routing overhead), re-evaluate fusion_boundary.
+
+**EARLY EXIT CHECK**: If Decision 0c concludes `fusion_boundary = "split"` AND routing/prepare < 10%, document limitation and stop before Phase 3.
+
+7. Apply Decision A (Output Path):
    ```
    top_k = {top_k from constraints}
    USE_ATOMICS = (top_k > 1)
    ```
 
-3. Apply Decision B (Sorter Strategy):
+8. Apply Decision B (Sorter Strategy):
    ```
    coalesce_size = E_local × dtype_bytes
    TOKENS_PER_WARP = 128 / coalesce_size if coalesce_size < 128 else 1
    ```
 
-4. Apply Decision C (Weight Application Order):
+9. Apply Decision C (Weight Application Order):
    ```
    if top_k == 1:
        APPLY_WEIGHT = 'before_silu'  # Can fold into scale
@@ -521,15 +566,15 @@ Phase 2: Create optimization plan for {model_id} monokernel.
        APPLY_WEIGHT = 'after_silu'   # Must apply after activation
    ```
 
-5. Solve SRAM Tetris:
-   - Use tiling-config.md formulas with dtype from constraints
-   - Search for (M_tile, N_tile, K_chunks, buffers) that fits
-   - Document the search process and why final choice was made
+10. Solve SRAM Tetris (if fusion_boundary == "monokernel"):
+    - Use tiling-config.md formulas with dtype from constraints
+    - Search for (M_tile, N_tile, K_chunks, buffers) that fits
+    - Document the search process and why final choice was made
 
-6. Determine activation function approach:
-   - If silu: Use standard template from code-templates.md
-   - If gelu/geglu/relu: Use template from code-templates.md
-   - If custom/unknown: Flag for exploration subagent in Phase 3
+11. Determine activation function approach:
+    - If silu: Use standard template from code-templates.md
+    - If gelu/geglu/relu: Use template from code-templates.md
+    - If custom/unknown: Flag for exploration subagent in Phase 3
 
 **Output**: Write to `{artifact_dir}/optimization_plan.md`
 
@@ -538,6 +583,36 @@ Template:
 # Optimization Plan: {model_short} on {hardware}
 
 ## Algorithmic Decisions
+
+### Decision 0: Saturation Analysis
+- BS_max = {N}
+- top_k = {N}
+- E_global = {N}
+- saturation = {N}
+
+### Decision 0b: M_avg Analysis
+- M_avg = {N}
+- Ownership recommendation: {token-major/hybrid/expert-major}
+- Rationale: {why based on M_avg thresholds}
+
+### Decision 0c: Ownership + Fusion Boundary
+- Ownership model: {token-major/hybrid/expert-major}
+- **fusion_boundary = "{monokernel/split}"**
+- Barrier budget: {N} grid.sync calls
+- Rationale: {why this fusion strategy}
+
+### Decision 0d: Baseline Reference Profiling (optional)
+| Batch Size | Routing µs | Expert µs | Total µs |
+|------------|------------|-----------|----------|
+| 1 | {N} | {N} | {N} |
+| 8 | {N} | {N} | {N} |
+| 64 | {N} | {N} | {N} |
+
+### Decision 0e: Baseline Delta Requirements
+- Target improvement: {N}%
+- Required savings: {N} µs
+- Feasibility: {plausible/implausible}
+- Rationale: {why this is achievable or not}
 
 ### Decision A: Output Path
 - top_k = {N}
@@ -813,10 +888,9 @@ print("Stage 2 activation_quantization validation: PASS")
 {implementation_behavioral_footer}
 ```
 
-### Stage 3: GEMM Implementation (CRITICAL - Up + Down Together)
+### Stage 3: GEMM Implementation (CRITICAL)
 
-This is the most complex stage. **Up-projection and down-projection are implemented together**
-because they share 90% of their structure (MMA patterns, warp specialization, double buffering).
+This is the most complex stage. The structure depends on the fusion_boundary decision from Phase 2.
 
 **Task Tool Parameters**:
 - `description`: "Phase 3 gemm_implementation: {model_short}"
@@ -824,11 +898,33 @@ because they share 90% of their structure (MMA patterns, warp specialization, do
 - `prompt`: [Copy the full prompt below]
 
 ```markdown
-Implement GEMM kernels (up-projection AND down-projection) for {model_short} monokernel.
+Implement GEMM kernels for {model_short}.
 
 **Ultimate Goal**: {ultimate_goal}
 
-**CRITICAL**: This task implements BOTH up-projection and down-projection together.
+---
+
+## Fusion Boundary Check (CRITICAL - Read First)
+
+Read `{artifact_dir}/optimization_plan.md` and check **Decision 0c: fusion_boundary**.
+
+### If fusion_boundary == "monokernel":
+- Implement **up_projection and down_projection TOGETHER**
+- They share MMA infrastructure, double-buffering, warp specialization
+- Follow the MONOKERNEL path below
+
+### If fusion_boundary == "split":
+- Implement **up_projection and down_projection as SEPARATE kernels**
+- Each may have different tiling/ownership based on Decision F analysis
+- Skip cooperative grid launch setup
+- Each kernel is standalone (no grid.sync between them)
+- Follow the SPLIT-KERNEL path below
+
+---
+
+## MONOKERNEL Path (fusion_boundary == "monokernel")
+
+**CRITICAL**: This path implements BOTH up-projection and down-projection together.
 They share the same MMA infrastructure - implement common helpers once, apply to both.
 
 **Read First** (IN THIS ORDER):
@@ -955,6 +1051,38 @@ for (uint32_t k_chunk = 0; k_chunk < K_CHUNKS_DOWN; k_chunk++) {
     }
 }
 ```
+
+---
+
+## SPLIT-KERNEL Path (fusion_boundary == "split")
+
+If `fusion_boundary == "split"` in optimization_plan.md, implement SEPARATE kernels:
+
+### Up-Projection Kernel (standalone)
+Create `{cuda_dir}/moe_up_projection_split.cu`:
+- **No cooperative launch** - standard kernel launch
+- **No grid.sync** - kernel ends after up-projection
+- Ownership based on Decision F (may be token-major even if model is expert-major)
+- Write intermediate to global memory
+
+### Down-Projection Kernel (standalone)
+Create `{cuda_dir}/moe_down_projection_split.cu`:
+- **No cooperative launch** - standard kernel launch
+- **No grid.sync** - kernel ends after down-projection
+- Ownership based on Decision F (may differ from up-projection)
+- Read intermediate from global memory
+
+### Key Differences from Monokernel:
+1. No shared SMEM between up/down - each kernel has its own
+2. No MMA infrastructure sharing - may duplicate helpers
+3. No warp specialization across kernels
+4. Global memory intermediate buffer required
+5. Different tiling may be optimal for each direction
+
+### Validation for Split-Kernel:
+- Test each kernel independently first
+- Then test end-to-end with both kernels in sequence
+- Under CUDA graphs, both kernels should be captured
 
 ---
 

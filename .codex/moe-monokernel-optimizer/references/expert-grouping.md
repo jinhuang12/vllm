@@ -1,8 +1,23 @@
 # Expert Grouping Reference
 
+> **Important**: Before implementing expert grouping, check **Decision F** in
+> [algorithmic-branching.md](algorithmic-branching.md#decision-f-gemm-strategy-per-pair-gemv-vs-expert-grouped-gemm)
+> to determine if grouping provides sufficient benefit for your model's parameters.
+>
+> For models with many experts (E>=64) and small top_k (k<=4), per-pair GEMV may be preferred
+> over grouped-GEMM because the expected weight reuse factor (r_max) is too low.
+
+**EP note**: Use `E_local` (experts per GPU after EP dispatch) when evaluating grouping.
+
 ## Overview
 
 After router picks experts for each token, group tokens by expert for efficient batched GEMMs.
+If ownership is **token-major**, skip expert grouping and keep per-token lists instead.
+
+### When NOT to Use Expert Grouping
+- M_avg is very small (per‑expert tokens ~0–4)
+- EP pre‑dispatch reduces E_local and makes expert‑major sparse
+- Token‑major ownership is selected
 
 ## Strategy Selection
 

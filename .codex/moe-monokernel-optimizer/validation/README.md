@@ -2,11 +2,109 @@
 
 Validation scripts are located in the vLLM repository, not in this skill directory.
 
+## Validation Workflow (3 Stages)
+
+| Stage | Purpose | Tool |
+|-------|---------|------|
+| **4.1 Correctness** | Verify numerical accuracy | pytest / manual test |
+| **4.2 Kernel-Level** | Pure kernel performance (CUDA graphs) | benchmark script |
+| **4.3 E2E Latency** | Real inference impact | `vllm bench latency` |
+
+**See also**: [E2E_LATENCY_GUIDE.md](E2E_LATENCY_GUIDE.md) for detailed E2E benchmark instructions.
+
+**Important**: Validate the chosen ownership and fusion boundary. If a split-kernel path is available, benchmark both monokernel and split-kernel variants under CUDA graphs.
+E2E latency under CUDA graphs/torch.compile is the final truth for production.
+
+**Baseline source of truth**: Combined routing+experts CUDA‑graph profiling captured in Phase 1 constraints.
+
+## Validation Failure Investigation
+
+> **Codex CLI note:** If a stage exits with `needs_investigation`, run the matching investigation prompt in `orchestration/investigation-prompts.md` and update `{artifact_dir}/state.json` with the decision.
+
+When a validation stage fails, the orchestrator spawns an investigation task 
+to diagnose the root cause before deciding on next action. This replaces the 
+generic "blocked" behavior used in implementation phases.
+
+### Success Criteria Summary
+
+**Stage 4.1 (Correctness)**:
+| Data Type | Absolute Tolerance | Relative Tolerance |
+|-----------|-------------------|-------------------|
+| FP32 | 1e-3 | 1e-3 |
+| BF16/FP16 | 1e-2 | 1e-2 |
+| FP8 block-quant | 300 | 0.5 |
+
+**Stage 4.2 (Kernel Performance)**:
+- **STRICT**: `speedup >= 1.0x` at ALL tested batch sizes
+- No regressions allowed under CUDA graphs
+- Batch sizes tested: 1, 4, 8, 16, 32, 64
+- Include token-major vs expert-major variants if both are implemented
+- If regression: profile reference FusedMoE per‑kernel timings under parity **with combined routing+experts captured in a single CUDA graph**
+- Produce a delta‑to‑baseline table (targets vs required µs savings) and feasibility call
+
+## Minor Stage-Level Parity Checks (Phase 3)
+When routing/prepare/quant are newly implemented, validate they are within tolerance of the reference **under CUDA graphs**.
+Rule of thumb: `<= 1.10x` or `<= +1–2 µs` (whichever is larger).  
+If a stage is a thin wrapper around reference ops, mark as “parity assumed” and skip timing.
+
+**Stage 4.3 (E2E Latency)**:
+| Batch Size | Required Improvement |
+|------------|---------------------|
+| 1, 4, 8 | > 5% |
+| 16, 32, 64 | > 0% |
+
+### Investigation Triggers
+
+| Stage | Exit Status | Trigger Condition |
+|-------|-------------|-------------------|
+| 4.1 | `needs_investigation` | `max_diff > tolerance` for any batch size |
+| 4.2 | `needs_investigation` | `speedup < 1.0x` for any batch size |
+| 4.3 | `needs_investigation` | Improvement below threshold |
+
+### Investigation Types
+
+| Type | Focus | Key Diagnostics |
+|------|-------|-----------------|
+| `correctness` | Logic bugs, scale errors | Binary search for divergence point, intermediate value comparison |
+| `kernel_perf` | Performance regression | Per-stage profiling, NCU analysis, bottleneck identification |
+| `e2e_perf` | E2E improvement below target | Monokernel activation check, MoE time fraction analysis |
+
+### Investigation Task Prompts
+
+See: `orchestration/investigation-prompts.md`
+
+### Investigation Artifacts
+
+Location: `{artifact_dir}/investigation/`
+
+| File | Purpose | Created By |
+|------|---------|------------|
+| `correctness_analysis.md` | 4.1 failure root cause | correctness investigation |
+| `stage_breakdown.json` | Per-stage latency comparison | kernel_perf investigation |
+| `ncu_bs{N}.csv` | Nsight Compute metrics | kernel_perf investigation |
+| `perf_analysis.md` | 4.2 failure root cause | kernel_perf investigation |
+| `e2e_analysis.md` | 4.3 failure root cause | e2e_perf investigation |
+| `fix_proposal.md` | Council-reviewed fix proposal | all investigations |
+
+### Decision Matrix
+
+After investigation completes with council approval:
+
+| Decision | Meaning | Next Action |
+|----------|---------|-------------|
+| `phase_3` | Implementation bug found | Back to specific Phase 3 stage |
+| `phase_2` | Algorithmic decision wrong | Re-plan with new constraints |
+| `document_proceed` | Expected/acceptable behavior | Document limitation, proceed |
+| `rerun_validation` | Measurement issue fixed | Re-run failing stage |
+| `escalate_human` | Cannot determine cause | Pause for human review |
+
 ## Script Locations
 
-All validation scripts should be in:
+Validation scripts are located in:
 ```
-{vllm_repo}/benchmarks/kernels/
+Test scripts:      {vllm_repo}/tests/kernels/moe/
+Benchmark scripts: {vllm_repo}/benchmarks/kernels/
+E2E benchmarks:    vllm bench latency (CLI tool)
 ```
 
 ## Required Scripts
@@ -63,6 +161,16 @@ Requires clock64() instrumentation in kernel (optional).
 """
 ```
 
+### 6. E2E Latency Benchmark (CLI Tool)
+Uses `vllm bench latency` - no script needed.
+
+```bash
+"""
+Measures real inference latency with all optimizations enabled.
+Tests monokernel impact on actual vLLM serving performance.
+"""
+```
+
 ## Creating Scripts for New Model
 
 When optimizing a new model, create test scripts by adapting from existing ones:
@@ -106,7 +214,7 @@ print('Kernel loaded successfully')
 
 ### Full Correctness Test
 ```bash
-pytest benchmarks/kernels/test_moe_monokernel_{model}.py -v
+pytest tests/kernels/moe/test_moe_monokernel_{model}.py -v
 ```
 
 ### Performance Benchmark
@@ -157,3 +265,37 @@ ncu --import moe_monokernel_{model}_bs64.ncu-rep --csv > moe_{model}_bs64.csv
 # Analyze
 python benchmarks/kernels/analyze_ncu_moe.py moe_{model}_bs64.csv
 ```
+
+### E2E Latency Benchmark
+
+See [E2E_LATENCY_GUIDE.md](E2E_LATENCY_GUIDE.md) for full details.
+
+```bash
+# Quick comparison (batch_size=8, decode-heavy workload)
+
+# Baseline
+vllm bench latency \
+    --model {model_id} \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --input-len 64 --output-len 512 \
+    --batch-size 8 \
+    --num-iters 10 \
+    --output-json /tmp/baseline.json
+
+# Monokernel
+VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
+    --model {model_id} \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --input-len 64 --output-len 512 \
+    --batch-size 8 \
+    --num-iters 10 \
+    --output-json /tmp/monokernel.json
+```
+
+**Key points:**
+- Monokernel activation depends on dispatch thresholds (M_avg, batch buckets); confirm via logs
+- Use `--input-len 64 --output-len 512` for decode-heavy workload
+- Representative batch sizes: 4 (often best), 8 (typical), 32 (marginal)
+- Expect 2-11% improvement depending on batch size

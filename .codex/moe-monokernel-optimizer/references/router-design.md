@@ -3,6 +3,18 @@
 ## Overview
 
 In-kernel top-k selection using warp-level primitives, avoiding separate router kernel launch.
+Use only when routing must be fused. For split-kernel paths, run a standalone router and pass top-k ids/weights into GEMM.
+
+## Router Semantics Checklist (before reordering)
+
+Confirm these from the model code:
+- Are routing weights renormalized after top‑k? (`norm_topk_prob`)
+- Are weights applied before or after activation?
+- Are weights multiplied into activation scales?
+- Is stable token ordering required for correctness?
+- Are shared experts always active?
+
+Do not infer any of these from `top_k` alone.
 
 ## Strategy Selection Matrix
 

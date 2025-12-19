@@ -1,10 +1,10 @@
 # Code Patterns Reference
 
-This document describes **patterns** to follow when generating MoE monokernel code. Claude should adapt these based on the specific model architecture, not copy them verbatim.
+This document describes **patterns** to follow when generating MoE monokernel code. Codex should adapt these based on the specific model architecture, not copy them verbatim.
 
 ## Key Principle
 
-The templates here show structural patterns. When generating actual code, Claude should:
+The templates here show structural patterns. When generating actual code, Codex should:
 1. **Reason through dimensions** - Calculate SMEM usage, tile sizes, K-chunking needs
 2. **Adapt to edge cases** - Shared experts, unusual E counts, hybrid dense+MoE
 3. **Explain tradeoffs** - Why triple vs double buffer, why specific tile sizes
@@ -31,9 +31,23 @@ static constexpr uint32_t MONOKERNEL_THRESHOLD = ...; // 128/64/32 by GPU
 
 // === Algorithmic Branching ===
 // Set based on model topology (from algorithmic-branching.md)
-static constexpr bool USE_ATOMICS = ...;    // true if top_k > 1
+enum class Ownership { TokenMajor, ExpertMajor, Hybrid };
+static constexpr Ownership OWNERSHIP = ...;
+enum class AccumulationStrategy { DirectWrite, BlockReduce, GlobalAtomic };
+static constexpr AccumulationStrategy ACCUM = ...;
+static constexpr bool OUTPUT_OVERLAP = (OWNERSHIP != Ownership::TokenMajor);
+static constexpr bool USE_ATOMICS = OUTPUT_OVERLAP;  // only if output overlaps
+enum class WeightPlacement { BeforeActivation, AfterActivation };
+static constexpr WeightPlacement WEIGHT_PLACEMENT = ...;
 static constexpr uint32_t TOKENS_PER_WARP = ...; // from sorter strategy
-static constexpr bool WEIGHT_AFTER_ACTIVATION = ...; // true if top_k > 1
+static constexpr bool WEIGHT_AFTER_ACTIVATION =
+    (WEIGHT_PLACEMENT == WeightPlacement::AfterActivation);
+
+// Per-phase ownership/atomics (for hybrid designs)
+static constexpr Ownership UP_OWNERSHIP = ...;
+static constexpr Ownership DOWN_OWNERSHIP = ...;
+static constexpr bool USE_ATOMICS_UP = (UP_OWNERSHIP != Ownership::TokenMajor);
+static constexpr bool USE_ATOMICS_DOWN = (DOWN_OWNERSHIP != Ownership::TokenMajor);
 
 // === Dimension Template ===
 template <uint32_t bs, uint32_t n, uint32_t k, uint32_t e>
@@ -72,7 +86,23 @@ struct TileConfig {
 
 ---
 
-## SRAM Tetris: How Claude Should Reason Through Tile Sizes
+## Split-Kernel Interface (Optional)
+
+When routing is done outside the monokernel, pass top-k data explicitly:
+
+```cpp
+// Inputs produced by router/prepare kernels
+const uint16_t* topk_ids;       // [BS, TOP_K]
+const float* topk_weights;      // [BS, TOP_K]
+const uint16_t* expert_offsets; // [E+1] prefix sums for grouped GEMM (optional)
+const uint16_t* pair_indices;   // [BS * TOP_K] packed pairs (optional)
+```
+
+This avoids controller blocks and grid.sync when the GEMM kernel only consumes precomputed routing.
+
+---
+
+## SRAM Tetris: How Codex Should Reason Through Tile Sizes
 
 Don't use a formula blindly. Walk through this reasoning:
 
@@ -493,6 +523,98 @@ __device__ __forceinline__ float moe_get_up_block_scale(
 }
 ```
 
+### Down-Projection Block Scale Handling (Qwen3 Pattern)
+
+The down-projection has different scale indexing because the weight shape is `[E, K, N]` (not `[E, 2*N, K]` like up-projection).
+
+```cpp
+// Down-projection scale layout: [E, K_blocks, N_blocks]
+// For Qwen3: [128, 16, 6] where K=2048, N=768, block=128
+
+template <typename Dims>
+struct DownScaleDims {
+    static constexpr uint32_t K_BLOCKS = (Dims::K + Dims::BLOCK_SIZE_QUANT - 1) / Dims::BLOCK_SIZE_QUANT;
+    static constexpr uint32_t N_BLOCKS = (Dims::N + Dims::BLOCK_SIZE_QUANT - 1) / Dims::BLOCK_SIZE_QUANT;
+    // Qwen3 example: K_BLOCKS=16, N_BLOCKS=6
+};
+
+// Loading scales during down-projection weight prefetch
+template <typename Dims>
+__device__ void moe_request_down_expert_with_scale(
+    const W_element* expert_weights_down,
+    const S_element* expert_scales_down,
+    MoE_SHM<Dims>* shm,
+    cuda::pipeline<cuda::thread_scope_thread>& pipeline,
+    uint32_t expert_id,
+    uint32_t k_offset,      // Current K-slice: blockIdx.x * W_DOWN_TILE
+    uint32_t w_buffer_idx)
+{
+    // ... weight loading code ...
+
+    if constexpr (Dims::USE_BLOCK_QUANT) {
+        // k_offset determines which K-block we're in
+        // Each K-block spans BLOCK_SIZE_QUANT rows
+        // W_DOWN_TILE (16) < BLOCK_SIZE_QUANT (128), so multiple tiles share one K-block
+        uint32_t k_block = k_offset / Dims::BLOCK_SIZE_QUANT;
+
+        // Load ALL N-block scales for this K-block (only N_BLOCKS=6 values)
+        if (warp == 0 && lane < Dims::DOWN_SCALE_N_BLOCKS) {
+            uint32_t scale_idx =
+                expert_id * DownScaleDims<Dims>::K_BLOCKS * DownScaleDims<Dims>::N_BLOCKS
+                + k_block * DownScaleDims<Dims>::N_BLOCKS
+                + lane;
+
+            shm->down_scales[w_buffer_idx][lane] = expert_scales_down[scale_idx];
+        }
+    }
+}
+
+// Applying N-block-varying scales during MMA
+template <typename Dims>
+__device__ void moe_down_gemm_with_block_scale(
+    MoE_SHM<Dims>* shm,
+    uint32_t buffer_idx)
+{
+    auto& scale = shm->down_scales[buffer_idx];  // [N_BLOCKS] preloaded
+
+    for (uint32_t base_col = warp * K_TILE; base_col < Dims::N; base_col += BLOCK_STRIDE) {
+        // Load FP8 weights and activations...
+        __nv_fp8x4_e4m3 w0, w1, w2, w3, a02, a13;
+
+        if constexpr (Dims::USE_BLOCK_QUANT) {
+            // Compute MMA into temporaries (unscaled)
+            float t0 = 0.f, t1 = 0.f, t2 = 0.f, t3 = 0.f;
+            mma_fp8_fp8(t0, t1, t2, t3, w0, w1, w2, w3, a02, a13, 0.f, 0.f, 0.f, 0.f);
+
+            // KEY: N-block determines which scale to use
+            // base_col is the N-dimension offset, not K
+            uint32_t n_block = base_col / Dims::BLOCK_SIZE_QUANT;
+            float block_scale = scale[n_block];
+
+            // Apply N-block-specific scale
+            d0 += t0 * block_scale;
+            d1 += t1 * block_scale;
+            d2 += t2 * block_scale;
+            d3 += t3 * block_scale;
+        } else {
+            // Per-tensor: accumulate, apply row-scale at end
+            mma_fp8_fp8(d0, d1, d2, d3, w0, w1, w2, w3, a02, a13, d0, d1, d2, d3);
+        }
+    }
+}
+```
+
+### Block Quantization vs Per-Tensor Scale Summary
+
+| Aspect | Per-Tensor Scale | Block Quantization (128x128) |
+|--------|------------------|------------------------------|
+| **Scale shape (up)** | `[E, 2*N]` or `[E]` | `[E, 2*N/128, K/128]` |
+| **Scale shape (down)** | `[E, K]` or `[E]` | `[E, K/128, N/128]` |
+| **Scale application** | After all K iterations | During each K-block MMA |
+| **N-dimension handling** | Same scale for all N | Different scale per N-block |
+| **SMEM overhead** | Minimal (1-2 scales) | O(K_blocks × N_blocks) per expert |
+| **Models** | Llama 4 FP8 | Qwen3-FP8, DeepSeek-FP8 |
+
 ---
 
 ## Per-Stage Timing Infrastructure
@@ -558,6 +680,7 @@ __global__ void moe_kernel(...) {
         scratchpad->timing.quantize_end = clock64();
     }
     
+    // NOTE: cooperative grid sync requires gridDim.x <= max active blocks for this kernel.
     cooperative_groups::this_grid().sync();
     
     if (blockIdx.x == 0 && threadIdx.x == 0) {
@@ -651,10 +774,10 @@ __device__ __forceinline__ float apply_silu_gated(
     float silu = (gate * up) / (1.0f + expf(-gate));
     
     if constexpr (WeightAfterActivation) {
-        // top_k > 1: apply weight after activation
+        // Apply weight after activation if model semantics require it
         return silu * topk_weight;
     } else {
-        // top_k == 1: weight already folded into earlier computation
+        // Weight already folded earlier by model definition
         return silu;
     }
 }
@@ -730,19 +853,22 @@ If the model uses an activation function not in templates above:
 ```markdown
 **When encountering unknown activation in Phase 3 (up-projection):**
 
-1. Use Task to explore:
-   Task("Investigate {activation_name} activation function for CUDA MoE kernel:
-   
+1. **Explore the activation function** using the prompt below (recommended: run in an isolated fresh session, e.g., via `codex exec`, to avoid polluting your main context):
+
+   ```
+   Investigate {activation_name} activation function for CUDA MoE kernel:
+
    1. Find the mathematical formula in vLLM source or model documentation
    2. Search for efficient CUDA implementations (check CUTLASS, cuDNN, Triton)
    3. Determine how it interacts with gated architecture (is it gate*act(up) or act(gate)*up?)
    4. Check for numerical stability concerns (overflow, underflow, NaN)
    5. Look for any model-specific variations
-   
+
    Output findings to {artifact_dir}/activation_exploration.md with:
    - Mathematical formula
    - Recommended CUDA implementation
-   - Test cases for numerical validation")
+   - Test cases for numerical validation
+   ```
 
 2. Based on exploration findings, implement the activation function
 
@@ -814,24 +940,48 @@ moe_monokernel(
 
 ---
 
+## Token-Major Kernel Skeleton
+
+Use when output is token‑owned and you want to avoid atomics:
+
+```cpp
+template <typename Dims, typename Tiles>
+__global__ void moe_token_major(
+    const bf16* __restrict__ input,
+    const uint16_t* __restrict__ topk_ids,
+    const float* __restrict__ topk_weights,
+    const fp8* __restrict__ w13,
+    const fp8* __restrict__ w2,
+    bf16* __restrict__ output)
+{
+    // Each block owns one token and a K-slice
+    uint32_t token = blockIdx.y;
+    uint32_t k_slice = blockIdx.x;
+    // Loop over top_k experts for this token; accumulate locally
+    // Write output directly for this token + K-slice
+}
+```
+
+---
+
 ## Output Strategy Pattern (Decision A)
 
 ```cpp
 // Compile-time selection based on USE_ATOMICS
 
 template <bool UseAtomics>
-__device__ void write_output(bf16* out, float val, uint32_t idx, float gate);
+__device__ void write_output(bf16* out, float* accum, float val, uint32_t idx, float gate);
 
 template <>
-__device__ void write_output<false>(bf16* out, float val, uint32_t idx, float gate) {
-    // Top-1: Direct write, no race
+__device__ void write_output<false>(bf16* out, float* /*accum*/, float val, uint32_t idx, float gate) {
+    // No output overlap: direct write
     out[idx] = __float2bfloat16(val * gate);
 }
 
 template <>
-__device__ void write_output<true>(bf16* out, float val, uint32_t idx, float gate) {
-    // Top-k: Multiple experts contribute to same token
-    atomicAdd(reinterpret_cast<float*>(&out[idx]), val * gate);
+__device__ void write_output<true>(bf16* /*out*/, float* accum, float val, uint32_t idx, float gate) {
+    // Output overlap: accumulate into FP32 scratchpad
+    atomicAdd(&accum[idx], val * gate);
 }
 ```
 
@@ -852,7 +1002,7 @@ def moe_monokernel(
     M, K = x.shape
     E = router_logits.size(1)
     
-    # Validate (Claude fills in actual values based on model)
+    # Validate (Codex fills in actual values based on model)
     assert M <= MONOKERNEL_THRESHOLD
     assert x.dtype == torch.bfloat16
     
@@ -892,7 +1042,7 @@ def forward(self, layer, x, router_logits, top_k, ...):
 
 ---
 
-## Edge Cases Claude Should Handle
+## Edge Cases Codex Should Handle
 
 ### Shared Experts (DeepSeek-style)
 ```cpp

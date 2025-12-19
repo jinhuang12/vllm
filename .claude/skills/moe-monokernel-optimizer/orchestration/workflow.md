@@ -30,6 +30,16 @@ When a task exits with status "blocked" after 3 attempts, invoke council for ext
 
 ---
 
+## Complex Phase Planning (EnterPlanMode)
+
+For complex phases, the orchestrator should use **EnterPlanMode** before spawning Tasks:
+- **Phase 2 (Planning)**: EnterPlanMode to design optimization approach
+- **Phase 3 GEMM stage**: EnterPlanMode before spawning GEMM implementation task
+
+This ensures proper review of critical decisions before implementation.
+
+---
+
 ## Phase State Machine
 
 ```
@@ -88,10 +98,30 @@ When a task exits with status "blocked" after 3 attempts, invoke council for ext
                     (any phase can fail → report)
 ```
 
+## Phase 2 Planning Requirements
+
+Phase 2 must include the following decisions:
+- **M_avg (uniform routing)** and saturation thresholds (from `references/algorithmic-branching.md`)
+- **Ownership model** (token-major vs expert-major vs hybrid)
+- **Fusion boundary** (single monokernel vs split kernels)
+- **Baseline reference profiling** summary (optional but recommended) under target production settings
+- **Baseline delta requirements** (target savings vs combined-graph baseline)
+
+**Early Exit Conditions**:
+- If the plan selects **split kernels**, Phase 3 should implement the split-kernel path instead of a single cooperative kernel.
+- If the plan concludes **monokernel is not applicable**, document in `optimization_plan.md` and stop before Phase 3.
+- If **baseline delta requirements are implausible**, return to Phase 2 to change ownership/fusion or document the limitation.
+
+---
+
 ## Phase 4 Validation Flow (with Investigation)
 
 Phase 4 validation has a distinct failure handling path that triggers investigation
 rather than the standard escalation ladder used in implementation phases.
+
+**Goal**: Beat the **combined routing+experts CUDA-graph baseline**, not just reduce kernel count.
+
+For kernel regressions (4.2), investigations must include **reference FusedMoE profiling** under identical CUDA graph / torch.compile settings.
 
 ### Validation Stage Flow
 ```
@@ -177,15 +207,20 @@ Phase 3 has **4 stages** (not 6) to keep related GEMM work together:
 |-------|------------|--------------|
 | routing_and_prepare | router + prepare | Tightly coupled, both non-GEMM |
 | activation_quantization | scale_inputs | Conditional (FP8/INT8 only) |
-| **gemm_implementation** | **up_proj + down_proj** | **Share 90% structure** |
+| **gemm_implementation** | **up_proj + down_proj** | **Share structure (see note)** |
 | kernel_assembly | output + main kernel | Wire everything together |
 
-**Critical insight**: `up_projection` and `down_projection` must be implemented together because:
-1. They share the same MMA instruction patterns
-2. They share warp specialization (8 calc, 4 prefetch)
-3. They share double-buffering logic
-4. Implementing separately loses context between tasks
-5. Task can factor out common helpers and apply to both
+**Critical insight**: `up_projection` and `down_projection` are implemented together **only** when:
+- Single cooperative monokernel is chosen (Decision 0c) AND
+- Both projections share the same decomposition
+
+When implemented together, they share:
+1. MMA instruction patterns
+2. Warp specialization (8 calc, 4 prefetch)
+3. Double-buffering logic
+4. Common helpers
+
+**If ownership is token-major or hybrid, or if fusion boundary is split**, treat up/down as separate kernels and allow different tiling/ownership per phase.
 
 ## Stage Status Values
 

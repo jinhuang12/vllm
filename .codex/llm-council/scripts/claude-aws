@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# claude-aws - Convenience wrapper for running Claude Code CLI against Amazon Bedrock.
+#
+# This mirrors the user's shell alias:
+#   alias claude-aws="CLAUDE_CODE_USE_BEDROCK=1 AWS_PROFILE=dev ... claude"
+#
+# Notes:
+# - This wrapper is intentionally simple: it sets defaults *only if* they are not
+#   already set in the environment.
+# - Bedrock docs state AWS_REGION is required; this wrapper does not enforce it.
+
+set -euo pipefail
+
+# Enable Bedrock integration by default
+: "${CLAUDE_CODE_USE_BEDROCK:=1}"
+: "${AWS_PROFILE:=dev}"
+
+# Model selection defaults (override by exporting your own values)
+: "${ANTHROPIC_MODEL:=global.anthropic.claude-opus-4-5-20251101-v1:0}"
+: "${ANTHROPIC_SMALL_FAST_MODEL:=us.anthropic.claude-sonnet-4-20250514-v1:0}"
+: "${ANTHROPIC_DEFAULT_HAIKU_MODEL:=us.anthropic.claude-haiku-4-5-20251001-v1:0}"
+: "${ANTHROPIC_DEFAULT_SONNET_MODEL:=us.anthropic.claude-sonnet-4-5-20250929-v1:0}"
+
+export CLAUDE_CODE_USE_BEDROCK AWS_PROFILE \
+  ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL
+
+# AWS_REGION may be required depending on your Bedrock setup; this wrapper does not enforce it.
+exec claude "$@"

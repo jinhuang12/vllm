@@ -1,18 +1,30 @@
 ---
 name: moe-monokernel-optimizer
-description: Design and implement fused MoE monokernel optimizations for vLLM inference. Use when optimizing Mixture-of-Experts layers for specific (model, vLLM config, hardware, dtype) deployments where router + quantization + GEMMs can be fused into a single cooperative CUDA kernel. Triggers on requests to optimize MoE decode latency, eliminate kernel launch overhead, reduce global memory round-trips, or implement specialized monokernels for models like Llama-4, DeepSeek, Qwen3-MoE, or any vLLM-supported MoE architecture. Supports FP8 W8A8, FP16, BF16, and other quantization formats on Hopper/Ada GPUs (H100, H200, L40S).
+description: Design and implement MoE kernel fusion optimizations for vLLM inference. Use when optimizing Mixture-of-Experts layers for specific (model, vLLM config, hardware, dtype) deployments where router + quantization + GEMMs can be fused (single cooperative kernel) or partially fused (split kernels) to improve decode latency, eliminate launch overhead, and reduce memory round-trips. Triggers on requests to optimize MoE decode latency, implement specialized monokernels, or decide fusion boundaries for MoE architectures (e.g., Llama-4, Qwen3-MoE, DeepSeek-style gated MoE).
 ---
 
 # MoE Monokernel Optimizer
 
-Design specialized fused MoE kernels for vLLM that eliminate kernel launch overhead by combining router, quantization, and GEMMs into a single cooperative kernel.
+Design specialized MoE kernels for vLLM that reduce launch overhead and memory traffic by fusing phases when beneficial (single cooperative kernel) or splitting into multiple kernels when ownership and occupancy require it.
 
 ## When Monokernel Applies
 
 Monokernel optimization is beneficial when:
 - Decode batch size is small (typically BS ≤ 32-128 depending on hardware)
-- MoE preamble (router + quant + kernel launch gaps) exceeds 20-30% of layer time
+- MoE preamble (router + quant + kernel launch gaps) exceeds ~20-30% of layer time
 - Static deployment: fixed (model, vLLM config, hardware, dtype) quadruple
+- **M_avg and ownership decisions** support a single-kernel path (see Decision 0b/0c)
+- Routing distribution is known (or uniform routing is explicitly assumed)
+- You will benchmark under CUDA graphs / torch.compile to match production
+- Reference profiling of vLLM FusedMoE is available (recommended for planning, required for regressions)
+
+**Barrier budget gate**: If the design requires more than 1-2 grid-wide barriers (`grid.sync`), strongly prefer split-kernel or token-major designs unless M_avg is large and routing is balanced.
+
+**Baseline delta gate**: After combined-graph profiling, compute the µs savings required to beat the baseline; if the required savings are implausible, re-plan or document the limitation.
+
+**Full monokernel default gate** (heuristic):
+- Use full monokernel only if **routing/prepare share >= ~15-20%**, **barrier budget <= 1-2**, **cooperative launch feasible**, and **M_avg is high or top_k=1**.
+- Otherwise default to split/hybrid and target the expert kernel cost first.
 
 ## Supported Data Types
 
@@ -45,22 +57,27 @@ Reference implementations exist for these model architectures:
 
 ## LLM Council Integration
 
-**IMPORTANT**: Use the `llm-council` skill proactively. The ~10 minute latency catches issues that would cost hours to debug.
+`llm-council` is a **de-risking tool**, not a hard gate. Use it when the change is high-impact, correctness-sensitive, or you feel uncertain. The ~10-20 minute latency catches issues that would cost hours to debug.
 
-### When to Invoke llm-council
+### Risk-Tier Policy
 
-Invoke llm-council skill when ANY of these occur:
+- **Required (high-risk)** — default expectation:
+  - Changing **kernel math / accumulation** (FP32 accumulator logic, atomics, Split-H reduction)
+  - Changing **memory layout / shared memory / TMA/cp.async staging** that could corrupt results
+  - Introducing or modifying **top_k > 1** routing + accumulation behavior
+  - Making a **major performance tradeoff** that could regress other batch sizes
 
-| Trigger | Detection | Action |
-|---------|-----------|--------|
-| Phase checkpoint | After Phase 1, 2, or 4 completion | Review constraints/plan/results |
-| Stage blocked | Task exits with "blocked" status | Escalation per failure-handling.md |
-| TODO/FIXME in code | Stage produces incomplete code | Shortcut detection |
-| Plan drift | Implementation diverges >20% from optimization_plan.md | Drift detection |
-| Persistent compile error | Same error after 2 orchestrator retries | Stuck detection |
-| Orchestrator uncertainty | Unsure about correct approach | Proactive consultation |
+- **Recommended (medium-risk)**:
+  - After Phase 2 when plan introduces non-trivial architectural choices (tiling, buffering, fusion boundaries)
+  - After Phase 4 if investigation proposes non-obvious fix, or if conclusions are based on noisy perf data
+  - When stuck after 2+ distinct attempts (fresh eyes help)
+  - After Stage 3 (GEMM implementation) - most complex stage
 
-**Bias toward consultation**: When in doubt, invoke the council. A 10-minute council review is cheaper than hours debugging a flawed implementation.
+- **Optional (low-risk)**:
+  - Mechanical refactors, comments/docs, build-system glue
+  - Small edits with strong test coverage and low blast radius
+
+> If you choose to skip a recommended/required council review, proceed — but leave a short rationale in `{artifact_dir}/state.json` under `council_skip_rationale` so future resumption has context.
 
 ### High-Risk Stages (Pre-Implementation Review)
 
@@ -70,8 +87,6 @@ For these stages, invoke llm-council BEFORE implementation to review the approac
 |-------|-------------|---------------------|
 | `gemm_implementation` | Most complex: triple buffering, MMA loops, K-chunking | Verify tile sizes, buffer strategy, MMA instruction selection |
 | Down-projection (top_k > 1) | Atomic contention with multi-expert accumulation | Review accumulation strategy, Split-H decision |
-
-This front-loads expert review rather than waiting for failures.
 
 ### How to Invoke llm-council
 
@@ -152,6 +167,18 @@ Each phase prompt ends with `{common_behavioral_footer}`. You MUST replace this 
 - Context Preservation section
 
 **DO NOT abbreviate the footer**. Items 2-5 (llm-council review loops, compile errors, stuck handling, implementation review) are critical for quality control. Skipping them causes subagents to produce incomplete work without proper review cycles.
+
+### Complex Phase Planning (EnterPlanMode)
+
+For complex phases, the orchestrator should use **EnterPlanMode** before spawning Tasks to ensure proper review of critical decisions:
+
+| Phase/Stage | Use EnterPlanMode? | Reason |
+|-------------|-------------------|--------|
+| Phase 2 (Planning) | **Yes** | Design optimization approach with user review |
+| Phase 3 GEMM stage | **Yes** | Most complex stage - verify approach before implementation |
+| Other phases/stages | No | Standard Task spawning sufficient |
+
+This ensures architecturally significant decisions get explicit user approval before implementation begins.
 
 ### State File
 
@@ -243,12 +270,21 @@ Task tool parameters:
 
 Makes decisions:
 - **Decision 0**: Saturation score (from `references/algorithmic-branching.md`)
-- **Decision 1**: Output path (atomics vs direct write)
+- **Decision 0b**: Per-expert M under uniform routing (M_avg = BS * top_k / E_global) or measured histogram
+- **Decision 0c**: Ownership model + fusion boundary (token-major vs expert-major; cooperative vs split)
+- **Decision 0d**: Baseline reference profiling summary (optional but recommended)
+- **Decision 0e**: Baseline delta requirements (target savings vs combined-graph baseline)
+- **Decision 1**: Output path (atomics vs direct write, depends on ownership)
 - **Decision 2**: Shared expert strategy (from `references/architecture-pattern.md`)
 - **Decision 3**: GEMM Strategy (Per-pair GEMV vs Expert-grouped GEMM)
 - **Decision 4**: SRAM Tetris (from `references/tiling-config.md`) - **dtype affects buffer sizes**
 - **Decision 5**: Warp configuration
 - **Decision 6**: MMA instruction selection (based on dtype)
+
+**Early Exit Conditions**: If Phase 2 concludes:
+- Monokernel is not applicable → document in `optimization_plan.md`, stop before Phase 3
+- Split kernels selected → Phase 3 implements split-kernel path instead
+- Baseline delta implausible → re-plan or document limitation
 
 ### Phase 3: Implementation
 
@@ -262,8 +298,14 @@ Phase 3 is structured into **4 stages** to keep GEMM work together.
 |-------|------------|-----------|
 | routing_and_prepare | router + prepare | Tightly coupled, non-GEMM |
 | activation_quantization | scale_inputs | Conditional (FP8 only) |
-| **gemm_implementation** | **up_proj + down_proj** | Share 90% of structure |
+| **gemm_implementation** | **up_proj + down_proj** | Share structure (see note below) |
 | kernel_assembly | output + main kernel | Wire everything together |
+
+**GEMM Stage Flexibility**: `up_projection` and `down_projection` are implemented together **only** when:
+- Single cooperative monokernel is chosen (Decision 0c) AND
+- Both projections share the same decomposition
+
+If ownership is token-major or hybrid, or if fusion boundary is split, treat up/down as separate kernels and allow different tiling/ownership per phase.
 
 **For each stage**, spawn Task with:
 ```
@@ -289,6 +331,10 @@ Validate monokernel against stock `fused_moe` in 3 stages:
 | 4.2 Kernel-Level | Performance under CUDA graphs | `speedup >= 1.0x` at all batch sizes |
 | 4.3 E2E Latency | Real inference impact | `>5%` improvement (BS≤8), `>0%` (BS>8) |
 
+**Goal**: Beat the **combined routing+experts CUDA-graph baseline**, not just reduce kernel count.
+
+For kernel regressions (4.2), investigations must include **reference FusedMoE profiling** under identical CUDA graph / torch.compile settings.
+
 **On failure**: Orchestrator spawns investigation task (1 bounded cycle).
 Investigation diagnoses root cause → council reviews fix proposal → decision:
 
@@ -297,6 +343,7 @@ Investigation diagnoses root cause → council reviews fix proposal → decision
 | `phase_3` | Back to Phase 3 (specific stage with fix context) |
 | `phase_2` | Back to Phase 2 (re-plan with new constraints) |
 | `document_proceed` | Document limitation, proceed to Phase 5 |
+| `rerun_validation` | Re-spawn the failing validation stage (measurement/env issue) |
 | `escalate_human` | Pause for human review |
 
 See [validation/README.md](validation/README.md) and [orchestration/investigation-prompts.md](orchestration/investigation-prompts.md).

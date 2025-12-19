@@ -1,9 +1,8 @@
-# MoE Monokernel Phase Prompts (Codex)
+# MoE Monokernel Task Prompts
 
-> This file is an optional library of phase-level prompts you can paste into a Codex interactive session or pass to `codex exec`.
-> It was adapted from a Claude Code workflow; any Claude-specific "Task(...)" wording has been removed.
+> **Codex CLI note:** Codex CLI is typically single-agent (no separate Task subagents). Treat each “task prompt” below as the **exact checklist you (Codex) must follow** for that phase/stage. When the text says “spawn a Task”, interpret it as: run the phase/stage work now (optionally via a separate `codex exec` run for isolation), and **always update `{artifact_dir}/state.json`** before moving on.
 
-This document contains the full behavioral spec phase prompts for each phase and stage.
+This document contains the full behavioral spec task prompts for each phase and stage.
 
 ## Directory Convention
 
@@ -14,43 +13,149 @@ Example: For Qwen3-30B-A3B-FP8 on L40S with TP=1:
 - Artifacts: `moe_monokernel_artifacts/qwen3-30b-a3b_l40s_fp8_tp1/`
 - CUDA: `csrc/moe/moe_monokernel_qwen3-30b-a3b_l40s_fp8_tp1/`
 
-## Common Behavioral Footer
+## Phase/Stage Kickoff Plan (Required)
 
-Append to ALL phase prompts:
+Before executing **any** phase or stage prompt:
+- **Invoke the `plan` skill** to create or update a phase/stage plan that includes a **micro‑plan (3–7 steps)**.
+- **No open questions by default**: convert unknowns into action items (measure, inspect code, profile).
+- If blocked by user input or unavailable hardware, add **Inputs Required** and pause.
+- Copy the micro‑plan into the phase artifact or record it in `{artifact_dir}/state.json`.
+
+Plan naming: use a stable, lower‑case, hyphenated name per phase/stage (e.g., `moe-monokernel-{model}-{hardware}-{dtype}-p2-plan`). If a plan already exists for that phase/stage, **update it** rather than creating a new file.
+
+## Planning Phases Behavioral Footer
+
+**Use for**: Phase 1 (Constraints), Phase 2 (Optimization Planning)
+
+**Rationale**: Planning phases produce the plan/document itself - there's no separate "approach" to review before writing. Only final output review is required.
+
+Append to Phase 1 and Phase 2 task prompts:
 
 ```markdown
-**Behavioral Expectations**:
-1. **Read before write**: Read all referenced documents before implementing
-2. **Compile often**: Run `cmake --build --preset release --target install` after each major change
-3. **On compile error**:
-   - Read the full error message
-   - Identify root cause (typo, missing include, dimension mismatch, type error)
-   - Fix and retry (up to 3 attempts per distinct error)
-4. **On stuck** (same error 3+ times):
-   - Document in `{artifact_dir}/blockers/{component}_blocker.md`:
-     - Error message (full)
-     - Attempts made with different approaches
-     - Hypotheses for root cause
-     - What you tried and why it didn't work
-   - Exit with status "blocked"
-5. **Stay goal-aligned**: This task contributes to: {ultimate_goal}
+## LLM Council Review (Risk-tiered)
 
-**Context Preservation**:
+`llm-council` is a **de-risking tool**, not an automatic gate for every task. Use it when uncertainty is high or the blast radius is large.
+
+### Risk-tier policy (C)
+
+- **Required (high-risk)**:
+  - The Phase output commits you to a correctness‑sensitive approach (math, accumulation, routing semantics)
+  - You are choosing a tiling/buffering strategy that is hard to change later
+  - You are introducing a new FP8 quantization/accumulation path or changing numerical assumptions
+
+- **Recommended (medium-risk)**:
+  - The Phase output makes non-trivial architectural decisions (kernel structure, staging, fusion boundaries)
+  - You are unsure about an assumption, or you’ve had 2+ distinct false starts
+
+- **Optional (low-risk)**:
+  - Pure documentation, mechanical cleanup, or small changes with clear test coverage
+
+### If you invoke llm-council
+
+1. Invoke the `llm-council` skill by name in chat (e.g., “Use llm-council to review …”).
+2. Follow its instructions to prepare `.llm-council/context.md`.
+3. Run the critics (parallel by default; sequential optional).
+4. Summarize the actionable feedback you accepted/rejected and why.
+
+### State tracking (optional)
+
+If you invoked `llm-council`, record a short summary in `{artifact_dir}/state.json` (recommended for resumability). If you did not invoke it, omit this field (do not block progress).
+```
+
+**Note**: If you invoked `llm-council`, record the outcome in `{artifact_dir}/state.json` for resumability. If you did not invoke it, do **not** block completion solely on council invocation.
+
+**Context Preservation** (for orchestrator compaction recovery):
 - Current phase: {current_phase}
 - Completed stages: {completed_stages}
 - Remaining stages: {remaining_stages}
 - State file: {artifact_dir}/state.json
 - CUDA directory: {cuda_dir}
+- Skill file: `~/.codex/skills/moe-monokernel-optimizer/SKILL.md`
+- Task prompts: `~/.codex/skills/moe-monokernel-optimizer/orchestration/task-prompts.md`
+
+**After Context Compaction**:
+If the orchestrator's context is compacted and you need to resume:
+1. Re-read state.json to understand current progress
+2. Re-read SKILL.md to understand the workflow
+3. In Codex CLI you resume by re-reading state.json and continuing the next phase/stage (there are no separate subagent Tasks)
+4. Check `orchestrator.resume_hint` in state.json for next action
+```
+
+---
+
+## Implementation Phases Behavioral Footer
+
+**Use for**: Phase 3 (Implementation stages), Phase 4 (Validation stages), Phase 5 (Integration)
+
+**Rationale**: Implementation phases benefit from TWO review checkpoints - one to validate the approach BEFORE coding, and one to validate the final implementation AFTER coding.
+
+Append to Phase 3, Phase 4, and Phase 5 task prompts:
+
+```markdown
+## LLM Council Checkpoints (Risk-tiered)
+
+Use `llm-council` to de-risk implementation stages **when appropriate**, not as a universal gate.
+
+### Risk-tier policy (C)
+
+- **Required (high-risk)**:
+  - Kernel math / accumulation / reduction changes (silent correctness risk)
+  - Memory layout / shared memory / staging changes (silent correctness + perf risk)
+  - `top_k > 1` routing + accumulation behavior
+  - Major tiling strategy changes likely to affect multiple batch sizes/architectures
+
+- **Recommended (medium-risk)**:
+  - Non-trivial refactors of kernel structure or dispatch logic
+  - Fix proposals after investigation that are non-obvious or based on noisy perf signals
+
+- **Optional (low-risk)**:
+  - Small, low-blast-radius edits with strong test coverage (docs, comments, minor plumbing)
+
+### Checkpoints (if invoked)
+
+For **high-risk** stages, prefer two checkpoints:
+1. **Checkpoint 1 (approach)**: after designing the approach, before writing significant implementation code.
+2. **Checkpoint 2 (implementation)**: after completing code + validation, before marking the stage complete.
+
+For **medium-risk** stages, pick one checkpoint (usually the final implementation review).
+
+### State tracking (optional)
+
+If you invoked `llm-council`, record the outcome in `{artifact_dir}/state.json` for resumability. If you did not invoke it, omit this field (do not block progress).
+```
+
+**Note**: If you invoked `llm-council`, record checkpoint outcomes in `{artifact_dir}/state.json` for resumability. If you did not invoke it, do **not** block completion solely on council invocation.
+
+**Context Preservation** (for orchestrator compaction recovery):
+- Current phase: {current_phase}
+- Completed stages: {completed_stages}
+- Remaining stages: {remaining_stages}
+- State file: {artifact_dir}/state.json
+- CUDA directory: {cuda_dir}
+- Skill file: `~/.codex/skills/moe-monokernel-optimizer/SKILL.md`
+- Task prompts: `~/.codex/skills/moe-monokernel-optimizer/orchestration/task-prompts.md`
+
+**After Context Compaction**:
+If the orchestrator's context is compacted and you need to resume:
+1. Re-read state.json to understand current progress
+2. Re-read SKILL.md to understand the workflow
+3. In Codex CLI you resume by re-reading state.json and continuing the next phase/stage (there are no separate subagent Tasks)
+4. Check `orchestrator.resume_hint` in state.json for next action
 ```
 
 ---
 
 ## Phase 1: Gather Constraints (with vLLM Code Analysis)
 
-```markdown
-(phase task: "Phase 1: Gather MoE monokernel constraints for {model_id} on {hardware} with TP={tp}, dtype={dtype}.
+**Task Tool Parameters**:
+- `description`: "Phase 1: Gather MoE constraints for {model_id}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
 
-**Ultimate Goal**: Successfully integrate optimized MoE monokernel for {model_id} on {hardware}, targeting decode batch sizes ≤64.
+```markdown
+Phase 1: Gather MoE monokernel constraints for {model_id} on {hardware} with TP={tp}, dtype={dtype}.
+
+**Ultimate Goal**: Successfully integrate optimized MoE monokernel for {model_id} on {hardware}, targeting low decode batch sizes (e.g., ≤64).
 
 **Artifact Directory**: moe_monokernel_artifacts/{model_short}_{hardware_lower}_{dtype}_{tp}/
 **CUDA Directory**: csrc/moe/moe_monokernel_{model_short}_{hardware_lower}_{dtype}_{tp}/
@@ -153,7 +258,14 @@ moe_fields = {
 - Check `quantization_config` in config.json
 - For block-quantized: note `weight_block_size`
 
----
+### B4. Baseline Profiling (Combined Graph, if possible)
+Capture **combined routing+experts** under CUDA graphs / torch.compile to match production.
+If hardware is unavailable, note "baseline unavailable" in constraints.
+
+Minimum data to record:
+- Combined graph total (per BS bucket)
+- Per-kernel breakdown (e.g., fused_moe_kernel vs routing kernels)
+- Any warnings (missing tuned config)
 
 ## Part C: Reference Study
 
@@ -188,6 +300,8 @@ Read these documents for optimization patterns:
 - MoE layer class: {class name}
 - Router function: {function} at line {N}
 - Expert function: {function} at line {N}
+- EP dispatch: {before/after routing} (where tokens are partitioned)
+- Inputs to kernel: {token-major list / expert-major list / both}
 
 ### Semantic Differences from Llama 4
 
@@ -220,7 +334,7 @@ Read these documents for optimization patterns:
 ## Reference Comparison (vs Llama 4)
 | Aspect | Llama 4 | {model_id} | Implication |
 |--------|---------|------------|-------------|
-| top_k | 1 | {top_k} | {atomics needed?} |
+| top_k | 1 | {top_k} | {ownership likely?} |
 | Shared experts | 1 | {shared} | {sidecar needed?} |
 | E_local | 16/128 | {E_local} | {bitfield size?} |
 | N_local | 1024 | {N_local} | {SMEM pressure?} |
@@ -234,6 +348,23 @@ Read these documents for optimization patterns:
 | Experts (E) | {E_global} | {E_local} |
 | Top-K | {top_k} | {top_k} |
 | Shared experts | {shared} | {shared} |
+
+## Uniform Routing Estimates
+- M_avg formula: `M_avg = BS * top_k / E_global`
+- Example M_avg (BS=1): {value}
+- Example M_avg (BS=8): {value}
+- Example M_avg (BS=64): {value}
+
+## Routing Distribution (if available)
+- Per‑expert token histogram: {p50/p95 or summary}
+- Skew or hot experts: {yes/no}
+- If unavailable: note “uniform routing assumed”
+
+## Baseline Profiling (Combined Graph)
+- Parity: {CUDA graphs / torch.compile / TP/EP / batch buckets}
+- Combined totals: {bs->ms table}
+- Kernel breakdown: {top kernels and % share}
+- Warnings: {missing tuned config, etc.}
 
 ## Hardware: {hardware}
 - Architecture: {sm_xx}
@@ -272,16 +403,20 @@ Read these documents for optimization patterns:
 - [ ] T13: Cooperative grid sync
 ```
 
-{common_behavioral_footer}
-")
+{planning_behavioral_footer}
 ```
 
 ---
 
 ## Phase 2: Optimization Planning
 
+**Task Tool Parameters**:
+- `description`: "Phase 2: Plan {model_id} optimization"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-(phase task: "Phase 2: Create optimization plan for {model_id} monokernel.
+Phase 2: Create optimization plan for {model_id} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -297,10 +432,13 @@ Read these documents for optimization patterns:
    - `references/tiling-config.md`
    - `references/code-templates.md` (especially activation templates)
 
-2. Apply Decision A (Output Path):
+2. Apply Decision 0 (Applicability) and 0b/0c (Ownership + Fusion Boundary):
    ```
-   top_k = {top_k from constraints}
-   USE_ATOMICS = (top_k > 1)
+   M_avg = BS * top_k / E_global  # uniform routing (use E_local if EP pre-dispatch)
+   # If routing histograms exist, prefer p50/p95 per-expert counts over uniform M_avg.
+   ownership = token_major / expert_major / hybrid
+   fusion_boundary = monokernel / split
+   USE_ATOMICS = (ownership != token_major)
    ```
 
 3. Apply Decision B (Sorter Strategy):
@@ -310,11 +448,12 @@ Read these documents for optimization patterns:
    ```
 
 4. Apply Decision C (Weight Application Order):
+   - Read the model’s MoE forward path in vLLM.
+   - Set weight placement based on **model semantics**, not `top_k`.
    ```
-   if top_k == 1:
-       APPLY_WEIGHT = 'before_silu'  # Can fold into scale
-   else:
-       APPLY_WEIGHT = 'after_silu'   # Must apply after activation
+   APPLY_WEIGHT = 'after_activation'  # common
+   # or
+   APPLY_WEIGHT = 'before_activation'  # only if model definition folds weights earlier
    ```
 
 5. Solve SRAM Tetris:
@@ -325,7 +464,17 @@ Read these documents for optimization patterns:
 6. Determine activation function approach:
    - If silu: Use standard template from code-templates.md
    - If gelu/geglu/relu: Use template from code-templates.md
-   - If custom/unknown: Flag for exploration run in Phase 3
+   - If custom/unknown: Flag for exploration subagent in Phase 3
+
+7. (Optional but recommended) Baseline reference profiling:
+   - Profile vLLM FusedMoE under the same CUDA graphs / torch.compile settings
+   - Record per-kernel timing and key NCU metrics
+   - Use this to validate ownership/fusion boundary decisions
+
+8. Baseline delta requirements (from constraints baseline profiling):
+   - Use combined routing+experts CUDA‑graph baseline totals
+   - Compute target thresholds per Phase 4 (≥5% faster for BS≤8, no regressions for BS>8)
+   - Identify where the required µs savings must come from
 
 **Output**: Write to `{artifact_dir}/optimization_plan.md`
 
@@ -335,10 +484,27 @@ Template:
 
 ## Algorithmic Decisions
 
-### Decision A: Output Path
-- top_k = {N}
+### Decision 0: Applicability
+- M_avg = {value}
+- saturation = {value}
+- Rationale: {why monokernel or split}
+
+### Decision 0b: Ownership
+- ownership = {token_major/expert_major/hybrid}
 - USE_ATOMICS = {true/false}
 - Rationale: {why}
+
+### Decision 0b (per-phase)
+- UP_OWNERSHIP = {token_major/expert_major}
+- DOWN_OWNERSHIP = {token_major/expert_major}
+- USE_ATOMICS_UP = {true/false}
+- USE_ATOMICS_DOWN = {true/false}
+- Rationale: {why per‑phase differs, if hybrid}
+
+### Decision 0c: Fusion Boundary
+- fusion_boundary = {monokernel/split}
+- Rationale: {why}
+- Baseline share: {routing/prepare % vs fused_moe_kernel %}
 
 ### Decision B: Sorter Strategy  
 - E_local = {N}
@@ -348,9 +514,21 @@ Template:
 - Rationale: {why}
 
 ### Decision C: Weight Application Order
-- top_k = {N}
-- APPLY_WEIGHT = {before_silu/after_silu}
+- APPLY_WEIGHT = {before_activation/after_activation}
+- Source: {model file:line}
 - Rationale: {why this matters for correctness}
+
+## Baseline Reference Profiling (optional but recommended)
+- Settings parity: {CUDA graphs / torch.compile / TP/EP / batch buckets}
+- Per-kernel timing summary: {router/prepare/quant/gemm1/gemm2/output}
+- NCU highlights: {occupancy, barrier stalls, TC utilization, memory BW}
+- Implication: {how this affects ownership/fusion decisions}
+
+## Baseline Delta Requirements
+- Combined‑graph baseline totals: {bs->ms table}
+- Target thresholds: {e.g., BS≤8: baseline*0.95, BS>8: baseline}
+- Required µs savings: {per BS}
+- Feasibility call: {where those µs can plausibly be removed}
 
 ## SRAM Tetris Solution
 
@@ -391,9 +569,13 @@ struct Config_{model_short} {{
     static constexpr uint32_t TOP_K = {top_k};
     
     // Decisions
-    static constexpr bool USE_ATOMICS = {true/false};
+    static constexpr Ownership OWNERSHIP = Ownership::{TokenMajor/ExpertMajor/Hybrid};
+    static constexpr Ownership UP_OWNERSHIP = Ownership::{TokenMajor/ExpertMajor/Hybrid};
+    static constexpr Ownership DOWN_OWNERSHIP = Ownership::{TokenMajor/ExpertMajor/Hybrid};
+    static constexpr bool USE_ATOMICS_UP = {true/false};
+    static constexpr bool USE_ATOMICS_DOWN = {true/false};
     static constexpr uint32_t TOKENS_PER_WARP = {N};
-    static constexpr bool WEIGHT_AFTER_ACTIVATION = {true/false};
+    static constexpr bool WEIGHT_AFTER_ACTIVATION = {true/false};  // from model semantics
     
     // Tiles
     static constexpr uint32_t M_TILE = {N};
@@ -411,11 +593,10 @@ struct Config_{model_short} {{
 
 ## Stage Implementation Notes
 
-{For each stage, note any model-specific adaptations needed}
+{For each stage, note any model-specific adaptations needed. If fusion boundary is split, list which stages are removed or moved to standalone kernels.}
 ```
 
-{common_behavioral_footer}
-")
+{planning_behavioral_footer}
 ```
 
 ---
@@ -423,6 +604,11 @@ struct Config_{model_short} {{
 ## Phase 3: Implementation Stages
 
 Phase 3 is restructured into 4 stages (not 6) to keep related work together:
+
+**If fusion boundary is split or ownership is hybrid**, you may:
+- Separate up/down into different kernels
+- Skip routing stages if routing is done outside the kernel
+- Adjust validations to compare against the matching baseline
 
 | Stage | Components | Rationale |
 |-------|------------|-----------|
@@ -433,25 +619,63 @@ Phase 3 is restructured into 4 stages (not 6) to keep related work together:
 
 ### Stage 1: Routing and Prepare
 
+**Task Tool Parameters**:
+- `description`: "Phase 3 routing_and_prepare: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-(phase task: "Implement routing and token preparation for {model_short} monokernel.
+Implement routing and token preparation for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
 **Read First**:
 - `{artifact_dir}/constraints.md` - especially 'Semantic Differences' section
-- `{artifact_dir}/optimization_plan.md` - Decisions A, B
+- `{artifact_dir}/optimization_plan.md` - Decisions A, B, F
 - `references/router-design.md`
-- `references/expert-grouping.md`
-- `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe_routing.cu' and 'moe_prepare.cu'
+- `references/expert-grouping.md` - **note the Decision F cross-reference**
+- `references/algorithmic-branching.md` - Decision F (GEMM strategy)
+- `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md` - search for 'moe_routing.cu' and 'moe_prepare.cu'
 
-**Objective**: Implement top-k routing AND token-by-expert sorting in one cohesive unit.
+**Objective**: Implement top-k routing AND the chosen prepare strategy.
+If ownership is token‑major, you may skip expert grouping and keep per‑token lists.
+
+**Minor performance check** (non‑blocking):
+If routing/prepare is custom, compare graph‑captured timing vs reference stage.
+Threshold: `<= 1.10x` or `<= +1–2 µs` (whichever is larger).  
+If a thin wrapper, mark parity assumed and skip.
+
+**FIRST: Calculate Decision F (GEMM Strategy)**:
+
+Before implementing sorting, calculate whether expert grouping is worthwhile:
+
+```python
+import math
+E = {num_experts}  # From constraints
+k = {top_k}        # From constraints
+B_max = {bs_max}   # Target max batch size (typically 32 or 64)
+
+λ = (B_max * k) / E
+r_max = λ / (1 - math.exp(-λ)) if λ >= 0.01 else 1.0
+
+print(f"λ = {λ:.2f}, r_max = {r_max:.2f}")
+if r_max >= 2.0:
+    print("Decision F: USE_EXPERT_GROUPING = True (Grouped-GEMM)")
+else:
+    print("Decision F: USE_EXPERT_GROUPING = False (Per-pair GEMV)")
+```
+
+**Document in constraints.md**:
+- Add λ and r_max values
+- Add Decision F outcome
+- If r_max < 2.0, note that per-pair GEMV is preferred and expert grouping overhead may be wasteful
 
 **Key Considerations from Constraints**:
 - Scoring function: {from constraints - softmax/sigmoid}
 - Renormalize: {from constraints - yes/no}
 - top_k: {from constraints}
 - TOKENS_PER_WARP: {from plan - Decision B}
+- USE_EXPERT_GROUPING: {from Decision F calculation above}
 
 **Implementation**:
 1. Create `{cuda_dir}/moe_routing.cu`:
@@ -464,19 +688,59 @@ Phase 3 is restructured into 4 stages (not 6) to keep related work together:
    - Expert reference struct population
    - Pair index computation for GEMM stages
 
-**Validation**:
+**Validation (BLOCKING - REQUIRED before completing)**:
+
+**Minor performance check** (non‑blocking):
+If quantization is custom, compare graph‑captured timing vs reference stage.
+Threshold: `<= 1.10x` or `<= +1–2 µs` (whichever is larger).  
+If a thin wrapper, mark parity assumed and skip.
+
+1. **Build**:
 ```bash
 cmake --build --preset release --target install
 ```
 
-{common_behavioral_footer}
-")
+2. **Correctness Test** - Run this validation inline:
+```python
+import torch
+from vllm.model_executor.layers.fused_moe import fused_topk
+
+# Test parameters from constraints
+batch_size, E, top_k = 8, {E}, {top_k}
+router_logits = torch.randn(batch_size, E, device='cuda', dtype=torch.bfloat16)
+
+# Reference: vLLM fused_topk
+ref_weights, ref_ids = fused_topk(router_logits, topk=top_k, renormalize={renormalize})
+
+# Your routing implementation (adapt import to your kernel name)
+from vllm._custom_ops import moe_monokernel_{model_short}_routing
+mono_weights, mono_ids = moe_monokernel_{model_short}_routing(router_logits, top_k)
+
+# Validate - IDs must match exactly (same top-k selection)
+assert torch.equal(mono_ids, ref_ids), f"TopK IDs mismatch: mono={mono_ids[:2]} vs ref={ref_ids[:2]}"
+
+# Weights should be close (floating point tolerance)
+torch.testing.assert_close(mono_weights, ref_weights, atol=1e-5, rtol=1e-5)
+print("Stage 1 routing_and_prepare validation: PASS")
+```
+
+3. **If validation fails** → Exit with status "blocked" and include:
+   - The assertion error message
+   - Sample mismatched values
+   - Your hypothesis for the discrepancy
+
+{implementation_behavioral_footer}
 ```
 
 ### Stage 2: Activation Quantization (Conditional)
 
+**Task Tool Parameters**:
+- `description`: "Phase 3 activation_quantization: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-(phase task: "Implement activation quantization for {model_short} monokernel.
+Implement activation quantization for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -486,7 +750,7 @@ If weight_dtype is BF16/FP16, this stage can be minimal (just copy activations).
 **Read First**:
 - `{artifact_dir}/constraints.md` - check Data Types section
 - `{artifact_dir}/optimization_plan.md`
-- `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe_scale_inputs.cu'
+- `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md` - search for 'moe_scale_inputs.cu'
 
 **Implementation**:
 1. Create `{cuda_dir}/moe_scale_inputs.cu`
@@ -501,8 +765,46 @@ If BF16/FP16 (no quantization needed):
 - Simple passthrough or direct copy to SMEM
 - No scale folding needed
 
-{common_behavioral_footer}
-")
+**Validation (BLOCKING - REQUIRED before completing)**:
+
+1. **Build**:
+```bash
+cmake --build --preset release --target install
+```
+
+2. **Correctness Test** (FP8/INT8 only - skip for BF16/FP16):
+```python
+import torch
+
+# Test parameters from constraints
+batch_size, K = 8, {K}
+activations = torch.randn(batch_size, K, device='cuda', dtype=torch.bfloat16) / 10
+
+# Reference: Torch dynamic quantization
+FP8_MAX = 448.0  # E4M3 max value
+ref_scale = activations.abs().amax(dim=-1, keepdim=True) / FP8_MAX
+ref_quantized = (activations / ref_scale).clamp(-FP8_MAX, FP8_MAX)
+
+# Your quantization implementation
+from vllm._custom_ops import moe_monokernel_{model_short}_quantize
+mono_quantized, mono_scale = moe_monokernel_{model_short}_quantize(activations)
+
+# Validate scales match (critical for GEMM correctness)
+torch.testing.assert_close(mono_scale, ref_scale, atol=1e-3, rtol=1e-3)
+
+# Validate dequantized values (roundtrip)
+ref_dequant = ref_quantized * ref_scale
+mono_dequant = mono_quantized.float() * mono_scale
+torch.testing.assert_close(mono_dequant, ref_dequant.float(), atol=0.5, rtol=0.1)
+print("Stage 2 activation_quantization validation: PASS")
+```
+
+3. **If validation fails** → Exit with status "blocked" and include:
+   - Scale comparison values
+   - Maximum dequantization error
+   - Your hypothesis for the discrepancy
+
+{implementation_behavioral_footer}
 ```
 
 ### Stage 3: GEMM Implementation (CRITICAL - Up + Down Together)
@@ -510,10 +812,13 @@ If BF16/FP16 (no quantization needed):
 This is the most complex stage. **Up-projection and down-projection are implemented together**
 because they share 90% of their structure (MMA patterns, warp specialization, double buffering).
 
-**CRITICAL**: This stage produces the core compute kernels. A naive/slow implementation is WORSE than failure because the user already has a working fused_moe. The purpose of this skill is SPEEDUP.
+**Task Tool Parameters**:
+- `description`: "Phase 3 gemm_implementation: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
 
 ```markdown
-(phase task: "Implement GEMM kernels (up-projection AND down-projection) for {model_short} monokernel.
+Implement GEMM kernels (up-projection AND down-projection) for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -523,9 +828,10 @@ They share the same MMA infrastructure - implement common helpers once, apply to
 **Read First** (IN THIS ORDER):
 1. `{artifact_dir}/optimization_plan.md` - Decisions C, F (weight timing, MMA details)
 2. `{artifact_dir}/constraints.md` - dimensions, dtype
-3. `references/code-templates.md` - MMA templates section (FP8 AND BF16)
-4. `references/tiling-config.md` - SMEM layout
-5. `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe_up_projection.cu', 'moe_down_projection.cu'
+3. `assets/MOE_MONOKERNEL_OPTIMIZATION_GUIDE.md` - **13 optimization techniques** (warp specialization, triple buffering, bank conflict mitigation, custom MMA patterns, bitfield deduplication)
+4. `references/code-templates.md` - MMA templates section (FP8 AND BF16)
+5. `references/tiling-config.md` - SMEM layout
+6. `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md`  - search for 'moe_up_projection.cu', 'moe_down_projection.cu'
 
 **Key Configuration**:
 - weight_dtype: {fp8/bf16/fp16}
@@ -533,51 +839,6 @@ They share the same MMA infrastructure - implement common helpers once, apply to
 - K_CHUNKS_UP: ceil(K / K_TILE)
 - K_CHUNKS_DOWN: ceil(N / K_TILE)
 - USE_BLOCK_QUANT: {true/false}
-
----
-
-## FORBIDDEN PATTERNS (READ THIS FIRST)
-
-**The purpose of this skill is SPEEDUP.** A slow kernel is WORSE than no kernel because the user already has fused_moe that works. If you cannot implement optimized GEMM, exit BLOCKED - do NOT implement naive fallback.
-
-**NEVER implement any of these patterns**:
-```cpp
-// FORBIDDEN: Serial triple-nested GEMM loop
-for (int i = 0; i < M; i++)
-    for (int j = 0; j < N; j++)
-        for (int k = 0; k < K; k++)
-            C[i][j] += A[i][k] * B[k][j];  // NO!
-
-// FORBIDDEN: Per-element accumulation without MMA
-float sum = 0;
-for (int k = 0; k < K; k++)
-    sum += a[k] * b[k];  // NO! Use mma_ instructions
-
-// FORBIDDEN: Naive function names
-void up_projection_naive(...);   // NO!
-void gemm_simple(...);           // NO!
-void fallback_matmul(...);       // NO!
-```
-
-**REQUIRED patterns**:
-```cpp
-// REQUIRED: MMA instruction calls
-mma_bf16_bf16(d0, d1, d2, d3, a0, a1, a2, a3, b0, b1, ...);  // YES
-
-// REQUIRED: K-chunk tiling iteration
-for (uint32_t k_chunk = 0; k_chunk < K_CHUNKS; k_chunk++) {  // YES
-    // ... MMA inside ...
-}
-
-// REQUIRED: Warp-level fragment loads
-load_A_fragment<BS_MAX>(smem, row, k_offset, a0, a1, a2, a3);  // YES
-```
-
-**If you cannot implement MMA-based GEMM**:
-- Do NOT write a naive fallback "just to make it work"
-- Exit with status BLOCKED
-- Document specifically what you couldn't implement
-- A 220x slowdown is UNACCEPTABLE - that's what happened when naive was used
 
 ---
 
@@ -674,7 +935,7 @@ Nearly identical structure to up-projection, but:
 - Input: intermediate buffer [BS*TOP_K, N_LOCAL]
 - Output: accumulator [BS, K]
 - K_CHUNKS_DOWN = ceil(N_LOCAL / K_TILE) instead of ceil(K / K_TILE)
-- Output uses atomicAdd if USE_ATOMICS=true (top_k > 1)
+- Output uses atomicAdd only if USE_ATOMICS=true (output overlap)
 
 **THE MMA LOOP** (same structure, different dimensions):
 ```cpp
@@ -691,81 +952,131 @@ for (uint32_t k_chunk = 0; k_chunk < K_CHUNKS_DOWN; k_chunk++) {
 
 ---
 
-## MANDATORY VERIFICATION (DO NOT SKIP)
+## VALIDATION (BLOCKING - REQUIRED before completing)
 
-Before completing this task, you MUST verify ALL of the following:
+Before completing this task, you MUST pass ALL of these validations:
 
-### Check 1: Search for incomplete code
+### 1. Build Check
 ```bash
+cmake --build --preset release --target install
+```
+
+### 2. Code Completeness Check
+```bash
+# Search for incomplete code markers
 grep -n 'TODO\|FIXME\|XXX\|unimplemented' {cuda_dir}/moe_*_projection.cu
 ```
-If ANY results in MMA loops or compute paths → You are NOT done. Exit BLOCKED.
+**If ANY results** in MMA loops or compute paths → Exit BLOCKED. Do not proceed.
 
-### Check 2: Verify MMA calls exist
+### 3. MMA Implementation Check
 ```bash
+# Verify MMA calls exist in both projections
 UP_MMA=$(grep -c 'mma_' {cuda_dir}/moe_up_projection.cu)
 DOWN_MMA=$(grep -c 'mma_' {cuda_dir}/moe_down_projection.cu)
-echo "MMA calls: up=$UP_MMA, down=$DOWN_MMA"
+echo "Up projection MMA calls: $UP_MMA"
+echo "Down projection MMA calls: $DOWN_MMA"
 ```
-**If either count is 0 → You implemented naive GEMM. This is UNACCEPTABLE. Exit BLOCKED.**
+**If either count is 0** → MMA loop not implemented. Exit BLOCKED.
 
-### Check 3: Verify NO naive patterns exist
-```bash
-grep -n 'naive\|simple\|fallback\|serial' {cuda_dir}/moe_*_projection.cu
+### 4. Correctness Test (CRITICAL)
+Run this validation to compare against torch.matmul reference:
+```python
+import torch
+import time
+
+# Test parameters from constraints
+batch_size, K, N, E, top_k = 8, {K}, {N}, {E}, {top_k}
+
+# Create test inputs
+torch.manual_seed(42)  # Reproducibility
+activations = torch.randn(batch_size, K, device='cuda', dtype=torch.bfloat16) / 10
+topk_ids = torch.randint(0, E, (batch_size, top_k), device='cuda')
+topk_weights = torch.softmax(torch.randn(batch_size, top_k, device='cuda'), dim=-1)
+w_up = torch.randn(E, 2*N, K, device='cuda', dtype={weight_dtype}) / 10
+w_down = torch.randn(E, K, N, device='cuda', dtype={weight_dtype}) / 10
+
+# Reference: Naive torch implementation (known correct)
+ref_output = torch.zeros(batch_size, K, device='cuda', dtype=torch.float32)
+for b in range(batch_size):
+    for i in range(top_k):
+        expert_id = topk_ids[b, i].item()
+        weight = topk_weights[b, i].item()
+        # Up projection: [K] -> [2*N]
+        up_out = torch.matmul(activations[b].float(), w_up[expert_id].float().T)
+        gate, x = up_out[:N], up_out[N:]
+        # Activation: SiLU-gated (adjust if model uses different activation)
+        activated = torch.nn.functional.silu(gate) * x * weight
+        # Down projection: [N] -> [K]
+        down_out = torch.matmul(activated, w_down[expert_id].float().T)
+        ref_output[b] += down_out
+
+# Your GEMM implementation (adapt import to your kernel)
+from vllm._custom_ops import moe_monokernel_{model_short}_gemm
+mono_output = moe_monokernel_{model_short}_gemm(
+    activations, topk_ids, topk_weights, w_up, w_down
+)
+
+# Correctness validation with dtype-appropriate tolerance
+# BF16: atol=1e-2, rtol=1e-2 | FP8: atol=1.0, rtol=0.1
+torch.testing.assert_close(mono_output, ref_output, atol={atol}, rtol={rtol})
+print("GEMM correctness: PASS")
 ```
-**If ANY matches → You implemented naive code. DELETE IT and implement proper MMA. Exit BLOCKED if you cannot.**
+**If assertion fails** → Exit BLOCKED with the error message and max diff values.
 
-### Check 4: Verify K-chunk tiling exists
-```bash
-grep -c 'k_chunk\|K_CHUNK' {cuda_dir}/moe_*_projection.cu
+### 5. Performance Sanity Check (CRITICAL - catches naive implementations)
+```python
+# This catches "naive GEMM" that is correct but 100x+ slower
+torch.cuda.synchronize()
+start = time.perf_counter()
+for _ in range(100):
+    moe_monokernel_{model_short}_gemm(activations, topk_ids, topk_weights, w_up, w_down)
+torch.cuda.synchronize()
+elapsed_ms = (time.perf_counter() - start) / 100 * 1000
+
+print(f"GEMM latency: {elapsed_ms:.2f}ms for BS=8")
+
+# Sanity threshold: < 10ms for small batch sizes
+# Naive loop implementation would be 50-200ms
+if elapsed_ms > 10.0:
+    print(f"WARNING: GEMM too slow ({elapsed_ms:.2f}ms)")
+    print("This likely indicates:")
+    print("  - MMA instructions not being used (naive for-loop GEMM)")
+    print("  - Missing tensor core utilization")
+    print("  - Incorrect memory access patterns")
+    raise AssertionError(f"GEMM performance unacceptable: {elapsed_ms:.2f}ms > 10ms threshold")
+
+print(f"GEMM performance sanity check: PASS ({elapsed_ms:.2f}ms)")
 ```
-**If count is 0 → No tiling implemented. This will be extremely slow. Exit BLOCKED.**
+**If performance fails** → Exit BLOCKED. This indicates MMA loops are not properly implemented.
 
-### Check 5: Verify fragment loaders exist
-```bash
-grep -c 'load_.*_fragment\|load_A\|load_B' {cuda_dir}/moe_*_projection.cu
-```
-**If count is 0 → No proper shared memory usage. Exit BLOCKED.**
-
----
-
-## COMPLETION CRITERIA
-
-You may ONLY mark this task as "complete" if ALL of these are true:
-- [ ] MMA instruction calls exist in both projection files (mma_bf16_bf16 or mma_fp8_fp8)
-- [ ] K-chunk iteration loop exists with MMA inside
-- [ ] Fragment loaders implemented for A and B matrices
-- [ ] NO naive/simple/fallback code anywhere
-- [ ] NO TODOs in compute paths
-- [ ] Code compiles without errors
-
-**If ANY check fails**:
+### If ANY validation fails:
 - Do NOT exit with status "complete"
-- Do NOT implement a naive fallback
 - Exit with status "blocked"
-- Document in blocker file:
-  - What specific part you couldn't implement
-  - What reference you tried to follow
-  - What went wrong
-  - What help you need from council
+- Document in `{artifact_dir}/blockers/gemm_implementation_blocker.md`:
+  - Which specific validation failed
+  - The error message or performance numbers
+  - What you tried and why it didn't work
+  - Your hypothesis for the root cause
 
-Remember: A 220x slowdown happened when naive GEMM was used. That's worse than no kernel at all.
-
-{common_behavioral_footer}
-")
+{implementation_behavioral_footer}
 ```
 
 ### Stage 4: Kernel Assembly
 
+**Task Tool Parameters**:
+- `description`: "Phase 3 kernel_assembly: {model_short}"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-(phase task: "Assemble main kernel and output conversion for {model_short} monokernel.
+Assemble main kernel and output conversion for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
 
 **Read First**:
 - `{artifact_dir}/optimization_plan.md`
 - `{cuda_dir}/moe_*.cu` - all previously implemented stages
-- `assets/LLAMA4_MONOKERNEL_PATCH.md` - search for 'moe.cu' (main kernel)
+- `assets/LLAMA4_MONOKERNEL_PATCH.md` & `examples/MODELS_COMPARISON.md` - search for 'moe.cu' (main kernel)
 
 **Objective**: Wire all stages together into the main cooperative kernel.
 
@@ -812,168 +1123,433 @@ __global__ void moe_kernel(...) {
    - Kernel configuration
    - Launch parameter computation
 
-**Validation**:
+**Validation (BLOCKING - REQUIRED before completing)**:
+
+### 1. Build Check
 ```bash
 cmake --build --preset release --target install
 ```
 
-{common_behavioral_footer}
-")
+### 2. Full Kernel Integration Test
+Run this validation to test the complete assembled kernel against vLLM's fused_moe:
+```python
+import torch
+from vllm.model_executor.layers.fused_moe import fused_moe
+
+# Test parameters from constraints
+batch_size, K, N, E, top_k = 8, {K}, {N}, {E}, {top_k}
+
+# Create test inputs
+torch.manual_seed(42)  # Reproducibility
+activations = torch.randn(batch_size, K, device='cuda', dtype=torch.bfloat16) / 10
+router_logits = torch.randn(batch_size, E, device='cuda', dtype=torch.bfloat16)
+w_up = torch.randn(E, 2*N, K, device='cuda', dtype={weight_dtype}) / 10
+w_down = torch.randn(E, K, N, device='cuda', dtype={weight_dtype}) / 10
+
+# Reference: vLLM fused_moe (the production baseline)
+ref_output = fused_moe(
+    activations, w_up, w_down, router_logits,
+    topk=top_k, renormalize={renormalize}
+)
+
+# Your full assembled monokernel
+from vllm._custom_ops import moe_monokernel_{model_short}
+mono_output = moe_monokernel_{model_short}(
+    activations, router_logits, w_up, w_down
+)
+
+# Validate with appropriate tolerance
+# This tests the full pipeline: routing -> quant -> GEMM -> output
+torch.testing.assert_close(mono_output, ref_output, atol=1e-2, rtol=1e-2)
+print("Full kernel integration test: PASS")
+
+# Test across multiple batch sizes
+for bs in [1, 4, 16, 32, 64]:
+    test_act = torch.randn(bs, K, device='cuda', dtype=torch.bfloat16) / 10
+    test_router = torch.randn(bs, E, device='cuda', dtype=torch.bfloat16)
+
+    ref = fused_moe(test_act, w_up, w_down, test_router, topk=top_k, renormalize={renormalize})
+    mono = moe_monokernel_{model_short}(test_act, test_router, w_up, w_down)
+
+    torch.testing.assert_close(mono, ref, atol=1e-2, rtol=1e-2)
+    print(f"  BS={bs}: PASS")
+
+print("All batch sizes validated: PASS")
+```
+
+### 3. Smoke Test (Kernel Launches Without Crash)
+```python
+# Quick sanity check that kernel launches work
+for bs in [1, 8, 64]:
+    x = torch.randn(bs, {K}, device='cuda', dtype=torch.bfloat16)
+    r = torch.randn(bs, {E}, device='cuda', dtype=torch.bfloat16)
+    out = moe_monokernel_{model_short}(x, r, w_up, w_down)
+    assert out.shape == (bs, {K}), f"Wrong output shape: {out.shape}"
+print("Smoke test: PASS")
+```
+
+### If ANY validation fails:
+- Exit with status "blocked"
+- Document in `{artifact_dir}/blockers/kernel_assembly_blocker.md`:
+  - Which batch size failed
+  - The error message or shape mismatch
+  - Maximum difference from reference
+
+{implementation_behavioral_footer}
 ```
 
 ---
 
-## Phase 4: Validation
+## Phase 4: Validation (3 Stages)
 
-**IMPORTANT**: This phase validates BOTH correctness AND performance. A kernel that is correct but slower than baseline is a FAILURE. The entire purpose of this skill is speedup.
+Phase 4 validates the monokernel through three complementary approaches:
+
+| Stage | Purpose | Tool |
+|-------|---------|------|
+| 4.1 Correctness | Verify numerical accuracy | pytest / manual test |
+| 4.2 Kernel-Level | Pure kernel performance (CUDA graphs) | benchmark script |
+| 4.3 E2E Latency | Real inference impact | `vllm bench latency` |
+
+**Key Insight**: Monokernel activation is configuration-dependent (M_avg, ownership, batch buckets). Use decode-heavy workloads and confirm activation via logs or dispatch instrumentation.
+
+---
+
+### Stage 4.1: Correctness Verification
+
+**Task Tool Parameters**:
+- `description`: "Phase 4.1: Correctness test for {model_short} monokernel"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
 
 ```markdown
-(phase task: "Validate {model_short} monokernel correctness and performance.
+Verify {model_short} monokernel numerical correctness.
 
 **Ultimate Goal**: {ultimate_goal}
 
 **Read First**:
-- `{artifact_dir}/constraints.md`
-- `assets/benchmark_template.py` - adapt for this model
+- `{artifact_dir}/constraints.md` - model dimensions and dtype
+- `validation/QWEN3_BASELINE.md` - tolerance reference
 
-**Objective**: Verify numerical correctness AND confirm performance improvement.
+**Tolerance by dtype**:
+- FP32: atol=1e-3, rtol=1e-3
+- BF16/FP16: atol=1e-2, rtol=1e-2
+- FP8 block-quant: atol=300, rtol=0.5
 
----
-
-## Step 1: Correctness Test
-
+**Test Implementation**:
 ```python
-# Compare monokernel vs stock fused_moe
 import torch
 from vllm._custom_ops import moe_monokernel_{model_short}
 from vllm.model_executor.layers.fused_moe import fused_moe
 
-# Create test inputs
-x = torch.randn(BS, K, dtype=torch.bfloat16, device='cuda')
-router = torch.randn(BS, E, dtype=torch.bfloat16, device='cuda')
-# ... setup weights ...
+# Test across batch sizes
+for BS in [1, 8, 64]:
+    # Create inputs (dimensions from constraints.md)
+    x = torch.randn(BS, {K}, dtype=torch.bfloat16, device='cuda') / 10
+    router = torch.randn(BS, {E}, dtype=torch.bfloat16, device='cuda')
+    # ... setup weights from constraints ...
 
-# Run both
-mono_out = moe_monokernel_{model_short}(x, router, ...)
-stock_out = fused_moe(x, router, ...)
+    # Run both paths
+    mono_out = moe_monokernel_{model_short}(x, router, ...)
+    stock_out = fused_moe(x, router, ...)
 
-# Compare
-diff = (mono_out - stock_out).abs().max()
-assert diff < 1e-2, f'Numerical mismatch: {diff}'
-print(f'Max diff: {diff} - PASS')
+    # Compare with dtype-appropriate tolerance
+    torch.testing.assert_close(mono_out, stock_out, atol={atol}, rtol={rtol})
+    print(f'BS={BS}: Max diff={diff:.4f} - PASS')
+```
+
+**Output**: Update `{artifact_dir}/state.json`:
+
+**If PASS** (all batch sizes within tolerance):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_1_correctness": {
+        "status": "complete",
+        "max_abs_diff": 0.00X,
+        "batch_sizes_tested": [1, 8, 64]
+      }
+    }
+  }
+}
+```
+
+**If FAIL** (any batch size exceeds tolerance):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_1_correctness": {
+        "status": "needs_investigation",
+        "max_abs_diff": 0.XXX,
+        "tolerance": {atol},
+        "failing_batch_sizes": [8, 64],
+        "failure_details": "Description of where divergence occurs (e.g., 'Output diverges after down-projection, error grows with batch size')"
+      }
+    }
+  }
+}
+```
+Stop Phase 4 and continue with the appropriate investigation prompt (see `orchestration/investigation-prompts.md`).
+
+Exit status for the stage: `needs_investigation` (NOT `blocked`).
+
+{implementation_behavioral_footer}
 ```
 
 ---
 
-## Step 2: Performance Benchmark
+### Stage 4.2: Kernel-Level Benchmark (CUDA Graphs)
 
-Adapt `assets/benchmark_template.py` for this model:
-- Update dimensions (K, N, E, top_k)
-- Update batch sizes to test (1, 4, 8, 16, 32, 64)
-- Run and collect results
+**Task Tool Parameters**:
+- `description`: "Phase 4.2: Kernel benchmark for {model_short} monokernel"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
+```markdown
+Benchmark {model_short} monokernel kernel-level performance under CUDA graphs.
+
+**Ultimate Goal**: {ultimate_goal}
+
+**Read First**:
+- `{artifact_dir}/constraints.md` - model dimensions
+- `benchmarks/kernels/benchmark_moe_monokernel_qwen3.py` - reference implementation
+
+**If regression is detected**: capture a baseline per‑kernel breakdown for FusedMoE under the same CUDA graphs / torch.compile settings.
+Baseline must capture **routing + experts together** inside one CUDA graph; split attribution is secondary.
+
+**Also required**: compute a delta‑to‑baseline table and feasibility call:
+- Baseline total (combined graph)
+- Target thresholds (BS≤8: baseline*0.95; BS>8: baseline)
+- Required µs savings per BS
+- Whether the savings are plausible given per‑kernel breakdown
+
+**Why CUDA Graphs**: Eliminates kernel launch overhead for apples-to-apples comparison between monokernel or split-kernel paths and baseline (5-7 kernels).
+
+**Run Benchmark**:
+```bash
+# Adapt existing benchmark or create new one
+python benchmarks/kernels/benchmark_moe_monokernel_{model_short}.py \
+    --batch-sizes 1 4 8 16 32 64 \
+    --use-cuda-graph \
+    --baseline-scope e2e \
+    --num-iters 100 \
+    --output /tmp/{model_short}_kernel_benchmark
+```
+
+**Baseline Scope = e2e**: Includes routing (topk_softmax) + expert computation (fused_experts) in baseline timing, matching what monokernel fuses.
+
+**Expected Output Format**:
+```
+BS=1: monokernel=X.XXms, baseline=Y.YYms, speedup=Z.ZZx
+BS=8: monokernel=X.XXms, baseline=Y.YYms, speedup=Z.ZZx
+...
+```
+
+**Success Criteria (STRICT)**:
+- Monokernel must be **faster than or equal to** baseline at ALL tested batch sizes
+- Required: `speedup >= 1.0x` at every batch size
+- NO regressions allowed under CUDA graphs (launch overhead is eliminated)
+- If ANY batch size shows `speedup < 1.0x` → FAIL
+
+**Output**: Update `{artifact_dir}/state.json`:
+
+**If PASS** (all batch sizes show speedup >= 1.0x):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_2_kernel_perf": {
+        "status": "complete",
+        "results": {
+          "bs_1": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_4": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_8": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_16": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_32": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ},
+          "bs_64": {"monokernel_ms": 0.XX, "baseline_ms": 0.YY, "speedup": 1.ZZ}
+        },
+        "min_speedup": 1.XX,
+        "max_speedup": X.XX
+      }
+    }
+  }
+}
+```
+
+**If FAIL** (any batch size shows speedup < 1.0x):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_2_kernel_perf": {
+        "status": "needs_investigation",
+        "results": { "...": "..." },
+        "failing_batch_sizes": [1, 4],
+        "worst_speedup": 0.XX,
+        "worst_batch_size": N
+      }
+    }
+  }
+}
+```
+Stop Phase 4 and continue with the kernel performance investigation prompt (see `orchestration/investigation-prompts.md`).
+
+Exit status for the stage: `needs_investigation` (NOT `blocked`).
+
+{implementation_behavioral_footer}
+```
 
 ---
 
-## Step 3: Performance Threshold Validation (MANDATORY)
+### Stage 4.3: E2E Latency Benchmark
 
-**These thresholds determine SUCCESS or FAILURE:**
+**Task Tool Parameters**:
+- `description`: "Phase 4.3: E2E latency benchmark for {model_short} monokernel"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
 
-| Batch Size | Maximum Acceptable Ratio | Reason |
-|------------|--------------------------|--------|
-| BS=1 | monokernel ≤ 2.0× baseline | Small BS has overhead, some slowdown OK |
-| BS=4-8 | monokernel ≤ 1.2× baseline | Should roughly break even |
-| BS=16+ | monokernel < 1.0× baseline | **MUST show speedup** |
-| BS=32+ | monokernel < 0.85× baseline | Should show significant speedup |
+```markdown
+Benchmark {model_short} monokernel E2E inference latency using vLLM CLI.
 
-**Evaluation:**
+**Ultimate Goal**: {ultimate_goal}
+
+**Read First**:
+- `{artifact_dir}/constraints.md` - model ID and TP setting
+- `validation/E2E_LATENCY_GUIDE.md` - detailed guide
+
+**Key Understanding**:
+- Monokernel activation is configuration-dependent; confirm via logs or dispatch instrumentation.
+- Use decode-heavy workloads: `--input-len 64 --output-len 512`
+
+**Run E2E Benchmarks**:
+```bash
+# Test representative batch sizes: 4 (best), 8 (typical), 32 (marginal)
+for BS in 4 8 32; do
+    echo "=== Testing batch_size=$BS ==="
+
+    # Baseline
+    vllm bench latency \
+        --model {model_id} \
+        --tensor-parallel-size {tp} \
+        --max-model-len 4096 \
+        --input-len 64 --output-len 512 \
+        --batch-size $BS \
+        --num-iters 10 \
+        --output-json /tmp/baseline_bs${BS}.json 2>&1 | grep "Avg latency"
+
+    # Monokernel
+    VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
+        --model {model_id} \
+        --tensor-parallel-size {tp} \
+        --max-model-len 4096 \
+        --input-len 64 --output-len 512 \
+        --batch-size $BS \
+        --num-iters 10 \
+        --output-json /tmp/monokernel_bs${BS}.json 2>&1 | grep "Avg latency"
+done
+```
+
+**Expected Results** (Qwen3-FP8 on L40S reference):
+| Batch Size | Expected Improvement |
+|------------|---------------------|
+| 4 | ~11% (best) |
+| 8 | ~7% |
+| 32 | ~4-5% |
+
+**Success Criteria**:
+| Batch Size | Required Improvement |
+|------------|---------------------|
+| 1, 4, 8 | > 5% |
+| 16, 32, 64 | > 0% (not slower) |
+
+Calculate improvement:
 ```python
-def evaluate_performance(results):
-    failures = []
-    
-    for bs, (baseline_ms, mono_ms) in results.items():
-        ratio = mono_ms / baseline_ms
-        
-        if bs == 1 and ratio > 2.0:
-            failures.append(f'BS={bs}: {ratio:.2f}x slower (max 2.0x)')
-        elif bs in [4, 8] and ratio > 1.2:
-            failures.append(f'BS={bs}: {ratio:.2f}x slower (max 1.2x)')
-        elif bs >= 16 and ratio >= 1.0:
-            failures.append(f'BS={bs}: {ratio:.2f}x - NO SPEEDUP (must be <1.0x)')
-        elif bs >= 32 and ratio >= 0.85:
-            failures.append(f'BS={bs}: {ratio:.2f}x - insufficient speedup (must be <0.85x)')
-    
-    return failures
-
-failures = evaluate_performance(benchmark_results)
-if failures:
-    print('PERFORMANCE VALIDATION FAILED:')
-    for f in failures:
-        print(f'  - {f}')
-    print('')
-    print('This indicates suboptimal implementation (possibly naive GEMM).')
-    print('Phase 4 status: FAILED')
-    exit(1)
-else:
-    print('Performance validation PASSED')
+improvement_pct = (baseline_latency - monokernel_latency) / baseline_latency * 100
 ```
 
----
+**Output**: Update `{artifact_dir}/state.json`:
 
-## Step 4: Document Results
+**If PASS** (all batch sizes meet threshold):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_3_e2e_latency": {
+        "status": "complete",
+        "results": {
+          "bs_4": {"baseline_s": X.XX, "monokernel_s": Y.YY, "improvement_pct": Z.Z},
+          "bs_8": {"baseline_s": X.XX, "monokernel_s": Y.YY, "improvement_pct": Z.Z},
+          "bs_32": {"baseline_s": X.XX, "monokernel_s": Y.YY, "improvement_pct": Z.Z}
+        }
+      }
+    }
+  }
+}
+```
 
-Write to `{artifact_dir}/validation_results.md`:
+**If FAIL** (any batch size below threshold):
+```json
+"phases": {
+  "4_validation": {
+    "stages": {
+      "4_3_e2e_latency": {
+        "status": "needs_investigation",
+        "results": { "...": "..." },
+        "failing_batch_sizes": [4, 8],
+        "failure_reason": "BS=4 improvement 3.2% < required 5%"
+      }
+    }
+  }
+}
+```
+Stop Phase 4 and continue with the E2E performance investigation prompt (see `orchestration/investigation-prompts.md`).
 
+Exit status for the stage: `needs_investigation` (NOT `blocked`).
+
+**Document Results**: Write to `{artifact_dir}/validation_results.md`:
 ```markdown
 # Validation Results
 
 ## Correctness
 - Max absolute diff: {value}
-- Status: PASS/FAIL
+- Status: PASS
 
-## Performance
+## Kernel-Level Performance (CUDA Graphs)
+| Batch Size | Baseline (ms) | Monokernel (ms) | Speedup |
+|------------|--------------|-----------------|---------|
+| 1 | X.XX | Y.YY | Z.ZZx |
+| ... | ... | ... | ... |
 
-| Batch Size | Stock (ms) | Monokernel (ms) | Speedup | Threshold | Status |
-|------------|------------|-----------------|---------|-----------|--------|
-| 1 | {x} | {y} | {z}x | ≤2.0x | PASS/FAIL |
-| 4 | ... | ... | ... | ≤1.2x | PASS/FAIL |
-| 8 | ... | ... | ... | ≤1.2x | PASS/FAIL |
-| 16 | ... | ... | ... | <1.0x | PASS/FAIL |
-| 32 | ... | ... | ... | <0.85x | PASS/FAIL |
-| 64 | ... | ... | ... | <0.85x | PASS/FAIL |
+## E2E Latency (vllm bench latency)
+Config: input_len=64, output_len=512, {hardware}
 
-## Overall Status
-- Correctness: PASS/FAIL
-- Performance: PASS/FAIL
-- **Final**: PASS/FAIL
+| Batch Size | Baseline (s) | Monokernel (s) | Speedup | Improvement |
+|------------|-------------|----------------|---------|-------------|
+| 4 | X.XX | Y.YY | Z.ZZx | N% |
+| 8 | X.XX | Y.YY | Z.ZZx | N% |
+| 32 | X.XX | Y.YY | Z.ZZx | N% |
 
-## If FAILED
-{Document which batch sizes failed and by how much}
-{Likely cause: naive GEMM, missing MMA, untiled implementation}
+## Recommendation
+- Enable monokernel when M_avg and batch-size thresholds are satisfied
+- Expected improvement: {X}% for typical serving load
+- Best use case: Low-concurrency serving (chat, code completion)
 ```
 
----
-
-## Completion Criteria
-
-**Phase 4 is COMPLETE only if BOTH**:
-1. ✅ Correctness: max_diff < 1e-2
-2. ✅ Performance: ALL batch size thresholds met
-
-**If performance fails**:
-- Exit with status BLOCKED (not COMPLETE)
-- Document which thresholds failed
-- This likely indicates naive GEMM in Phase 3 - may need to redo
-
-{common_behavioral_footer}
-")
+{implementation_behavioral_footer}
 ```
 
 ---
 
 ## Phase 5: Integration
 
+**Task Tool Parameters**:
+- `description`: "Phase 5: Integrate {model_short} monokernel into vLLM"
+- `subagent_type`: "general-purpose"
+- `prompt`: [Copy the full prompt below]
+
 ```markdown
-(phase task: "Integrate {model_short} monokernel into vLLM.
+Integrate {model_short} monokernel into vLLM.
 
 **Ultimate Goal**: {ultimate_goal}
 
@@ -995,13 +1571,12 @@ Write to `{artifact_dir}/validation_results.md`:
 
 4. Modify MoE layer to dispatch to monokernel:
    - File: {from constraints - model file}
-   - Add batch size check
+   - Add batch size and M_avg checks (and ownership/fusion boundary if applicable)
    - Call monokernel for BS ≤ threshold
 
 **Output**: 
 - Git patch or diff showing all changes
 - Integration instructions in `{artifact_dir}/integration.md`
 
-{common_behavioral_footer}
-")
+{implementation_behavioral_footer}
 ```

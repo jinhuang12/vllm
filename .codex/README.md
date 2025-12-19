@@ -1,74 +1,53 @@
-# vLLM MoE Monokernel Optimizer — Codex bundle
+# Codex Skills: MoE Monokernel Optimizer + LLM Council
 
-Drop this repo-local `.codex/` directory into the **vLLM repo root** to enable:
+This zip contains two Codex CLI skills:
 
-- a custom Codex slash command prompt: `moe-monokernel-optimizer`
-- supporting reference docs + assets (Llama4 patch, benchmarking template)
-- a non-interactive runner script that preserves prompt quality
+- `moe-monokernel-optimizer` — a stage-gated workflow for designing/implementing fused MoE monokernels in vLLM, with explicit council checkpoints, state tracking, and a revised 4-stage Phase 3 structure.
+- `llm-council` — scripts + templates to run an external critic loop (Gemini CLI + Codex CLI) before you commit to an approach.
 
-## 1) One-time setup (recommended)
+## Install
 
-From the vLLM repo root:
-
-```bash
-export CODEX_HOME="$PWD/.codex"
-```
-
-(Optionally use `direnv` to auto-export this when you `cd` into the repo.)
-
-## 2) Interactive usage (Codex TUI)
-
-Start Codex from the repo root:
+1. Create the Codex skills directory (if it does not exist):
 
 ```bash
-CODEX_HOME="$PWD/.codex" codex
+mkdir -p ~/.codex/skills
 ```
 
-Then run the custom prompt via the slash popup:
+2. Copy the skill folders into `~/.codex/skills/` so you end up with:
 
 ```text
-/prompts:moe-monokernel-optimizer MODEL_ID="Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8" HARDWARE="L40S" DTYPE="fp8" TP=1 TOPK=8
+~/.codex/skills/moe-monokernel-optimizer/SKILL.md
+~/.codex/skills/llm-council/SKILL.md
 ```
 
-You can run a single phase by adding `PHASE=1` (or 2..5).
-
-## 3) Non-interactive usage (codex exec)
-
-Codex currently does **not** expand custom slash commands inside `codex exec`, so use the provided runner:
+3. Enable skills in Codex CLI (if they are behind a feature flag in your version). In many builds this is:
 
 ```bash
-./.codex/scripts/moe-monokernel-optimizer-exec.sh \
-  MODEL_ID="Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8" \
-  HARDWARE="L40S" DTYPE="fp8" TP=1 TOPK=8 MODE=full
+codex --enable skills
 ```
 
-The script:
-- renders the same prompt used by the slash command
-- pipes it to `codex exec -` (stdin)
-- sets `CODEX_HOME` so Codex loads `.codex/AGENTS.md` and repo-local prompts
+## Use
 
-### Sandbox / approvals
+From your vLLM repo root, start Codex and ask:
 
-For hands-off automation you’ll usually want workspace writes enabled:
+```text
+Use moe-monokernel-optimizer for Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 on L40S TP=1
+```
 
-- `codex exec --full-auto -` (convenience preset)
-- or `codex exec --sandbox workspace-write -`
+When you hit a council checkpoint or get stuck, invoke:
 
-Edit the script if you want stricter defaults.
+```text
+Use llm-council to review my Phase 2 plan for {model}/{hardware}
+```
 
-## 4) What’s in here
+### Running llm-council scripts
 
-- `.codex/AGENTS.md` — persistent instructions loaded by Codex
-- `.codex/prompts/moe-monokernel-optimizer.md` — the main workflow prompt (inlines key steps)
-- `.codex/moe-monokernel-optimizer/references/**` — branching, tiling, templates, etc.
-- `.codex/moe-monokernel-optimizer/assets/**` — Llama4 reference patch
-- `.codex/moe-monokernel-optimizer/orchestration/**` — workflow + failure-handling + phase prompts
-- `.codex/moe-monokernel-optimizer/validation/**` — validation details
+The `llm-council` scripts are intended to be run from your **repo root** so they create a working directory at `.llm-council/`.
 
-## 5) Outputs
+```bash
+export LLM_COUNCIL_ROOT="$HOME/.codex/skills/llm-council"
+bash "$LLM_COUNCIL_ROOT/scripts/setup_council.sh" . --fingerprint "your_topic"
+bash "$LLM_COUNCIL_ROOT/scripts/run_deliberation.sh" 1 3
+```
 
-Runs write to:
-
-`moe_monokernel_artifacts/<model>_<hardware>_<dtype>_tp<TP>/`
-
-including `constraints.md`, `optimization_plan.md`, `validation_results.md`, and `state.json`.
+Results accumulate in `.llm-council/history.md`.

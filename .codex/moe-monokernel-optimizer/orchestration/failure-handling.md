@@ -1,5 +1,7 @@
 # MoE Monokernel Failure Handling
 
+> **Codex CLI note:** The ladder below uses “Task/Orchestrator” language. In Codex CLI you typically run single-agent; treat a “Task” as one phase/stage attempt you execute now (or via `codex exec` for isolation). Invoke the `llm-council` skill by name in chat whenever the ladder calls for council consultation (e.g., `$llm-council TOPIC="..."` if supported).
+
 ## Failure Escalation Ladder
 
 ```
@@ -50,21 +52,180 @@
                               │ Still failing?
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Level 6: Fallback or FAIL (stage-dependent)                 │
-│                                                             │
-│ For NON-GEMM stages:                                        │
+│ Level 6: Fallback Implementation                            │
 │ - Implement simpler version                                 │
-│ - Document limitations                                      │
+│ - Document limitations and performance impact               │
 │ - Continue to next stage                                    │
-│                                                             │
-│ For GEMM stages (up/down projection):                       │
-│ - ❌ NO FALLBACK - naive GEMM is 100-200x slower           │
-│ - Mark entire workflow as FAILED                            │
-│ - Report to user: "manual CUDA engineering required"        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**Common root cause**: Wrong ownership model (token‑major vs expert‑major).  
+If profiling indicates output overlap or barrier stalls dominate, restart at Phase 2 with updated ownership/fusion decisions.
+
+When a hypothesis fails, update `constraints.md` and `optimization_plan.md` with the new findings to prevent repeating the same assumption.
+
 ---
+
+## Phase 4 Validation Failure Handling
+
+> **Codex CLI note:** When Phase 4 fails and the text says “orchestrator spawns an investigation task”, in Codex CLI you should **run the matching investigation prompt in `orchestration/investigation-prompts.md` directly**, write investigation artifacts under `{artifact_dir}/investigation/`, and update `{artifact_dir}/state.json` with the decision.
+
+Validation failures are **distinct from implementation failures**. When Phase 4 
+validation fails, the workflow triggers an investigation task rather than the 
+standard 6-level escalation ladder.
+
+### Why Different?
+
+| Implementation Failure | Validation Failure |
+|-----------------------|-------------------|
+| Code doesn't compile or crashes | Code runs but produces wrong/slow results |
+| Error message often points to fix | Root cause unclear, needs diagnosis |
+| Retry with fix may help immediately | Retry without diagnosis is wasted effort |
+| Uses Level 1-6 escalation ladder | Uses Investigation workflow |
+
+### When Does Investigation Trigger?
+
+| Stage | Failure Condition | Investigation Type |
+|-------|------------------|-------------------|
+| 4.1 Correctness | `max_diff > tolerance` | `correctness` |
+| 4.2 Kernel Perf | `speedup < 1.0x` at any batch size | `kernel_perf` |
+| 4.3 E2E Latency | `improvement ≤ 5%` (BS≤8) or `≤ 0%` (BS>8) | `e2e_perf` |
+
+### Investigation Workflow
+
+```
+Validation fails with status "needs_investigation"
+                    │
+                    ▼
+        ┌─────────────────────┐
+        │ Orchestrator spawns │
+        │ investigation task  │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │ Investigation runs  │
+        │ bounded diagnostics │
+        │ (max 2 NCU, 3 hyp.) │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │ Draft fix proposal  │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │ Council reviews     │
+        │ proposal            │
+        └──────────┬──────────┘
+                   │
+        ┌──────────┴──────────┐
+        │                     │
+        ▼                     ▼
+    ACCEPTED              REJECTED
+        │                     │
+        │              ┌──────┴──────┐
+        │              │ Revise      │
+        │              │ (max 2x)    │
+        │              └──────┬──────┘
+        │                     │
+        │         ┌───────────┤
+        │         │           │
+        │         ▼           ▼
+        │     ACCEPTED    Still rejected
+        │         │           │
+        └────┬────┘           │
+             │                ▼
+             ▼         escalate_human
+        Decision
+        Matrix
+```
+
+### Investigation Bounds (HARD LIMITS)
+
+These limits prevent infinite debugging loops:
+
+| Resource | Limit | Rationale |
+|----------|-------|-----------|
+| NCU profiling runs | 2 | Expensive, diminishing returns after first analysis |
+| Hypothesis-test cycles | 3 | Forces focused diagnosis, prevents rabbit holes |
+| Council review rounds | 2 | Forces convergence on fix or escalation |
+| Total investigation scope | 1 cycle | Single comprehensive investigation, then decide |
+
+If any limit is exceeded without resolution → `escalate_human`
+
+### Investigation Artifacts
+
+All investigation outputs are stored in `{artifact_dir}/investigation/`:
+
+```
+investigation/
+├── correctness_analysis.md    # 4.1: Divergence analysis, binary search results
+├── stage_breakdown.json       # 4.2: Per-stage latency comparison
+├── ncu_bs1.csv               # 4.2: NCU metrics at batch size 1
+├── ncu_bs8.csv               # 4.2: NCU metrics at batch size 8
+├── perf_analysis.md          # 4.2: Performance bottleneck analysis
+├── e2e_analysis.md           # 4.3: E2E investigation findings
+└── fix_proposal.md           # Council-reviewed fix proposal (all types)
+```
+
+### Decision Matrix
+
+After council approves the investigation findings:
+
+| Root Cause Category | Decision | Orchestrator Action |
+|--------------------|----------|---------------------|
+| **Implementation bug** (wrong logic, missing step, typo) | `phase_3` | Reset target stage to `pending`, spawn task with fix context |
+| **Algorithmic decision wrong** (wrong tiling, sorter, output path) | `phase_2` | Reset Phase 2, re-plan with new constraints |
+| **Expected behavior** (model doesn't benefit, MoE not bottleneck) | `document_proceed` | Document limitation, proceed to Phase 5 |
+| **Measurement/environment issue** (wrong baseline, thermal throttling) | `rerun_validation` | Re-spawn the failing validation stage |
+| **Cannot determine** (investigation inconclusive) | `escalate_human` | Set status to `escalated`, report to user |
+
+### State Transitions After Investigation
+
+```
+investigation.decision = "phase_3"
+    └── state.phases.3_implementation.status = "in_progress"
+        state.phases.3_implementation.stages.{target}.status = "pending"
+        state.phases.4_validation.status = "pending"
+        → Spawn stage task with fix_context
+
+investigation.decision = "phase_2"
+    └── state.phases.2_planning.status = "in_progress"
+        state.phases.3_implementation.status = "pending"
+        state.phases.4_validation.status = "pending"
+        → Spawn Phase 2 task with additional_constraints
+
+investigation.decision = "document_proceed"
+    └── state.phases.4_validation.status = "complete"
+        state.phases.4_validation.limitation = limitation_doc
+        → Append to validation_results.md, advance to Phase 5
+
+investigation.decision = "rerun_validation"
+    └── state.phases.4_validation.stages.{failing}.status = "pending"
+        state.phases.4_validation.investigation = null
+        → Spawn validation task for failing stage
+
+investigation.decision = "escalate_human"
+    └── state.phases.4_validation.status = "escalated"
+        → Print report, pause workflow
+```
+
+### Full Investigation Task Prompts
+
+See: `orchestration/investigation-prompts.md`
+
+Each investigation type has a detailed task prompt with:
+- Specific diagnostic steps
+- Required profiling commands  
+- Hypothesis formation framework
+- Proposal format for council review
+- Decision criteria
+
+---
+
+## Implementation Failure Handling (Levels 1-6)
 
 ## Level 1: Task Self-Fix
 
@@ -247,24 +408,14 @@ $(grep -A 100 "{relevant_function}" assets/LLAMA4_MONOKERNEL_PATCH.md)
 
 ### Invoking Council
 
-```python
-# Orchestrator invokes llm-council skill
-council_context_file = "{artifact_dir}/council_context_{round}.md"
-write_file(council_context_file, council_context)
+Invoke the `llm-council` skill by name in chat (e.g., `$llm-council TOPIC="..."` if supported, or “Use llm-council to review …”). Follow its instructions to prepare context and run the critics.
 
-# Use llm-council skill
-# This skill queries Gemini and Codex in parallel
-council_result = invoke_skill(
-    skill="llm-council",
-    topic=f"MoE monokernel {stage_name} implementation blocked",
-    context_file=council_context_file,
-    mode="single-round"  # or "deliberation" for complex issues
-)
-
-# Save council feedback
-council_feedback_file = f"{artifact_dir}/council_feedback_{round}.md"
-write_file(council_feedback_file, council_result)
-```
+**Steps**:
+1. Prepare context: Write council context to `{artifact_dir}/council_context_{round}.md`
+2. State intent: "I'll invoke llm-council to review this blocked stage."
+3. Invoke the `llm-council` skill by name in chat
+4. Review output from `.llm-council/tmp/round_*_aggregate.md` (and/or `.llm-council/tmp/critic_*.md`)
+5. Save synthesis to `{artifact_dir}/council_feedback_{round}.md`
 
 ### Synthesizing Recommendation
 
@@ -276,7 +427,7 @@ def synthesize_recommendation(council_feedback, blocker):
     Extract actionable recommendation from council feedback.
     
     Priority:
-    1. Consensus points (both Gemini and Codex agree)
+    1. Consensus points (both Gemini and Claude Code agree)
     2. Specific code suggestions
     3. Alternative algorithm approaches
     4. Simplification suggestions (for fallback)
@@ -284,10 +435,10 @@ def synthesize_recommendation(council_feedback, blocker):
     
     # Parse feedback sections
     gemini_points = extract_points(council_feedback, "Gemini")
-    codex_points = extract_points(council_feedback, "Codex")
+    claude_points = extract_points(council_feedback, "Claude Code")
     
     # Find consensus
-    consensus = find_overlap(gemini_points, codex_points)
+    consensus = find_overlap(gemini_points, claude_points)
     
     # Build recommendation
     if consensus:
@@ -305,7 +456,7 @@ def synthesize_recommendation(council_feedback, blocker):
         return f"""
         **Primary Recommendation (Gemini)**: {gemini_points[0]}
         
-        **Alternative (Codex)**: {codex_points[0]}
+        **Alternative (Claude Code)**: {claude_points[0]}
         
         Try primary first, then alternative if that fails.
         """
@@ -375,50 +526,18 @@ After Level 5 exhausted:
 
 Total: ~9 attempts on single issue
 
-### CRITICAL: GEMM Stage Has NO Acceptable Fallback
+### Fallback Strategies by Stage
 
-**For `gemm_implementation` stage (up_projection + down_projection):**
+| Stage | Optimized | Fallback |
+|-------|-----------|----------|
+| router | Warp reduction | Naive argmax loop |
+| prepare | Bitfield/histogram | Sequential scan |
+| scale_inputs | Vectorized with swizzle | Element-by-element |
+| up_projection | Triple-buffer + MMA | Single-buffer + MMA |
+| down_projection | Swizzled + atomic | Simple accumulator |
+| output | Fused conversion | Separate kernel |
 
-There is NO acceptable fallback. A naive GEMM implementation is WORSE than no kernel at all because:
-- User already has working `fused_moe` baseline
-- Naive GEMM is 100-200x slower than baseline
-- This defeats the entire purpose of the skill
-
-If `gemm_implementation` cannot be completed with proper MMA-based tiled GEMM:
-1. **Mark the entire optimization as FAILED**
-2. **Do NOT implement naive fallback**
-3. **Report to user with full diagnostics**
-4. **Suggest manual intervention or alternative approach**
-
-```python
-def handle_gemm_stage_failure(stage, blocker):
-    if stage == "gemm_implementation":
-        # NO FALLBACK - fail the entire workflow
-        state.phases["3_implementation"].status = "failed"
-        state.overall_status = "failed"
-        
-        write_failure_report(
-            title="MoE Monokernel Optimization FAILED",
-            reason="Could not implement MMA-based GEMM after 9+ attempts",
-            blocker=blocker,
-            recommendation="Manual CUDA engineering required"
-        )
-        
-        # Do NOT continue to next stage
-        return
-```
-
-### Fallback Strategies for NON-GEMM Stages Only
-
-| Stage | Optimized | Fallback | Performance Impact |
-|-------|-----------|----------|-------------------|
-| routing_and_prepare | Warp reduction + bitfield | Naive loop + scan | ~10-20% slower |
-| activation_quantization | Vectorized swizzle | Element-by-element | ~5-10% slower |
-| kernel_assembly | Fused output | Separate kernels | ~5% slower |
-
-**NOTE**: up_projection and down_projection are NOT in this table because they have NO acceptable fallback.
-
-### Fallback Documentation (Non-GEMM stages only)
+### Fallback Documentation
 
 ```markdown
 # Fallback: {stage_name}
@@ -456,28 +575,14 @@ To restore optimized version:
 
 ### Continuing After Fallback
 
-Fallback doesn't block progress:
+Fallback doesn't block progress.
 
-```python
-def implement_fallback(stage):
-    # 1. Create fallback implementation
-    fallback_task = spawn_task(
-        prompt=FALLBACK_PROMPT.format(stage=stage),
-        timeout=shorter_timeout  # Fallback should be simpler
-    )
-    
-    # 2. Document limitation
-    write_fallback_doc(stage)
-    
-    # 3. Update state
-    state.stages[stage].status = "complete"  # Not "failed"
-    state.stages[stage].is_fallback = True
-    state.stages[stage].fallback_reason = "..."
-    
-    # 4. Continue to next stage
-    next_stage = get_next_stage(stage)
-    spawn_stage_task(next_stage)
-```
+**Steps** (illustrative - orchestrator implements this logic using the Task tool):
+
+1. **Spawn fallback Task**: Use Task tool with `subagent_type: "general-purpose"` to implement simplified version
+2. **Document limitation**: Write fallback docs to `{artifact_dir}/fallback_{stage}.md`
+3. **Update state**: Mark stage as `"complete"` with `is_fallback: true`
+4. **Continue**: Spawn next stage Task
 
 ---
 
