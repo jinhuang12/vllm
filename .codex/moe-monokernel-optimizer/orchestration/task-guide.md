@@ -69,13 +69,16 @@ This guide is the **single‑agent execution checklist** for Codex CLI. Use it i
 2. Decide ownership (token‑major/expert‑major/hybrid).
 3. Decide route (cooperative monokernel vs hybrid large‑grid fusion vs split kernels) using the decision tree.
 4. Write the **Route Decision** section (required) in `{artifact_dir}/optimization_plan.md` (template: `references/route-selection-decision-tree.md`), including “why not” and kill criteria.
-5. Decide output accumulation path (atomics only if output is not uniquely owned).
-6. Decide weight placement based on model semantics.
-7. Solve SRAM tiling and warp config (if applicable to the chosen route).
-8. **Baseline delta requirements**: compute required savings vs combined‑graph baseline and tie to dominant kernel metrics.
+5. Enumerate at least 2 concrete “fusion opportunities” (or prove none exist) using the baseline kernel breakdown:
+   - Example opportunities: W1 epilogue fusion (activation+quant), routing+prepare fusion, reduce fusion (usually not).
+   - If you choose “no fusion”: include evidence (e.g., nsys shows stages already fused / negligible).
+6. Decide output accumulation path (atomics only if output is not uniquely owned).
+7. Decide weight placement based on model semantics.
+8. Solve SRAM tiling and warp config (if applicable to the chosen route).
+9. **Baseline delta requirements**: compute required savings vs combined‑graph baseline and tie to dominant kernel metrics.
 
 **Validation**
-- Plan includes baseline summary, NCU highlights, Route Decision, delta‑to‑baseline targets, and feasibility call.
+- Plan includes baseline summary, NCU highlights, Route Decision, delta‑to‑baseline targets, feasibility call, and either (a) at least one fusion target for Phase 3 or (b) a documented “no fusion” proof.
 
 **Stop/Retry**
 - If required savings are implausible, re‑plan or document limitation.
@@ -110,31 +113,37 @@ This guide is the **single‑agent execution checklist** for Codex CLI. Use it i
 **State Update**: mark stage complete or needs_investigation.
 
 ### Stage 3: gemm_implementation (CRITICAL)
-**Purpose**: Implement **new** GEMM hot path (up/down) per plan.
+**Purpose**: Implement the hot path per the chosen route.
 
 **Inputs**: constraints + plan, `references/code-templates.md`, `references/tiling-config.md`
 **Outputs**: `{cuda_dir}` sources, `validation_results.md`, `state.json`
 **Steps**
-1. Implement MMA‑based up/down projections (CUDA/CuTe/CUTLASS only).
-2. Ensure weight timing and accumulation match constraints.
-3. Validate correctness vs reference.
-4. Profile under CUDA graphs to check perf.
+1. **Cooperative monokernel route**: implement MMA‑based up/down projections (CUDA/CuTe/CUTLASS only).
+2. **Hybrid large‑grid fusion route**: implement at least one material fusion around baseline GEMM(s), e.g.:
+   - W1 epilogue fusion (activation + quantization into W1 GEMM kernel), or
+   - routing+prepare fusion kernel (if it is material under CUDA graphs).
+3. Ensure weight timing and accumulation match constraints.
+4. Validate correctness vs reference.
+5. Profile under CUDA graphs to check perf.
 
 **Non‑negotiables (see SKILL.md)**
-- No reference GEMM calls for Stage 3 completion.
-- Triton is **not** allowed for GEMM hot path.
+- Cooperative route: no reference GEMM calls for Stage 3 completion; Triton is not allowed for GEMM hot path.
+- Hybrid route: keeping baseline GEMM(s) is allowed, but Stage 3 must not be “tuning only” unless you have a documented “no fusion” proof.
 
-**State Update**: mark stage complete only if new GEMM is the hot path.
+**State Update**:
+- Cooperative route: mark stage complete only if the new GEMM is the hot path.
+- Hybrid route: mark stage complete only if the planned fusion target(s) are implemented and validated under CUDA graphs (or a “no fusion opportunities” proof is documented).
 
 ### Stage 4: kernel_assembly
-**Purpose**: Wire stages into the main kernel and dispatch path.
+**Purpose**: Wire stages into the dispatch path.
 
 **Inputs**: `{cuda_dir}` kernels, plan, `references/architecture-pattern.md`
 **Outputs**: `{cuda_dir}/moe.cu`, bindings, `validation_results.md`, `state.json`
 **Steps**
-1. Assemble main kernel (cooperative or split per plan).
-2. Ensure default hot path uses new GEMM; reference fallback may be guarded only.
-3. Validate correctness/perf under CUDA graphs.
+1. Cooperative route: assemble main kernel (cooperative or split per plan).
+2. Hybrid route: wire the new routing op and/or fused epilogue kernel into the existing expert path (guarded by env vars as needed).
+3. Ensure the default hot path matches the plan (new GEMM for cooperative; fused epilogue / routing op for hybrid).
+4. Validate correctness/perf under CUDA graphs.
 
 ---
 

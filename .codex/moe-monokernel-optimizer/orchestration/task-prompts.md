@@ -430,6 +430,10 @@ Phase 2: Create optimization plan for {model_id} monokernel.
    - Record per-kernel timing and key NCU metrics
    - Use this to validate ownership/fusion boundary decisions
 
+7b. Baseline normalization (conditional but high leverage):
+   - If the baseline warns about missing tuned configs (e.g., “Using default MoE config”), generate the tuned baseline config file and re-run the baseline profiling.
+   - Use the normalized baseline numbers for route selection and delta requirements.
+
 8. Baseline delta requirements (from constraints baseline profiling):
    - Use combined routing+experts CUDA‑graph baseline totals
    - Compute target thresholds per Phase 4 (≥5% faster for BS≤8, no regressions for BS>8)
@@ -470,6 +474,10 @@ Template:
 - fusion_boundary = {monokernel/split}
 - Rationale: {why}
 - Baseline share: {routing/prepare % vs fused_moe_kernel %}
+
+### Hybrid fusion targets (required if route == hybrid_large_grid_fusion)
+- Candidate opportunities (at least 2): {W1 epilogue fusion / routing+prepare fusion / other}
+- Selected target(s) for Phase 3: {at least 1, or provide “no fusion proof” with nsys kernel breakdown}
 
 ### Decision B: Sorter Strategy  
 - E_local = {N}

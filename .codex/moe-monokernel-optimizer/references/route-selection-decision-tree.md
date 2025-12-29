@@ -6,6 +6,13 @@ This is the quickest way to choose **full cooperative monokernel** vs **hybrid l
 
 Write this in `{artifact_dir}/constraints.md` (copy/paste and fill).
 
+### Baseline normalization (do before route selection if applicable)
+
+If the baseline warns it is using a **default** config due to a missing tuned file (common for Triton MoE kernels):
+- Generate a tuned baseline config (bounded tuner is acceptable).
+- Re-run the baseline snapshot under CUDA graphs.
+- Use the *normalized* baseline for route selection. Otherwise you may optimize the wrong target.
+
 ### Deployment + geometry
 
 - Model:
@@ -57,6 +64,8 @@ Derived:
 - `share_gemm = (W1 + W2) / total`
 - `share_non_gemm = 1 - share_gemm`
 
+**If you can’t name the kernels** (e.g., you only have a single wrapper timing like `fused_experts`): treat this section as incomplete and run Nsight Systems to list the kernel nodes inside that wrapper before claiming “no fusion opportunities”.
+
 ### Baseline concurrency facts (dominant GEMM kernel)
 
 From NCU (or a comparable profiler view):
@@ -95,6 +104,12 @@ Write this in `{artifact_dir}/optimization_plan.md` (copy/paste and fill).
 Write at least one “stop if…” statement measurable via NCU/nsys, e.g.:
 - “Stop cooperative work if dynamic SMEM forces 1 CTA/SM and baseline GEMM already achieves high occupancy/concurrency.”
 - “Stop routing optimization if routing+prepare is <X% under CUDA graphs.”
+
+### Hybrid deliverable (required when route == hybrid large‑grid fusion)
+
+Write one of:
+- Fusion target(s) for Phase 3: {e.g., W1 epilogue fusion; routing+prepare fusion}, or
+- “No fusion opportunities” proof: {nsys per-kernel breakdown + justification why only tuning/config improvements are pursued}.
 
 ## Decision Tree (A/B/C)
 
@@ -138,4 +153,3 @@ Consider cooperative only if most are true:
 2. **SMEM/reg budget**: estimate per‑CTA SMEM and expected regs; if this forces 1 CTA/SM and the baseline relies on latency hiding → assume loss.
 3. **Concurrency comparison**:
    - If baseline grid is thousands of CTAs and cooperative would be ~O(SM count), cooperative must win by large per‑output cost reduction (not “fewer kernels”).
-

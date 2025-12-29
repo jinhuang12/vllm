@@ -82,10 +82,19 @@ After epilogue fusion, use NCU to check:
 - Keep a correctness test for the model MoE op (compare vs baseline).
 - Add a microbenchmark script that prints per‑stage time for: routing, prepare, W1 GEMM, activation/quant, W2 GEMM, reduce.
 
+## “Tuning-only” is not a hybrid outcome (unless proven)
+
+Kernel tuning / config generation (e.g., Triton MoE config files) is often a **baseline normalization** step that should happen early if the baseline is falling back to defaults.
+
+If you choose the **hybrid large-grid** route, you must do one of:
+- Implement at least one fusion that removes real GPU kernel work around the GEMM(s) (e.g., W1 epilogue fusion or routing+prepare fusion), **or**
+- Document a “no fusion opportunities” proof with evidence:
+  - Nsight Systems per-kernel breakdown showing the suspected stages are already fused or negligible under CUDA graphs, and
+  - a clear kill criterion that justifies stopping at tuning/config improvements.
+
 ## When to stop pursuing full monokernel
 
 If all are true, hybrid is usually the right finish line:
 - Baseline expert GEMM(s) dominate and already scale with large grids
 - Cooperative design needs >1 `grid.sync` and/or >~96KB dynamic SMEM per CTA
 - NCU shows reduced occupancy or spills in the monokernel path
-

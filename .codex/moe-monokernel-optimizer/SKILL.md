@@ -35,11 +35,22 @@ Two “wins” exist in practice; choose based on your Phase 1 baseline:
 
 Always enforce CUDA‑graphs safety for any new CUDA ops (stream correctness, capture rules): see `references/cudagraph-safety.md`.
 
+For a worked, model‑agnostic hybrid example (k‑way merge routing + W1 epilogue fusion), see `examples/HYBRID_FUSION_KWAYMERGE_W1_EPILOGUE.md`.
+
 ## Route Selection (Required)
 
 Before Phase 3, you must:
 - Write a **Baseline Truth Snapshot** in `{artifact_dir}/constraints.md` (template + required fields: `references/route-selection-decision-tree.md`).
 - Write a **Route Decision** in `{artifact_dir}/optimization_plan.md` (pick one route, justify with snapshot numbers, include kill criteria: `references/route-selection-decision-tree.md`).
+
+## Baseline Normalization (Required)
+
+If the baseline warns that it is using a **default / missing tuned config** (common for Triton MoE), treat “generate a tuned baseline config” as a **normalization step**, not the main optimization outcome:
+- Generate the tuned config (bounded search is fine).
+- Re-run the Baseline Truth Snapshot under CUDA graphs.
+- Only then finalize the Route Decision and pick fusion targets.
+
+For the **hybrid large‑grid fusion** route, “tuning-only” is not sufficient unless you provide a documented “no fusion opportunities” proof (see `references/hybrid-large-grid-fusion.md`).
 
 ## Supported Data Types
 
