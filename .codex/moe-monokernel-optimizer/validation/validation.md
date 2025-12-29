@@ -15,7 +15,7 @@ Validation scripts are located in the vLLM repository, not in this skill directo
 **Important**: Validate the chosen ownership and fusion boundary. If a split-kernel path is available, benchmark both monokernel and split-kernel variants under CUDA graphs.
 E2E latency under CUDA graphs/torch.compile is the final truth for production.
 
-**Baseline source of truth**: Combined routing+experts CUDA‑graph profiling captured in Phase 1 constraints.
+**Baseline source of truth**: Combined routing+experts CUDA‑graph profiling captured in Phase 1 constraints, plus NCU device metrics (occupancy, SM/TC utilization, memory traffic).
 
 ## Validation Failure Investigation
 
@@ -43,7 +43,7 @@ generic "blocked" behavior used in implementation phases.
 - Produce a delta‑to‑baseline table (targets vs required µs savings) and feasibility call
 
 ## Minor Stage-Level Parity Checks (Phase 3)
-When routing/prepare/quant are newly implemented, validate they are within tolerance of the reference **under CUDA graphs**.
+Advisory only (non‑blocking). When routing/prepare/quant are newly implemented, validate they are within tolerance of the reference **under CUDA graphs**.
 Rule of thumb: `<= 1.10x` or `<= +1–2 µs` (whichever is larger).  
 If a stage is a thin wrapper around reference ops, mark as “parity assumed” and skip timing.
 

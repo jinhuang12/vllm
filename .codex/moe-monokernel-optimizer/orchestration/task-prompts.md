@@ -1,4 +1,7 @@
-# MoE Monokernel Task Prompts
+# MoE Monokernel Task Prompts (Deprecated)
+
+**Deprecated**: Codex CLI is single‑agent. Use `orchestration/task-guide.md` instead.
+This file is kept for legacy reference only and should not be used for execution.
 
 > **Codex CLI note:** Codex CLI is typically single-agent (no separate Task subagents). Treat each “task prompt” below as the **exact checklist you (Codex) must follow** for that phase/stage. When the text says “spawn a Task”, interpret it as: run the phase/stage work now (optionally via a separate `codex exec` run for isolation), and **always update `{artifact_dir}/state.json`** before moving on.
 
@@ -13,15 +16,14 @@ Example: For Qwen3-30B-A3B-FP8 on L40S with TP=1:
 - Artifacts: `moe_monokernel_artifacts/qwen3-30b-a3b_l40s_fp8_tp1/`
 - CUDA: `csrc/moe/moe_monokernel_qwen3-30b-a3b_l40s_fp8_tp1/`
 
-## Phase/Stage Kickoff Plan (Required)
+## Phase/Stage Kickoff Micro‑Plan (Required)
 
 Before executing **any** phase or stage prompt:
-- **Invoke the `plan` skill** to create or update a phase/stage plan that includes a **micro‑plan (3–7 steps)**.
+- Write a **micro‑plan (3–7 steps)** and place it at the top of the phase artifact or in `{artifact_dir}/state.json`.
 - **No open questions by default**: convert unknowns into action items (measure, inspect code, profile).
 - If blocked by user input or unavailable hardware, add **Inputs Required** and pause.
-- Copy the micro‑plan into the phase artifact or record it in `{artifact_dir}/state.json`.
 
-Plan naming: use a stable, lower‑case, hyphenated name per phase/stage (e.g., `moe-monokernel-{model}-{hardware}-{dtype}-p2-plan`). If a plan already exists for that phase/stage, **update it** rather than creating a new file.
+See `SKILL.md` for non‑negotiable GEMM hot‑path constraints and baseline profiling requirements.
 
 ## Planning Phases Behavioral Footer
 
@@ -32,34 +34,10 @@ Plan naming: use a stable, lower‑case, hyphenated name per phase/stage (e.g., 
 Append to Phase 1 and Phase 2 task prompts:
 
 ```markdown
-## LLM Council Review (Risk-tiered)
+## LLM Council Policy
 
-`llm-council` is a **de-risking tool**, not an automatic gate for every task. Use it when uncertainty is high or the blast radius is large.
-
-### Risk-tier policy (C)
-
-- **Required (high-risk)**:
-  - The Phase output commits you to a correctness‑sensitive approach (math, accumulation, routing semantics)
-  - You are choosing a tiling/buffering strategy that is hard to change later
-  - You are introducing a new FP8 quantization/accumulation path or changing numerical assumptions
-
-- **Recommended (medium-risk)**:
-  - The Phase output makes non-trivial architectural decisions (kernel structure, staging, fusion boundaries)
-  - You are unsure about an assumption, or you’ve had 2+ distinct false starts
-
-- **Optional (low-risk)**:
-  - Pure documentation, mechanical cleanup, or small changes with clear test coverage
-
-### If you invoke llm-council
-
-1. Invoke the `llm-council` skill by name in chat (e.g., “Use llm-council to review …”).
-2. Follow its instructions to prepare `.llm-council/context.md`.
-3. Run the critics (parallel by default; sequential optional).
-4. Summarize the actionable feedback you accepted/rejected and why.
-
-### State tracking (optional)
-
-If you invoked `llm-council`, record a short summary in `{artifact_dir}/state.json` (recommended for resumability). If you did not invoke it, omit this field (do not block progress).
+See `orchestration/llm-council.md` for the single source of truth (risk tiers, checkpoints, how to invoke).
+If you invoke `llm-council`, record a short summary in `{artifact_dir}/state.json`. If you do not, do **not** block progress.
 ```
 
 **Note**: If you invoked `llm-council`, record the outcome in `{artifact_dir}/state.json` for resumability. If you did not invoke it, do **not** block completion solely on council invocation.
@@ -71,7 +49,7 @@ If you invoked `llm-council`, record a short summary in `{artifact_dir}/state.js
 - State file: {artifact_dir}/state.json
 - CUDA directory: {cuda_dir}
 - Skill file: `~/.codex/skills/moe-monokernel-optimizer/SKILL.md`
-- Task prompts: `~/.codex/skills/moe-monokernel-optimizer/orchestration/task-prompts.md`
+- Task guide: `~/.codex/skills/moe-monokernel-optimizer/orchestration/task-guide.md`
 
 **After Context Compaction**:
 If the orchestrator's context is compacted and you need to resume:
@@ -92,36 +70,10 @@ If the orchestrator's context is compacted and you need to resume:
 Append to Phase 3, Phase 4, and Phase 5 task prompts:
 
 ```markdown
-## LLM Council Checkpoints (Risk-tiered)
+## LLM Council Policy
 
-Use `llm-council` to de-risk implementation stages **when appropriate**, not as a universal gate.
-
-### Risk-tier policy (C)
-
-- **Required (high-risk)**:
-  - Kernel math / accumulation / reduction changes (silent correctness risk)
-  - Memory layout / shared memory / staging changes (silent correctness + perf risk)
-  - `top_k > 1` routing + accumulation behavior
-  - Major tiling strategy changes likely to affect multiple batch sizes/architectures
-
-- **Recommended (medium-risk)**:
-  - Non-trivial refactors of kernel structure or dispatch logic
-  - Fix proposals after investigation that are non-obvious or based on noisy perf signals
-
-- **Optional (low-risk)**:
-  - Small, low-blast-radius edits with strong test coverage (docs, comments, minor plumbing)
-
-### Checkpoints (if invoked)
-
-For **high-risk** stages, prefer two checkpoints:
-1. **Checkpoint 1 (approach)**: after designing the approach, before writing significant implementation code.
-2. **Checkpoint 2 (implementation)**: after completing code + validation, before marking the stage complete.
-
-For **medium-risk** stages, pick one checkpoint (usually the final implementation review).
-
-### State tracking (optional)
-
-If you invoked `llm-council`, record the outcome in `{artifact_dir}/state.json` for resumability. If you did not invoke it, omit this field (do not block progress).
+See `orchestration/llm-council.md` for risk tiers, checkpoints, and invocation steps.
+If you invoke `llm-council`, record a short summary in `{artifact_dir}/state.json`. If you do not, do **not** block progress.
 ```
 
 **Note**: If you invoked `llm-council`, record checkpoint outcomes in `{artifact_dir}/state.json` for resumability. If you did not invoke it, do **not** block completion solely on council invocation.
@@ -133,7 +85,7 @@ If you invoked `llm-council`, record the outcome in `{artifact_dir}/state.json` 
 - State file: {artifact_dir}/state.json
 - CUDA directory: {cuda_dir}
 - Skill file: `~/.codex/skills/moe-monokernel-optimizer/SKILL.md`
-- Task prompts: `~/.codex/skills/moe-monokernel-optimizer/orchestration/task-prompts.md`
+- Task guide: `~/.codex/skills/moe-monokernel-optimizer/orchestration/task-guide.md`
 
 **After Context Compaction**:
 If the orchestrator's context is compacted and you need to resume:
@@ -258,14 +210,19 @@ moe_fields = {
 - Check `quantization_config` in config.json
 - For block-quantized: note `weight_block_size`
 
-### B4. Baseline Profiling (Combined Graph, if possible)
-Capture **combined routing+experts** under CUDA graphs / torch.compile to match production.
-If hardware is unavailable, note "baseline unavailable" in constraints.
+### B4. Baseline Profiling (Combined Graph, required)
+Capture **combined routing+experts** under CUDA graphs on a **single GPU** to match production.
+If hardware/NCU is unavailable, document the reason explicitly in constraints.
 
-Minimum data to record:
+Minimum data to record in constraints:
 - Combined graph total (per BS bucket)
-- Per-kernel breakdown (e.g., fused_moe_kernel vs routing kernels)
+- Per‑kernel breakdown (e.g., fused_moe_kernel vs routing kernels)
+- NCU device metrics (achieved occupancy, SM/Tensor‑Core utilization, DRAM bytes, L2/TEX traffic)
+- Baseline Truth Snapshot (template: `references/route-selection-decision-tree.md`)
 - Any warnings (missing tuned config)
+
+Example baseline script: `benchmarks/kernels/benchmark_moe_baseline_qwen3.py` (adapt to model).
+Then run NCU on the combined‑graph path and store the summary metrics with the baseline.
 
 ## Part C: Reference Study
 
@@ -350,7 +307,7 @@ Read these documents for optimization patterns:
 | Shared experts | {shared} | {shared} |
 
 ## Uniform Routing Estimates
-- M_avg formula: `M_avg = BS * top_k / E_global`
+- M_avg formula: `M_avg = BS * top_k / E_local` (use E_global only if EP is not pre‑dispatch)
 - Example M_avg (BS=1): {value}
 - Example M_avg (BS=8): {value}
 - Example M_avg (BS=64): {value}
@@ -362,8 +319,10 @@ Read these documents for optimization patterns:
 
 ## Baseline Profiling (Combined Graph)
 - Parity: {CUDA graphs / torch.compile / TP/EP / batch buckets}
+- Device: {GPU name} (single GPU)
 - Combined totals: {bs->ms table}
 - Kernel breakdown: {top kernels and % share}
+- NCU highlights: {occupancy, SM/TC utilization, DRAM bytes, L2/TEX traffic}
 - Warnings: {missing tuned config, etc.}
 
 ## Hardware: {hardware}
@@ -434,7 +393,7 @@ Phase 2: Create optimization plan for {model_id} monokernel.
 
 2. Apply Decision 0 (Applicability) and 0b/0c (Ownership + Fusion Boundary):
    ```
-   M_avg = BS * top_k / E_global  # uniform routing (use E_local if EP pre-dispatch)
+   M_avg = BS * top_k / E_local   # uniform routing (use E_global only if EP is not pre-dispatch)
    # If routing histograms exist, prefer p50/p95 per-expert counts over uniform M_avg.
    ownership = token_major / expert_major / hybrid
    fusion_boundary = monokernel / split
@@ -466,7 +425,7 @@ Phase 2: Create optimization plan for {model_id} monokernel.
    - If gelu/geglu/relu: Use template from code-templates.md
    - If custom/unknown: Flag for exploration subagent in Phase 3
 
-7. (Optional but recommended) Baseline reference profiling:
+7. Baseline reference profiling (required):
    - Profile vLLM FusedMoE under the same CUDA graphs / torch.compile settings
    - Record per-kernel timing and key NCU metrics
    - Use this to validate ownership/fusion boundary decisions
@@ -488,6 +447,12 @@ Template:
 - M_avg = {value}
 - saturation = {value}
 - Rationale: {why monokernel or split}
+
+### Decision 0a: Route Selection (required)
+- route = {cooperative_monokernel / hybrid_large_grid_fusion / split_kernels}
+- Justification: {tie to Baseline Truth Snapshot: kernel-time shares + dominant kernel concurrency}
+- Why not the other routes: {brief bullets}
+- Kill criteria: {measurable pivot trigger, e.g. “stop coop if 1 CTA/SM + >2 grid.sync + baseline GEMM is large-grid/high-util”}
 
 ### Decision 0b: Ownership
 - ownership = {token_major/expert_major/hybrid}
@@ -518,7 +483,7 @@ Template:
 - Source: {model file:line}
 - Rationale: {why this matters for correctness}
 
-## Baseline Reference Profiling (optional but recommended)
+## Baseline Profiling (required)
 - Settings parity: {CUDA graphs / torch.compile / TP/EP / batch buckets}
 - Per-kernel timing summary: {router/prepare/quant/gemm1/gemm2/output}
 - NCU highlights: {occupancy, barrier stalls, TC utilization, memory BW}
@@ -822,6 +787,8 @@ Implement GEMM kernels (up-projection AND down-projection) for {model_short} mon
 
 **Ultimate Goal**: {ultimate_goal}
 
+**GEMM hot‑path constraints**: Must comply with `SKILL.md` (no reference GEMM for Stage 3 completion; CUDA/CuTe/CUTLASS only; Triton not allowed for GEMM hot path).
+
 **CRITICAL**: This task implements BOTH up-projection and down-projection together.
 They share the same MMA infrastructure - implement common helpers once, apply to both.
 
@@ -1072,6 +1039,8 @@ print(f"GEMM performance sanity check: PASS ({elapsed_ms:.2f}ms)")
 Assemble main kernel and output conversion for {model_short} monokernel.
 
 **Ultimate Goal**: {ultimate_goal}
+
+**GEMM hot‑path constraints**: Must comply with `SKILL.md` (new CUDA/CuTe/CUTLASS GEMM as default hot path; reference GEMM only as guarded fallback).
 
 **Read First**:
 - `{artifact_dir}/optimization_plan.md`

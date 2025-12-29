@@ -2,6 +2,16 @@
 
 This document provides a deterministic algorithm for solving tile sizes that fit within shared memory constraints.
 
+## Contents
+- Overview
+- Ownership Considerations
+- Token‑Major Tiling Heuristic
+- Occupancy and Register Pressure
+- Expert‑Major Tiling (if applicable)
+
+## Search anchors
+SRAM tetris, M_t, N_t, K_slices, occupancy, registers, token-major, expert-major.
+
 ## Overview
 
 SRAM Tetris is the process of fitting activation tiles, weight tiles, partial results, and metadata into the shared memory budget. Unlike heuristic approaches, this systematic solver guarantees a valid configuration or reports that none exists.

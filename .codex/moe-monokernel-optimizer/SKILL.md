@@ -16,28 +16,45 @@ Monokernel optimization is beneficial when:
 - **M_avg and ownership decisions** support a single-kernel path (see Decision 0b/0c)
 - Routing distribution is known (or uniform routing is explicitly assumed)
 - You will benchmark under CUDA graphs / torch.compile to match production
-- Reference profiling of vLLM FusedMoE is available (recommended for planning, required for regressions)
+- Reference profiling of vLLM FusedMoE is available (required for planning unless hardware/NCU is unavailable)
 
 **Barrier budget gate**: If the design requires more than 1–2 grid-wide barriers (`grid.sync`), strongly prefer split‑kernel or token‑major designs unless M_avg is large and routing is balanced.
 
-**Baseline delta gate**: After combined‑graph profiling, compute the µs savings required to beat the baseline; if the required savings are implausible, re‑plan or document the limitation.
+**Baseline delta gate**: After combined‑graph profiling, compute the µs savings required to beat the baseline; if the required savings are implausible, re‑plan or document the limitation. Under CUDA graphs, treat “launch overhead” as mostly amortized and focus on GPU kernel time; use Nsight Systems to separate CUDA API time vs kernel execution time (see `references/profiling-launch-vs-kernel.md`). Always sanity‑check expected end‑to‑end impact via MoE share math (see `references/e2e-delta-math.md`).
 
 **Full monokernel default gate** (heuristic):
 - Use full monokernel only if **routing/prepare share ≥ ~15–20%**, **barrier budget ≤ 1–2**, **cooperative launch feasible**, and **M_avg is high or top_k=1**.
 - Otherwise default to split/hybrid and target the expert kernel cost first.
 
+## Solution Modes (Pick One)
+
+Two “wins” exist in practice; choose based on your Phase 1 baseline:
+
+- **Full cooperative monokernel**: one kernel fuses routing→prepare→(quant)→W1→act→(quant)→W2 (best when barriers are cheap and SMEM fits).
+- **Hybrid large‑grid fusion (recommended default)**: keep baseline large‑grid expert GEMM(s) and fuse *around* them (routing/prepare kernel(s) + Triton GEMM epilogues), avoiding `grid.sync` costs and SMEM bloat. See `references/hybrid-large-grid-fusion.md`.
+
+Always enforce CUDA‑graphs safety for any new CUDA ops (stream correctness, capture rules): see `references/cudagraph-safety.md`.
+
+## Route Selection (Required)
+
+Before Phase 3, you must:
+- Write a **Baseline Truth Snapshot** in `{artifact_dir}/constraints.md` (template + required fields: `references/route-selection-decision-tree.md`).
+- Write a **Route Decision** in `{artifact_dir}/optimization_plan.md` (pick one route, justify with snapshot numbers, include kill criteria: `references/route-selection-decision-tree.md`).
+
 ## Supported Data Types
 
 | Type | Element Size | MMA Instruction | Notes |
 |------|-------------|-----------------|-------|
-| FP8 E4M3 | 1 byte | mma.f32.f8.f8 | Best for inference, requires sm_89+ |
-| BF16 | 2 bytes | mma.f32.bf16.bf16 | 2× SMEM cost vs FP8 |
-| FP16 | 2 bytes | mma.f32.f16.f16 | Legacy compatibility |
+| FP8 E4M3 | 1 byte | FP8 MMA on Tensor Cores (sm_89+) | Best for inference, requires sm_89+ |
+| BF16 | 2 bytes | BF16 MMA on Tensor Cores (sm_80+) | 2× SMEM cost vs FP8 |
+| FP16 | 2 bytes | FP16 MMA on Tensor Cores (sm_80+) | Legacy compatibility |
 | MXFP4 | 0.5 bytes | Experimental | Future support |
 
-## Supported Models
+For exact intrinsics/PTX patterns, see `references/code-templates.md` (MMA templates section).
 
-Reference implementations exist for these model architectures:
+## Validated Examples
+
+Validated examples exist for these model architectures (the workflow targets any vLLM MoE that matches the fused_moe interface):
 
 | Model | top_k | Hardware | Quantization | Key Patterns |
 |-------|-------|----------|--------------|--------------|
@@ -48,32 +65,9 @@ See `examples/MODELS_COMPARISON.md` for detailed pattern notes.
 
 ## LLM Council Integration
 
-`llm-council` is a **de-risking tool**, not a hard gate. Use it when the change is high-impact, correctness-sensitive, or you feel uncertain.
-
-### Risk-tier policy (C)
-
-- **Required (high-risk)** — default expectation:
-  - You are changing **kernel math / accumulation** (e.g., FP32 accumulator logic, atomics, Split‑H reduction)
-  - You are changing **memory layout / shared memory / TMA/cp.async staging** in a way that could silently corrupt results
-  - You are introducing or modifying **top_k > 1** routing + accumulation behavior
-  - You are making a **major performance tradeoff** that could regress other batch sizes or architectures (e.g., new tiling strategy)
-
-- **Recommended (medium-risk)**:
-  - After Phase 2 when the plan introduces non-trivial architectural choices (tiling, buffering, fusion boundaries)
-  - After Phase 4 if an investigation proposes a non-obvious fix, or if conclusions are based on noisy perf data
-  - When you are stuck after 2+ distinct attempts (fresh eyes help)
-
-- **Optional (low-risk)**:
-  - Mechanical refactors, comments/docs, build-system glue, formatting-only changes
-  - Small edits with strong test coverage and low blast radius
-
-> If you choose to skip a recommended/required council review, proceed — but consider leaving a short rationale in `{artifact_dir}/state.json` so future resumption has context.
-
-### How to invoke llm-council in Codex
-
-This repo contains a separate `llm-council` skill. Invoke it by name in chat (e.g., “Use llm-council to review …”). Follow its instructions to prepare `.llm-council/context.md` and run the critics (parallel by default, with an optional sequential mode).
-
-See `orchestration/failure-handling.md` for the escalation ladder.
+Use `llm-council` as a de‑risking tool for correctness‑sensitive or high‑impact changes.
+The single source of truth for policy, checkpoints, and invocation steps is:
+`orchestration/llm-council.md`.
 
 ## Execution model (Codex CLI)
 
@@ -84,23 +78,21 @@ Codex CLI skills typically run **single-agent** (no separate Task subagents). Us
   - `{artifact_dir}/state.json` (recommended)
 - If you need isolation for a tricky stage, you may run that stage in a fresh session via `codex exec` from your repo root, but you must still read/update `{artifact_dir}/state.json`.
 
-The detailed phase/stage prompts live in:
-- `orchestration/task-prompts.md`
+The detailed phase/stage checklists live in:
+- `orchestration/task-guide.md`
 
 The workflow logic and stage structure live in:
 - `orchestration/workflow.md`
 
-## Phase/Stage Kickoff Plan (Required)
+## Phase/Stage Kickoff Micro‑Plan (Required)
 
-At the start of **every phase and stage**, you **must invoke the `plan` skill** to create or update a **phase/stage plan**. The plan must include a **micro‑plan (3–7 concrete steps)**.
+At the start of **every phase and stage**, write a **micro‑plan (3–7 concrete steps)** and include it in the phase artifact or `{artifact_dir}/state.json`.
 
 Rules:
 - **No open questions by default**: convert unknowns into **action items** (measure, inspect code, run profiler).
 - If blocked by **user input or missing hardware**, add a short **Inputs Required** section and pause.
 - Keep micro‑plans concise; they are meant to guide execution, not replace the phase artifacts.
-- After creating/updating the plan, copy the micro‑plan into the phase artifact (e.g., top of `constraints.md`, `optimization_plan.md`, `validation_results.md`) or record it in `{artifact_dir}/state.json`.
-
-**Plan naming**: use a stable, lower‑case, hyphenated name per phase/stage (e.g., `moe-monokernel-{model}-{hardware}-{dtype}-p3-gemm`). If a plan already exists for that phase/stage, **update it** rather than creating a new file.
+- After writing the micro‑plan, copy it into the phase artifact (e.g., top of `constraints.md`, `optimization_plan.md`, `validation_results.md`) or record it in `{artifact_dir}/state.json`.
 
 ## 5-Phase Workflow
 
@@ -125,7 +117,12 @@ Produce `{artifact_dir}/constraints.md`:
 - Record hardware constraints (SM arch, SMEM limit, warp size, etc.)
 - Record vLLM parallelism (TP/EP) and data types (weights/acts/scales)
 - If available, capture per‑expert routing distribution; otherwise note uniform assumption
-- Capture combined routing+experts CUDA‑graph baseline (if hardware available); otherwise mark as unavailable with reason
+- Capture **combined routing+experts** CUDA‑graph baseline (single GPU) and record as a **required constraint** (e.g., `benchmarks/kernels/benchmark_moe_baseline_qwen3.py`).
+- Record which baseline features are already fused (e.g., fused grouped_topk, routed-weight multiplication flags, activation/quant kernels).
+- Run Nsight Systems once to split **CUDA API time vs GPU kernel time** for the baseline (see `references/profiling-launch-vs-kernel.md`).
+- Run NCU on the combined‑graph baseline and record key device metrics (achieved occupancy, SM/Tensor‑Core utilization, DRAM bytes, L2/TEX traffic).
+- Write the **Baseline Truth Snapshot** (required) to make route selection auditable: `references/route-selection-decision-tree.md`.
+- If hardware/NCU is unavailable, document the reason explicitly in constraints.
 
 After Phase 1: consider invoking `llm-council` to review constraints (recommended if model semantics are unclear or high-risk).
 
@@ -134,10 +131,11 @@ After Phase 1: consider invoking `llm-council` to review constraints (recommende
 Produce `{artifact_dir}/optimization_plan.md` with key decisions:
 
 - **Decision 0**: Saturation score + routing distribution (from `references/algorithmic-branching.md`)
-- **Decision 0b**: Per-expert M under uniform routing (M_avg = BS * top_k / E_global) or measured histogram
+- **Decision 0b**: Per-expert M under uniform routing (M_avg = BS * top_k / E_local when EP pre‑dispatch; otherwise E_global) or measured histogram
 - **Decision 0c**: Ownership model + fusion boundary (token-major vs expert-major; cooperative vs split)
-- **Decision 0d**: Baseline reference profiling summary (optional but recommended)
-- **Decision 0e**: Baseline delta requirements (target savings vs combined‑graph baseline)
+- **Decision 0d**: Baseline profiling summary (required; combined routing+experts CUDA‑graph + NCU device metrics)
+- **Decision 0e**: Baseline delta requirements (target savings vs combined‑graph baseline; tie to dominant kernel metrics)
+- **Decision 0f**: Route decision (required): cooperative vs hybrid large‑grid fusion vs split kernels, with “why not” and kill criteria (`references/route-selection-decision-tree.md`).
 - **Decision 1**: Output path (atomics vs direct write, depends on ownership)
 - **Decision 2**: Shared expert strategy (from `references/architecture-pattern.md`)
 - **Decision 3**: GEMM strategy (per-pair GEMV vs expert-grouped GEMM)
@@ -157,6 +155,10 @@ Phase 3 is staged to keep GEMM work together. Implement stages **sequentially**:
 | activation_quantization | scale_inputs | conditional (FP8 only) |
 | **gemm_implementation** | **up_proj + down_proj** | implement together only for single‑kernel expert‑major; split/hybrid may diverge |
 | kernel_assembly | output + main kernel | wire everything + cooperative launch |
+
+**GEMM hot‑path constraints (mode-dependent)**:
+- **Full cooperative monokernel**: Stage 3 is **not complete** if it calls the reference expert GEMM(s) (directly or indirectly). Wrapping the reference kernel is not a substitute for a new implementation. The GEMM hot path should be CUDA/CuTe/CUTLASS (Triton allowed only for scaffolding or non‑GEMM stages).
+- **Hybrid large‑grid fusion**: Keeping the baseline expert GEMM(s) is allowed (and often optimal), but you must fuse at least one material stage *around* GEMM (e.g., W1 epilogue: activation + quant; routing/prepare kernel fusion) and validate it under CUDA graphs. See `references/hybrid-large-grid-fusion.md`.
 
 Activation handling:
 - Common activations (SiLU/GELU/ReLU): use templates in `references/code-templates.md`
@@ -189,7 +191,7 @@ Validate monokernel against stock `fused_moe` in **3 stages**:
 | `rerun_validation` | Re-run the failing validation stage (measurement/env issue) |
 | `escalate_human` | Pause for human review |
 
-See `validation/README.md` and `orchestration/investigation-prompts.md`.
+See `validation/validation.md` and `orchestration/investigation-prompts.md`.
 
 After Phase 4: invoke `llm-council` to sanity check results and conclusions.
 
@@ -205,7 +207,7 @@ Wire monokernel into vLLM:
 
 1. Find state: `ls moe_monokernel_artifacts/*/state.json`
 2. Read it and identify current phase/stage
-3. Continue with the next phase/stage prompt from `orchestration/task-prompts.md`
+3. Continue with the next phase/stage checklist from `orchestration/task-guide.md`
 4. If blocked: follow `orchestration/failure-handling.md` and consider invoking `llm-council`
 
 ## Validation checklist (high-signal)

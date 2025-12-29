@@ -2,6 +2,17 @@
 
 This document describes the kernel architectures used in MoE monokernel optimization.
 
+## Contents
+- Pattern Selection (Monokernel vs Split)
+- Token-Major Ownership Pattern
+- Split-Kernel Pattern
+- Hybrid Pattern
+- Controller-Worker Cooperative Pattern
+- Split-H Strategy
+
+## Search anchors
+token-major, expert-major, hybrid, split-kernel, cooperative, grid.sync, atomics, EP.
+
 ## Pattern Selection (Monokernel vs Split)
 
 Use ownership and M_avg to pick an architecture:

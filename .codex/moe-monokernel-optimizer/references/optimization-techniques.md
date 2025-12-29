@@ -2,21 +2,33 @@
 
 Techniques in this file apply to **specific patterns**. Always choose ownership and fusion boundary first.
 
+## Contents
+- Pattern Applicability Table
+- Wrapper Guidance (Scaffolding)
+- P0: Baseline Profiling
+- T1–T13 Techniques
+
+## Search anchors
+baseline profiling, token-major, expert-major, cooperative, split-kernel, MMA, buffering, cp.async.
+
 | Pattern | Best‑fit Techniques |
 |---------|---------------------|
 | Token‑major | T1 (conditional), T7, T8, T11, T12 |
 | Expert‑major | T1, T5, T6, T7, T8, T11, T13 |
 | Cooperative | U5, T3, T6, T7 |
 | Split‑kernel | T5, T6, T7 (routing/prepare), T11 |
+| Hybrid large‑grid | T5, T7 (routing/prepare), T11 (epilogue fusion) — see `hybrid-large-grid-fusion.md` |
 
 ## Wrapper Guidance (Scaffolding)
 Prefer Python‑level wrappers until a C++ wrapper introduces new behavior, reduces overhead, or unlocks graph capture.
 Do not add C++ wrappers that only forward to existing ops unless required for integration.
+Wrappers are acceptable for routing/prepare/quant scaffolding, but **not** for GEMM hot‑path completion.
 
 ## P0: Baseline Profiling (Decision Input)
 
 Before choosing fusion, collect a reference per‑kernel breakdown under CUDA graphs / torch.compile:
 - Capture routing + experts inside a **single CUDA graph** to match production.
+- Use Nsight Systems to separate CPU/CUDA API time from GPU kernel time (see `profiling-launch-vs-kernel.md`).
 - Compute delta‑to‑baseline requirements; if required savings are implausible, prefer split‑kernel or document the limitation.
 Full monokernel is justified only when routing/prepare share is large enough to cover the delta (roughly ≥15–20%).
 - If reference GEMMs already dominate and are near‑optimal, fusion gains are limited.

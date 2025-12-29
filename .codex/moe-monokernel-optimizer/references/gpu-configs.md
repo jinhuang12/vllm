@@ -2,6 +2,16 @@
 
 These are **hardware guardrails**, not decomposition decisions. Use them to bound feasibility (SMEM, cooperative launch, occupancy), then choose ownership/fusion based on M_avg and routing.
 
+## Contents
+- How to Use This in Phase 1/2
+- Supported Architectures
+- Shared Memory and Register Constraints
+- Cooperative Kernel Constraints
+- Rules of Thumb
+
+## Search anchors
+SM arch, SMEM, registers, cooperative grid, occupancy, M_avg, EP.
+
 ## How to Use This in Phase 1/2
 - Check cooperative launch limits and SM count when considering monokernel.
 - Use SMEM budget to validate tile feasibility.
@@ -22,7 +32,7 @@ These are **hardware guardrails**, not decomposition decisions. Use them to boun
 
 The **Monokernel Zone** is the batch size range where fused monokernel beats standard CUTLASS/Triton grouped GEMM **when M_avg is small**.
 
-**Always compute**: `M_avg = BS * top_k / E_global` (uniform routing). If `M_avg >= 8`, monokernel is often a poor fit; prefer split-kernel or expert-grouped GEMM.
+**Always compute**: `M_avg = BS * top_k / E_local` (use E_global only if EP is not pre‑dispatch). If `M_avg >= 8`, monokernel is often a poor fit; prefer split‑kernel or expert‑grouped GEMM.
 
 **Why thresholds differ by hardware:**
 - **H200 (3.35 TB/s)**: High bandwidth means monokernel's fusion benefits persist to larger batches

@@ -2,6 +2,19 @@
 
 This document describes **patterns** to follow when generating MoE monokernel code. Codex should adapt these based on the specific model architecture, not copy them verbatim.
 
+## Contents
+- Key Principle
+- C++ Header Structure
+- Main Kernel Structure
+- Token‑Major Template
+- Expert‑Major Template
+- Activation Templates
+- MMA Templates
+- Shared Memory Layouts
+
+## Search anchors
+MMA templates, token-major, expert-major, shared memory, cp.async, TMA, activation, weight placement.
+
 ## Key Principle
 
 The templates here show structural patterns. When generating actual code, Codex should:

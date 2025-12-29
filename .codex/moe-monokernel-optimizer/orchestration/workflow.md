@@ -2,46 +2,21 @@
 
 > **Codex CLI note:** This workflow is written in “orchestrator” language. In Codex CLI you typically run single-agent, so when the text says “spawn a Task”, interpret it as: **run the corresponding phase/stage prompt directly** (optionally via a separate `codex exec` run for isolation). When it says “use the `llm-council` skill”, interpret it as: **invoke the `llm-council` skill by name in chat** (e.g., `$llm-council TOPIC="..."` if supported, or “Use llm-council to review …”).
 
-## LLM Council Checkpoints
+## LLM Council Policy
 
-**IMPORTANT**: Invoke the `llm-council` skill at these points to catch issues early:
-
-| After | Council Topic | Why |
-|-------|---------------|-----|
-| Phase 1 (constraints) | "Review MoE constraints extraction for {model}" | Catch missed semantics before planning |
-| Phase 2 (plan) | "Review optimization plan for {model} on {hardware}" | Validate algorithmic decisions before implementation |
-| Stage 3 (GEMM) | "Review GEMM implementation for {model}" | Most complex stage - external review critical |
-| 3 failed attempts | "Debug {stage} - failed 3 times" | Fresh perspective beats spinning |
-| Phase 4 (validation) | "Interpret benchmark results for {model}" | Sanity check performance conclusions |
-
-### How to Invoke Council
-
-Invoke the `llm-council` skill (by name in chat). The llm-council skill has its own instructions for preparing context and running reviews.
-
-**Example natural language trigger**:
-"I've completed Phase 1 for {model}. Before proceeding to planning, let me invoke the llm-council skill to review the constraints."
-
-### Council for Blocked Tasks
-
-When a task exits with status "blocked" after 3 attempts, invoke council for external review:
-
-1. Read the blocker file: `{artifact_dir}/blockers/{stage}_blocker.md`
-2. State: "The {stage} has failed 3 times. I'll invoke llm-council for a fresh perspective."
-3. Invoke the `llm-council` skill (by name in chat)
-4. Review feedback, update the blocker/state files, and retry the stage with council insights
+See `orchestration/llm-council.md` for the single source of truth on risk tiers, checkpoints, and how to invoke `llm-council`.
 
 ---
 
-## Phase/Stage Kickoff Plan (Required)
+## Phase/Stage Kickoff Micro‑Plan (Required)
 
-At the start of **every phase or stage**, **invoke the `plan` skill** to create or update a phase/stage plan that includes a **micro‑plan (3–7 concrete steps)**.
+At the start of **every phase or stage**, create a **micro‑plan (3–7 concrete steps)** and place it at the top of the phase artifact or in `{artifact_dir}/state.json`.
 
 Rules:
 - **No open questions by default**: convert unknowns into action items (measure, inspect code, profile).
 - If blocked by user input or missing hardware, add a short **Inputs Required** section and pause.
-- Copy the micro‑plan into the phase artifact or record it in `{artifact_dir}/state.json`.
 
-Plan naming: use a stable, lower‑case, hyphenated name per phase/stage (e.g., `moe-monokernel-{model}-{hardware}-{dtype}-p4-validate`). If a plan already exists for that phase/stage, **update it** rather than creating a new file.
+See `SKILL.md` for baseline profiling requirements and GEMM hot‑path constraints.
 
 ## Phase State Machine
 
@@ -107,7 +82,7 @@ Phase 2 must include the following decisions:
 - **M_avg (uniform routing)** and saturation thresholds
 - **Ownership model** (token-major vs expert-major vs hybrid)
 - **Fusion boundary** (single monokernel vs split kernels)
-- **Baseline reference profiling** summary (optional but recommended) under the target production settings
+- **Baseline reference profiling** summary (required) under the target production settings
 - **Baseline delta requirements** (target savings vs combined‑graph baseline)
 
 If the plan selects split kernels, Phase 3 should implement the split-kernel path instead of a single cooperative kernel.
@@ -227,16 +202,16 @@ If ownership is token‑major or hybrid, or if fusion boundary is split, treat u
 
 ## Compile and Test Cadence
 
-**IMPORTANT**: All validations are **BLOCKING**. A stage cannot be marked complete unless its validation passes. See `orchestration/task-prompts.md` for full validation code.
+**IMPORTANT**: Phase 4 validations are **BLOCKING**. Phase 3 stage‑level parity checks are **advisory** (non‑blocking) and must not be used to claim completion. See `validation/validation.md` for details.
 
 ### Stage Validation Summary
 
 | Stage | Validation Type | Blocking? | Reference |
 |-------|-----------------|-----------|-----------|
-| routing_and_prepare | Compare vs fused_topk | **YES** | task-prompts.md Stage 1 |
-| activation_quantization | Compare vs torch dynamic quant | **YES** (FP8 only) | task-prompts.md Stage 2 |
-| gemm_implementation | Correctness + Performance sanity | **YES** | task-prompts.md Stage 3 |
-| kernel_assembly | Full kernel vs fused_moe | **YES** | task-prompts.md Stage 4 |
+| routing_and_prepare | Compare vs fused_topk | **YES** | task-guide.md Stage 1 |
+| activation_quantization | Compare vs torch dynamic quant | **YES** (FP8 only) | task-guide.md Stage 2 |
+| gemm_implementation | Correctness + Performance sanity | **YES** | task-guide.md Stage 3 |
+| kernel_assembly | Full kernel vs fused_moe | **YES** | task-guide.md Stage 4 |
 
 ### After Each Stage: Validation Must Pass
 

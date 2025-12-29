@@ -2,6 +2,21 @@
 
 This document defines the key algorithmic decisions for MoE monokernel optimization.
 
+## Contents
+- Decision 0: Monokernel Applicability
+- Decision 0b: Ownership Model
+- Decision A: Output Accumulation Path
+- Decision B: Sorter Strategy
+- Decision C: Weight Application Order
+- Decision D: Shared Expert Strategy
+- Decision E: GEMM Strategy
+- Decision F: SRAM Tetris / Tiling
+- Decision G: Warp Configuration
+- Decision H: MMA Selection
+
+## Search anchors
+Ownership, token-major, expert-major, M_avg, E_local, EP, grid.sync, atomics, fusion boundary, baseline delta.
+
 ## Decision 0: Monokernel Applicability
 
 **When to use monokernel vs stock fused_moe.**
@@ -37,7 +52,7 @@ def should_use_monokernel(batch_size: int, top_k: int, sm_count: int, bs_thresho
 ### M_avg Thresholds (Uniform Routing Heuristic)
 
 ```
-M_avg = BS * top_k / E_global
+M_avg = BS * top_k / E_local   # use E_global only if EP is not pre-dispatch
 
 If M_avg < 8:    expert‑major GEMM is usually under‑utilized → prefer token‑major or split kernels
 If 8–16:         hybrid or benchmark (token‑major down‑proj often wins)

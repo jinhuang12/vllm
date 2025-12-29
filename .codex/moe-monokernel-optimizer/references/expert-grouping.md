@@ -9,6 +9,15 @@
 
 **EP note**: Use `E_local` (experts per GPU after EP dispatch) when evaluating grouping.
 
+## Contents
+- Overview
+- When NOT to Use Expert Grouping
+- Grouping Strategies
+- Memory/Layout Notes
+
+## Search anchors
+expert grouping, E_local, M_avg, token-major, grouped GEMM, histogram, prefix sum.
+
 ## Overview
 
 After router picks experts for each token, group tokens by expert for efficient batched GEMMs.
