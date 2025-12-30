@@ -36,6 +36,7 @@ Two “wins” exist in practice; choose based on your Phase 1 baseline:
 Always enforce CUDA‑graphs safety for any new CUDA ops (stream correctness, capture rules): see `references/cudagraph-safety.md`.
 
 For a worked, model‑agnostic hybrid example (k‑way merge routing + W1 epilogue fusion), see `examples/HYBRID_FUSION_KWAYMERGE_W1_EPILOGUE.md`.
+For an advanced routing+prepare port plan (SonicMoE-style runtime dispatch + specializations), see `examples/ADVANCED_SONICMOE_ROUTING_PREPARE_PORT.md`.
 
 ## Route Selection (Required)
 

@@ -13,6 +13,15 @@ This is the “don’t stop at tuning-only” hybrid that prevents the failure m
 
 ---
 
+## Hard anti-patterns (avoid common “fusion made it slower” traps)
+
+These are frequent ways a well-intentioned “fusion” loses badly. Avoid them unless you have profiler evidence they still win.
+
+- **Single-CTA mega-kernel**: do not fuse routing+prepare into one CTA that scans all experts and uses `O(threads * E)` shared-memory counters (e.g., `(threads+1)*E` arrays). This typically inflates dynamic SMEM and collapses occupancy.
+- **Claiming k-way merge without k-way merge**: “full scan + insertion topk” is not k‑way merge; it is still `O(E * top_k)` per token and can be slower than baseline fused routing ops.
+- **Wrong scoring semantics**: do not assume softmax. If the model uses sigmoid + bias + renorm, implement that exact behavior.
+- **Over-counting launch overhead under CUDA graphs**: if graphs are enabled, your win must come from GPU kernel time; removing “one kernel launch” is rarely the main win.
+
 ## When to choose this hybrid (route decision trigger)
 
 From the **CUDA‑graph baseline** (Nsight Systems / per-kernel timings):
