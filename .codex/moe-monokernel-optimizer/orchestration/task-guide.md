@@ -29,18 +29,30 @@ This guide is the **single‑agent execution checklist** for Codex CLI. Use it i
 - `{artifact_dir}/constraints.md`
 - `{artifact_dir}/state.json`
 
+**Freedom**: LOW (do not improvise; produce the required artifacts)
+
 **Steps**
-1. Identify model MoE path, routing semantics, weight timing, activation, accumulation.
-2. Record geometry (K, N, E, top_k, shared experts) + TP/EP (E_local).
-3. Record quantization/scales and dtype.
-4. **Run baseline profiling** (single GPU, combined routing+experts under CUDA graphs). Capture totals + kernel breakdown.
-5. Run Nsight Systems once to separate CUDA API time vs GPU kernel time for the MoE subgraph (advisory but strongly recommended).
-6. Run NCU on the combined‑graph baseline and record key metrics (occupancy, SM/TC utilization, DRAM/L2 traffic).
-7. Write the **Baseline Truth Snapshot** section into `{artifact_dir}/constraints.md` (template: `references/route-selection-decision-tree.md`).
-8. Note any warnings (missing tuned config) or unavailable hardware (if so, document the reason explicitly).
+1. Create `{artifact_dir}` and record baseline environment:
+   - vLLM commit hash, GPU/driver/CUDA, production knobs (`-O`, `-cc`) used for benchmarks.
+2. Identify model MoE path and routing semantics in `vllm/model_executor/models/` (file + class + forward path).
+3. Fill **MoE Parameters & Semantics** using:
+   - `references/moe-parameters-template.md` (required).
+4. Record geometry (K, N, E_global/E_local, top_k, shared experts) and TP/EP behavior.
+5. Record quantization/scales and dtype assumptions.
+6. Run **combined routing+experts baseline profiling** under CUDA graphs (single GPU) and capture:
+   - totals for BS sweep
+   - kernel breakdown
+   - NCU highlights (occupancy, SM/TC util, DRAM/L2 traffic)
+7. Write the **Baseline Truth Snapshot** into `{artifact_dir}/constraints.md`
+   (template: `references/route-selection-decision-tree.md`).
+8. Save/commit `{artifact_dir}/state.json` (phase=1 complete).
 
 **Validation**
-- Constraints file includes baseline timings + NCU metrics + Baseline Truth Snapshot.
+- `{artifact_dir}/constraints.md` includes:
+  - production benchmark knobs
+  - MoE semantics template filled
+  - CUDA-graph combined baseline + kernel breakdown + NCU highlights
+  - Baseline Truth Snapshot
 
 **Stop/Retry**
 - If hardware/NCU unavailable, document Inputs Required and pause.
@@ -113,26 +125,38 @@ This guide is the **single‑agent execution checklist** for Codex CLI. Use it i
 **State Update**: mark stage complete or needs_investigation.
 
 ### Stage 3: gemm_implementation (CRITICAL)
-**Purpose**: Implement the hot path per the chosen route.
 
-**Inputs**: constraints + plan, `references/code-templates.md`, `references/tiling-config.md`
-**Outputs**: `{cuda_dir}` sources, `validation_results.md`, `state.json`
-**Steps**
-1. **Cooperative monokernel route**: implement MMA‑based up/down projections (CUDA/CuTe/CUTLASS only).
-2. **Hybrid large‑grid fusion route**: implement at least one material fusion around baseline GEMM(s), e.g.:
-   - W1 epilogue fusion (activation + quantization into W1 GEMM kernel), or
-   - routing+prepare fusion kernel (if it is material under CUDA graphs).
-3. Ensure weight timing and accumulation match constraints.
-4. Validate correctness vs reference.
-5. Profile under CUDA graphs to check perf.
+This is the core performance stage. Implement the **route‑specific hot path** chosen in Phase 2.
 
-**Non‑negotiables (see SKILL.md)**
-- Cooperative route: no reference GEMM calls for Stage 3 completion; Triton is not allowed for GEMM hot path.
-- Hybrid route: keeping baseline GEMM(s) is allowed, but Stage 3 must not be “tuning only” unless you have a documented “no fusion” proof.
+**Hard rule**: Do not change the plan mid‑stage. If profiling indicates the plan is wrong, stop and trigger a Phase 2 re‑plan.
 
-**State Update**:
-- Cooperative route: mark stage complete only if the new GEMM is the hot path.
-- Hybrid route: mark stage complete only if the planned fusion target(s) are implemented and validated under CUDA graphs (or a “no fusion opportunities” proof is documented).
+#### Deliverables (all routes)
+- A working CUDA implementation (kernel(s) + C++/PyTorch binding) that runs under CUDA graphs.
+- A minimal benchmark that isolates the hot path and reports GPU time (CUDA events), not wall-clock.
+- A brief note in `{artifact_dir}/implementation_notes.md` explaining the intended win mechanism (e.g., “epilogue fusion removes scale_inputs + activation kernels and 1 global round‑trip”).
+
+#### Route‑specific requirements
+
+**A) Cooperative monokernel route**
+- Implement MMA-based expert projections **in CUDA** (CuTe/CUTLASS allowed).
+- No “call cuBLAS” or “call Triton” for the expert GEMM(s).
+- Minimize global barriers (`grid.sync`) to ≤ 1–2 unless Phase 1 showed M_avg is large enough to amortize.
+
+**B) Hybrid large‑grid fusion route**
+- Baseline GEMM(s) allowed.
+- Implement ≥1 *material* fusion around them (examples: W1 epilogue fusion = activation + quantize; routing+prepare fusion feeding baseline GEMMs; fused reduction).
+- Demonstrate that the fusion yields a measurable GPU‑time win under CUDA graphs in the kernel benchmark.
+
+**C) Split kernels + CUDA graphs route (production parity)**
+- Baseline GEMM(s) allowed.
+- You may keep multiple kernels, but you must:
+  - Remove/fuse at least one non‑GEMM stage or reduce its memory traffic (routing+prepare and/or epilogue are typical targets), AND
+  - Demonstrate that **captured graph replay** is faster than baseline across the benchmark bucket set.
+- If the “win” comes only from graph replay, that is not sufficient; baseline also benefits from graphs. The win must be attributable to reduced GPU kernel work or fewer global round‑trips.
+
+#### Exit Criteria
+- Correctness passes for this stage’s outputs on the benchmark’s tested batch sizes.
+- GPU time is **not worse** than baseline at every tested batch size under CUDA graphs; otherwise mark as `needs_investigation` and proceed to Phase 4 investigation prompts.
 
 ### Stage 4: kernel_assembly
 **Purpose**: Wire stages into the dispatch path.

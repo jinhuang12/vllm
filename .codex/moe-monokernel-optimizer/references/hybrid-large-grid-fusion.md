@@ -2,6 +2,13 @@
 
 Use this when the baseline expert GEMM(s) are already strong (high occupancy / good concurrency), and cooperative monokernel loses due to `grid.sync`, large dynamic shared memory, or 1‑CTA/SM bottlenecks.
 
+## Contents
+- When hybrid beats cooperative
+- Required “material fusion” deliverables
+- W1 epilogue fusion patterns
+- Routing/prepare fusion patterns
+- Validation under CUDA graphs
+
 ## Core idea
 
 Keep the baseline **large‑grid expert GEMM kernel(s)** (often Triton `fused_moe_kernel`) and fuse *around* them:

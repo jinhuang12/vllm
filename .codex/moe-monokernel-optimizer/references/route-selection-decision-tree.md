@@ -2,6 +2,12 @@
 
 This is the quickest way to choose **full cooperative monokernel** vs **hybrid large‑grid fusion** vs **split kernels** across vLLM MoE models.
 
+## Contents
+- Baseline Truth Snapshot (required)
+- Phase 2 Route Decision template (required)
+- Kill criteria examples
+- Decision Tree (A/B/C)
+
 ## Phase 1 required artifact: Baseline Truth Snapshot
 
 Write this in `{artifact_dir}/constraints.md` (copy/paste and fill).

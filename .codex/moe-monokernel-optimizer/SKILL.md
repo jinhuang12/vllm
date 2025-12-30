@@ -28,10 +28,11 @@ Monokernel optimization is beneficial when:
 
 ## Solution Modes (Pick One)
 
-Two “wins” exist in practice; choose based on your Phase 1 baseline:
+Three practical modes exist; choose based on your Phase 1 Baseline Truth Snapshot (combined routing+experts, production parity under CUDA graphs / torch.compile where applicable):
 
 - **Full cooperative monokernel**: one kernel fuses routing→prepare→(quant)→W1→act→(quant)→W2 (best when barriers are cheap and SMEM fits).
-- **Hybrid large‑grid fusion (recommended default)**: keep baseline large‑grid expert GEMM(s) and fuse *around* them (routing/prepare kernel(s) + Triton GEMM epilogues), avoiding `grid.sync` costs and SMEM bloat. See `references/hybrid-large-grid-fusion.md`.
+- **Hybrid large‑grid fusion (recommended default)**: keep baseline large‑grid expert GEMM(s) and fuse *around* them (routing/prepare kernel(s) + GEMM epilogues), avoiding `grid.sync` costs and SMEM bloat. See `references/hybrid-large-grid-fusion.md`.
+- **Split kernels + CUDA graphs (production parity)**: 2–3 graph‑captured kernels (e.g., Router/Prepare → W1+Act(+Quant) → W2). Use when cooperative barriers/SMEM would reduce occupancy, or when graphs already amortize launch overhead but you still want to remove intermediate global‑memory round‑trips. See `assets/MOE_MONOKERNEL_OPTIMIZATION_GUIDE.md` (Pattern D) for the split‑kernel flow.
 
 Always enforce CUDA‑graphs safety for any new CUDA ops (stream correctness, capture rules): see `references/cudagraph-safety.md`.
 
@@ -159,18 +160,19 @@ After Phase 2: invoke `llm-council` to review the plan.
 
 ### Phase 3: Implementation (4 stages)
 
-Phase 3 is staged to keep GEMM work together. Implement stages **sequentially**:
+| Stage | Name | Output |
+|------:|------|--------|
+| 3.1 | `routing_and_prepare` | token→expert mapping buffers (+ any packed/aligned layout) |
+| 3.2 | `activation_quantization` (conditional) | activation/quant semantics (may be fused into Stage 3.3) |
+| 3.3 | `gemm_implementation` (**CRITICAL**) | route‑specific hot path (expert GEMM(s) and/or material fusions) |
+| 3.4 | `kernel_assembly` | final kernel(s) + wrapper + runtime dispatch |
 
-| Stage | Components | Notes |
-|-------|------------|-------|
-| routing_and_prepare | router + prepare | non-GEMM, tightly coupled |
-| activation_quantization | scale_inputs | conditional (FP8 only) |
-| **gemm_implementation** | **up_proj + down_proj** | implement together only for single‑kernel expert‑major; split/hybrid may diverge |
-| kernel_assembly | output + main kernel | wire everything + cooperative launch |
+**Hot‑Path Constraints** (non‑negotiable):
+- **Cooperative monokernel route**: implement MMA‑based up/down projections **in CUDA** (CuTe/CUTLASS allowed). No “call cuBLAS/Triton” for the expert GEMM(s).
+- **Hybrid large‑grid fusion route**: baseline GEMM(s) allowed, but implement ≥1 *material* fusion around them (e.g., W1 epilogue fusion), and validate speedup under CUDA graphs.
+- **Split kernels + CUDA graphs route**: baseline GEMM(s) allowed; keep multiple kernels if needed, but the **captured graph replay** must beat baseline across the benchmark bucket set. At least one non‑GEMM stage must be removed/fused or its memory traffic reduced (routing+prepare and/or epilogue are typical targets).
 
-**GEMM hot‑path constraints (mode-dependent)**:
-- **Full cooperative monokernel**: Stage 3 is **not complete** if it calls the reference expert GEMM(s) (directly or indirectly). Wrapping the reference kernel is not a substitute for a new implementation. The GEMM hot path should be CUDA/CuTe/CUTLASS (Triton allowed only for scaffolding or non‑GEMM stages).
-- **Hybrid large‑grid fusion**: Keeping the baseline expert GEMM(s) is allowed (and often optimal), but you must fuse at least one material stage *around* GEMM (e.g., W1 epilogue: activation + quant; routing/prepare kernel fusion) and validate it under CUDA graphs. See `references/hybrid-large-grid-fusion.md`.
+See: `orchestration/task-guide.md` for step‑by‑step checklists.
 
 Activation handling:
 - Common activations (SiLU/GELU/ReLU): use templates in `references/code-templates.md`
