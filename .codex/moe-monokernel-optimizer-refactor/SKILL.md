@@ -50,6 +50,15 @@ production parity, CUDA graphs, torch.compile, fused_moe, FusedMoE, router logit
 - If Phase 4 fails, use `orchestration/investigation-prompts.md` (do not thrash).
 - Use `orchestration/llm-council.md` to decide when to invoke the separate `llm-council` skill.
 
+## Deterministic helper scripts (optional)
+
+These are **measurement + reporting plumbing**. They are designed to be safe defaults and to fail-fast when the target is underspecified.
+
+- `scripts/new_target.py`: scaffold `{artifact_dir}` + `state.json` + `target.json`.
+- `scripts/collect_env.py`: capture `env.json`/`env.md` for reproducible reporting.
+- `scripts/run_vllm_bench_latency_sweep.py`: run baseline vs optimized **batch-size sweep** via `vllm bench latency` (defaults to **dry-run**; requires `--run`).
+- `scripts/generate_validation_report.py`: generate `{artifact_dir}/validation_results.md` from recorded evidence (no guessing).
+
 ## Canonical references (read as needed)
 
 - **Route + ownership decisions**: `references/route-selection-decision-tree.md`
