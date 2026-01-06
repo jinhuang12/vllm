@@ -1,10 +1,93 @@
-# Kernel Architecture Patterns
+# Kernel Architecture Patterns (Post‑Route)
 
-This document describes the kernel architectures used in MoE monokernel optimization.
+Use this after you choose a route in `references/route-selection-decision-tree.md`.
+
+This file is about **how to structure kernels** (controller/worker, split-kernel flows, hybrid ownership), not about whether you *should* pick them.
+
+## Contents
+- Token-Major Ownership Pattern
+- Split-Kernel Pattern
+- Hybrid Pattern
+- Controller-Worker Cooperative Pattern
+- Split-H Strategy
+
+## Search anchors
+token-major, expert-major, hybrid, split-kernel, cooperative, grid.sync, atomics, EP
+
+## Where selection happens
+- Route (cooperative vs hybrid vs split): `references/route-selection-decision-tree.md`
+- Hardware guardrails (cooperative limits, batch thresholds): `references/gpu-configs.md`
+- “Is fusion worth it?” math: `references/fusion-feasibility-heuristics.md`
+
+---
+
+## Token-Major Ownership Pattern
+
+Use when you can precompute top-k (outside the kernel) and want to avoid atomics.
+
+### Grid Layout
+
+```
+Blocks: (token, k-slice) ownership
+Each block owns one token and a K-slice of the output.
+```
+
+### Execution
+
+```cpp
+// Pseudocode: each block owns token t and K-slice [k0, k1)
+for (int expert_i = 0; expert_i < TOP_K; ++expert_i) {
+    // load expert id + weight for (t, expert_i)
+    // compute up_proj + activation + down_proj for owned K-slice
+    // accumulate in registers or FP32 scratchpad (no atomics)
+}
+// write final output for this token and K-slice
+```
+
+This pattern removes output overlap and reduces grid.sync barriers in the down-projection path.
+
+---
+
+## Split-Kernel Pattern
+
+Separate routing/quantization from GEMM when M_avg is high or ownership is expert-major.
+
+Benefits:
+- No controller block or grid.sync inside GEMM kernel
+- Enables grouped GEMM and better weight reuse
+- Plays well with CUDA graphs and torch.compile
+
+Typical flow:
+1. Router kernel: compute top-k ids and weights (optional sorting)
+2. Prepare kernel: build packed token/expert lists
+3. GEMM kernel: grouped by expert or token-major K-slice
+
+---
+
+## Hybrid Pattern (Expert‑major Up, Token‑major Down)
+
+Use when up‑projection benefits from expert grouping but down‑projection suffers from atomics/overlap.
+
+Typical flow:
+- Up‑proj: expert‑major grouped GEMM (weight reuse)
+- Down‑proj: token‑major K‑slice ownership (no atomics)
+
+This pattern often outperforms a fully cooperative monokernel for top_k>1 with EP enabled.
+
+---
+
+## When NOT to Default to Full Monokernel
+
+Avoid full monokernel when any of the following hold:
+- Routing/prepare share is small (< ~15% of combined‑graph time)
+- Barrier budget would exceed 1–2 grid.sync
+- EP reduces M_avg and routing is imbalanced
+- Cooperative launch limit is too low for the kernel resources
 
 ## Controller-Worker Pattern
 
 The monokernel uses a **controller-worker** architecture where one block coordinates routing while others compute expert GEMMs.
+Use this only when routing must happen inside the kernel and barrier budget allows it.
 
 ### Grid Layout
 
@@ -162,14 +245,14 @@ uint32_t h_end = min(h_start + H_CHUNK, H);
 With Split-H, multiple blocks write to same output location:
 
 ```cpp
-// All S blocks for same (token, expert) atomicAdd to output
+// All S blocks for same (token, expert) reduce to output
 template <typename Dims>
 __device__ void accumulate_output(
     uint32_t token_idx,
     float* partial_result,
     R_element* output)
 {
-    // Convert FP32 partial to BF16 and atomicAdd
+    // Convert FP32 partial to BF16 and atomicAdd (or staged reduction)
     for (uint32_t i = threadIdx.x; i < Dims::K; i += blockDim.x) {
         __nv_bfloat16 val = __float2bfloat16(partial_result[i]);
         atomicAdd(&output[token_idx * Dims::K + i], val);

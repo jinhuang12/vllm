@@ -1,10 +1,23 @@
 # Code Patterns Reference
 
-This document describes **patterns** to follow when generating MoE monokernel code. Claude should adapt these based on the specific model architecture, not copy them verbatim.
+This document describes **patterns** to follow when generating MoE monokernel code. Codex should adapt these based on the specific model architecture, not copy them verbatim.
+
+## Contents
+- Key Principle
+- C++ Header Structure
+- Main Kernel Structure
+- Token‑Major Template
+- Expert‑Major Template
+- Activation Templates
+- MMA Templates
+- Shared Memory Layouts
+
+## Search anchors
+MMA templates, token-major, expert-major, shared memory, cp.async, TMA, activation, weight placement.
 
 ## Key Principle
 
-The templates here show structural patterns. When generating actual code, Claude should:
+The templates here show structural patterns. When generating actual code, Codex should:
 1. **Reason through dimensions** - Calculate SMEM usage, tile sizes, K-chunking needs
 2. **Adapt to edge cases** - Shared experts, unusual E counts, hybrid dense+MoE
 3. **Explain tradeoffs** - Why triple vs double buffer, why specific tile sizes
@@ -31,9 +44,23 @@ static constexpr uint32_t MONOKERNEL_THRESHOLD = ...; // 128/64/32 by GPU
 
 // === Algorithmic Branching ===
 // Set based on model topology (from algorithmic-branching.md)
-static constexpr bool USE_ATOMICS = ...;    // true if top_k > 1
+enum class Ownership { TokenMajor, ExpertMajor, Hybrid };
+static constexpr Ownership OWNERSHIP = ...;
+enum class AccumulationStrategy { DirectWrite, BlockReduce, GlobalAtomic };
+static constexpr AccumulationStrategy ACCUM = ...;
+static constexpr bool OUTPUT_OVERLAP = (OWNERSHIP != Ownership::TokenMajor);
+static constexpr bool USE_ATOMICS = OUTPUT_OVERLAP;  // only if output overlaps
+enum class WeightPlacement { BeforeActivation, AfterActivation };
+static constexpr WeightPlacement WEIGHT_PLACEMENT = ...;
 static constexpr uint32_t TOKENS_PER_WARP = ...; // from sorter strategy
-static constexpr bool WEIGHT_AFTER_ACTIVATION = ...; // true if top_k > 1
+static constexpr bool WEIGHT_AFTER_ACTIVATION =
+    (WEIGHT_PLACEMENT == WeightPlacement::AfterActivation);
+
+// Per-phase ownership/atomics (for hybrid designs)
+static constexpr Ownership UP_OWNERSHIP = ...;
+static constexpr Ownership DOWN_OWNERSHIP = ...;
+static constexpr bool USE_ATOMICS_UP = (UP_OWNERSHIP != Ownership::TokenMajor);
+static constexpr bool USE_ATOMICS_DOWN = (DOWN_OWNERSHIP != Ownership::TokenMajor);
 
 // === Dimension Template ===
 template <uint32_t bs, uint32_t n, uint32_t k, uint32_t e>
@@ -72,7 +99,23 @@ struct TileConfig {
 
 ---
 
-## SRAM Tetris: How Claude Should Reason Through Tile Sizes
+## Split-Kernel Interface (Optional)
+
+When routing is done outside the monokernel, pass top-k data explicitly:
+
+```cpp
+// Inputs produced by router/prepare kernels
+const uint16_t* topk_ids;       // [BS, TOP_K]
+const float* topk_weights;      // [BS, TOP_K]
+const uint16_t* expert_offsets; // [E+1] prefix sums for grouped GEMM (optional)
+const uint16_t* pair_indices;   // [BS * TOP_K] packed pairs (optional)
+```
+
+This avoids controller blocks and grid.sync when the GEMM kernel only consumes precomputed routing.
+
+---
+
+## SRAM Tetris: How Codex Should Reason Through Tile Sizes
 
 Don't use a formula blindly. Walk through this reasoning:
 
@@ -650,6 +693,7 @@ __global__ void moe_kernel(...) {
         scratchpad->timing.quantize_end = clock64();
     }
     
+    // NOTE: cooperative grid sync requires gridDim.x <= max active blocks for this kernel.
     cooperative_groups::this_grid().sync();
     
     if (blockIdx.x == 0 && threadIdx.x == 0) {
@@ -743,10 +787,10 @@ __device__ __forceinline__ float apply_silu_gated(
     float silu = (gate * up) / (1.0f + expf(-gate));
     
     if constexpr (WeightAfterActivation) {
-        // top_k > 1: apply weight after activation
+        // Apply weight after activation if model semantics require it
         return silu * topk_weight;
     } else {
-        // top_k == 1: weight already folded into earlier computation
+        // Weight already folded earlier by model definition
         return silu;
     }
 }
@@ -822,10 +866,7 @@ If the model uses an activation function not in templates above:
 ```markdown
 **When encountering unknown activation in Phase 3 (up-projection):**
 
-1. **Use Task tool to explore** with:
-   - `description`: "Explore {activation_name} activation"
-   - `subagent_type`: "general-purpose"
-   - `prompt`: See below
+1. **Explore the activation function** using the prompt below (recommended: run in an isolated fresh session, e.g., via `codex exec`, to avoid polluting your main context):
 
    ```
    Investigate {activation_name} activation function for CUDA MoE kernel:
@@ -912,24 +953,48 @@ moe_monokernel(
 
 ---
 
+## Token-Major Kernel Skeleton
+
+Use when output is token‑owned and you want to avoid atomics:
+
+```cpp
+template <typename Dims, typename Tiles>
+__global__ void moe_token_major(
+    const bf16* __restrict__ input,
+    const uint16_t* __restrict__ topk_ids,
+    const float* __restrict__ topk_weights,
+    const fp8* __restrict__ w13,
+    const fp8* __restrict__ w2,
+    bf16* __restrict__ output)
+{
+    // Each block owns one token and a K-slice
+    uint32_t token = blockIdx.y;
+    uint32_t k_slice = blockIdx.x;
+    // Loop over top_k experts for this token; accumulate locally
+    // Write output directly for this token + K-slice
+}
+```
+
+---
+
 ## Output Strategy Pattern (Decision A)
 
 ```cpp
 // Compile-time selection based on USE_ATOMICS
 
 template <bool UseAtomics>
-__device__ void write_output(bf16* out, float val, uint32_t idx, float gate);
+__device__ void write_output(bf16* out, float* accum, float val, uint32_t idx, float gate);
 
 template <>
-__device__ void write_output<false>(bf16* out, float val, uint32_t idx, float gate) {
-    // Top-1: Direct write, no race
+__device__ void write_output<false>(bf16* out, float* /*accum*/, float val, uint32_t idx, float gate) {
+    // No output overlap: direct write
     out[idx] = __float2bfloat16(val * gate);
 }
 
 template <>
-__device__ void write_output<true>(bf16* out, float val, uint32_t idx, float gate) {
-    // Top-k: Multiple experts contribute to same token
-    atomicAdd(reinterpret_cast<float*>(&out[idx]), val * gate);
+__device__ void write_output<true>(bf16* /*out*/, float* accum, float val, uint32_t idx, float gate) {
+    // Output overlap: accumulate into FP32 scratchpad
+    atomicAdd(&accum[idx], val * gate);
 }
 ```
 
@@ -950,7 +1015,7 @@ def moe_monokernel(
     M, K = x.shape
     E = router_logits.size(1)
     
-    # Validate (Claude fills in actual values based on model)
+    # Validate (Codex fills in actual values based on model)
     assert M <= MONOKERNEL_THRESHOLD
     assert x.dtype == torch.bfloat16
     
@@ -990,7 +1055,7 @@ def forward(self, layer, x, router_logits, top_k, ...):
 
 ---
 
-## Edge Cases Claude Should Handle
+## Edge Cases Codex Should Handle
 
 ### Shared Experts (DeepSeek-style)
 ```cpp

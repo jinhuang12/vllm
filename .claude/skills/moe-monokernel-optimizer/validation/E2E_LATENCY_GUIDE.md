@@ -1,213 +1,162 @@
-# E2E Latency Benchmark Guide for MoE Monokernel
+# E2E Latency Benchmark Guide (vLLM) for MoE Optimizations
 
-This guide explains how to benchmark monokernel impact on real vLLM inference latency.
+Use this for **Phase 4.3** to validate that a MoE optimization (monokernel / hybrid fusion / split-kernel) improves *real* inference latency under **production parity**:
+- CUDA graphs enabled (or the exact mode used in production)
+- torch.compile enabled (or the exact mode used in production)
+- same TP/EP topology and serving knobs
 
-## Why E2E Latency Matters
+This file focuses on **how to run and interpret** E2E benchmarks. Default gates + required reporting live in `references/validation-defaults.md`.
 
-Kernel-level benchmarks measure pure kernel execution time, but E2E latency benchmarks show **real-world impact** including:
-- Model loading and initialization
-- CUDA graphs and torch.compile overhead (amortized)
-- KV cache management
-- Scheduler overhead
-- All model layers (not just MoE)
+## Contents
+- Quickstart (baseline vs optimized)
+- Workload selection (decode-heavy vs prefill-heavy)
+- Batch-size sweep
+- Parity checklist (must match baseline)
+- Interpreting output + speedup math
+- Troubleshooting
+- Recording results
 
-## Understanding When Monokernel Activates
+## Search anchors
+vllm bench latency, VLLM_USE_MOE_MONOKERNEL, CUDA graphs, torch.compile, enforce-eager, input-len, output-len, batch-size sweep, activation.
 
-The monokernel is a **decode-phase optimization** that only activates when:
+## Quickstart
 
-```python
-# From vllm/model_executor/layers/quantization/fp8.py
-if batch_size > 64:
-    return None  # Fallback to standard FusedMoE
-```
-
-**What this means:**
-
-| Phase | Tokens through MoE | Monokernel Used? |
-|-------|-------------------|------------------|
-| Prefill (input_len=1024, batch=1) | 1024 | NO (fallback) |
-| Prefill (input_len=64, batch=1) | 64 | YES |
-| Decode (batch=8) | 8 | YES |
-| Decode (batch=64) | 64 | YES |
-| Decode (batch=128) | 128 | NO (fallback) |
-
-## Benchmark Configuration
-
-### Optimal Test Setup
-
-To best showcase monokernel impact, use **decode-heavy workloads**:
+### Baseline run
 
 ```bash
---input-len 64    # Short prefill (may or may not use monokernel)
---output-len 512  # Long decode (monokernel used for all decode steps)
-```
-
-### Representative Batch Sizes
-
-| Batch Size | Expected Improvement | Use Case |
-|------------|---------------------|----------|
-| 4 | **Best** (~11%) | Sweet spot for launch overhead savings |
-| 8 | Good (~7%) | Typical low-concurrency serving |
-| 32 | Marginal (~4-5%) | Moderate load |
-| 64 | Minimal (~2%) | Edge of monokernel range |
-
-## Running Benchmarks
-
-### Step 1: Baseline (Standard FusedMoE)
-
-```bash
-source /path/to/vllm/.venv/bin/activate
-
 vllm bench latency \
-    --model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
-    --tensor-parallel-size 1 \
-    --max-model-len 4096 \
-    --input-len 64 \
-    --output-len 512 \
-    --batch-size 8 \
-    --num-iters 20 \
-    --output-json /tmp/baseline_bs8.json
+  --model <MODEL_ID> \
+  --tensor-parallel-size <TP> \
+  --max-model-len <MAX_LEN> \
+  --input-len 64 \
+  --output-len 512 \
+  --batch-size 8 \
+  --num-iters 20 \
+  --output-json /tmp/baseline_bs8.json
 ```
 
-### Step 2: Monokernel
+### Optimized run (example: monokernel fast-path)
+
+> Use the correct enable flag for *your* optimization (env var / config).  
+> For the monokernel path, the common flag is `VLLM_USE_MOE_MONOKERNEL=1`.
 
 ```bash
 VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
-    --model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
-    --tensor-parallel-size 1 \
-    --max-model-len 4096 \
-    --input-len 64 \
-    --output-len 512 \
-    --batch-size 8 \
-    --num-iters 20 \
-    --output-json /tmp/monokernel_bs8.json
+  --model <MODEL_ID> \
+  --tensor-parallel-size <TP> \
+  --max-model-len <MAX_LEN> \
+  --input-len 64 \
+  --output-len 512 \
+  --batch-size 8 \
+  --num-iters 20 \
+  --output-json /tmp/opt_bs8.json
 ```
 
-### Step 3: Batch Size Sweep
+## Workload selection
+
+### Decode-heavy (recommended for decode-bucket optimizations)
+
+Many MoE fast-paths are tuned for **decode buckets** (small `M` per step). A decode-heavy benchmark makes that visible:
+
+- `--input-len 64` (short prefill)
+- `--output-len 512` (long decode)
+- Sweep your decode bucket `--batch-size` set
+
+### Prefill-heavy (optional)
+
+If you claim a prefill win, run a second benchmark with a large input length (and usually smaller output length). Keep this separate from decode-heavy results.
+
+## Batch-size sweep
+
+Use the **same bucket set** you profiled in Phase 1 and plan to enable in Phase 5.
 
 ```bash
-for BS in 4 8 32; do
-    echo "=== Testing batch_size=$BS ==="
+for BS in 1 4 8 16 32 64; do
+  echo "=== batch_size=$BS ==="
 
-    # Baseline
-    vllm bench latency \
-        --model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
-        --tensor-parallel-size 1 \
-        --max-model-len 4096 \
-        --input-len 64 --output-len 512 \
-        --batch-size $BS \
-        --num-iters 10 \
-        --output-json /tmp/baseline_bs${BS}.json 2>&1 | grep "Avg latency"
+  vllm bench latency \
+    --model <MODEL_ID> \
+    --tensor-parallel-size <TP> \
+    --max-model-len <MAX_LEN> \
+    --input-len 64 --output-len 512 \
+    --batch-size $BS \
+    --num-iters 20 \
+    --output-json /tmp/baseline_bs${BS}.json
 
-    # Monokernel
-    VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
-        --model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
-        --tensor-parallel-size 1 \
-        --max-model-len 4096 \
-        --input-len 64 --output-len 512 \
-        --batch-size $BS \
-        --num-iters 10 \
-        --output-json /tmp/monokernel_bs${BS}.json 2>&1 | grep "Avg latency"
+  VLLM_USE_MOE_MONOKERNEL=1 vllm bench latency \
+    --model <MODEL_ID> \
+    --tensor-parallel-size <TP> \
+    --max-model-len <MAX_LEN> \
+    --input-len 64 --output-len 512 \
+    --batch-size $BS \
+    --num-iters 20 \
+    --output-json /tmp/opt_bs${BS}.json
 done
 ```
 
-## Understanding the Output
+## Parity checklist (must match baseline)
 
-### Key Metrics
+If this checklist is not satisfied, your numbers are not trustworthy.
 
-```
-Avg latency: 10.945533825195161 seconds
-10% percentile latency: 10.601871944294544 seconds
-50% percentile latency: 10.906423719003215 seconds
-90% percentile latency: 11.236299700191012 seconds
-99% percentile latency: 11.650329866564133 seconds
-```
+- Same model weights + same revision/commit.
+- Same dtype/quantization (FP8 formats and scale shapes matter).
+- Same TP/EP topology and identical routing/dispatch mode.
+- Same CUDA graphs mode and torch.compile mode.
+- Same scheduler knobs that affect bucketing (e.g., max batched tokens / chunked prefill).
+- Confirm **optimized fast-path actually executed**:
+  - enablement log line, or
+  - instrumentation counter, or
+  - an unmistakable kernel name in Nsight Systems.
 
-- **Avg latency**: Total time for batch_size × output_len tokens
-- **Percentile latencies**: Variance in iteration times
+### Debug-only: run eager
 
-### Calculating Speedup
+Use eager mode to debug correctness or functional issues (not for production-parity perf claims):
 
-```python
-baseline_latency = 10.95  # seconds
-monokernel_latency = 10.20  # seconds
-
-speedup = baseline_latency / monokernel_latency  # 1.07x
-improvement = (baseline_latency - monokernel_latency) / baseline_latency * 100  # 6.9%
-```
-
-## Default Optimizations
-
-`vllm bench latency` automatically enables performance optimizations:
-
-| Optimization | Default | Effect |
-|-------------|---------|--------|
-| CUDA Graphs | `FULL_AND_PIECEWISE` | Eliminates kernel launch overhead |
-| torch.compile | `VLLM_COMPILE` | Inductor-based model compilation |
-| Prefix Caching | **Disabled** (for benchmark) | Clean latency measurements |
-| Chunked Prefill | Enabled | max_num_batched_tokens=2048 |
-
-To run in eager mode (without optimizations):
 ```bash
 vllm bench latency --enforce-eager ...
 ```
 
-## Expected Results Reference
+## Interpreting output
 
-### Qwen3-Coder-30B-A3B-FP8 on L40S (December 2024)
+`vllm bench latency` prints iteration latencies. The key value is typically **Avg latency**.
 
-| Batch Size | Baseline (s) | Monokernel (s) | Speedup |
-|------------|-------------|----------------|---------|
-| 1 | 5.10 | 4.74 | 1.08x |
-| 4 | 8.40 | 7.48 | **1.12x** |
-| 8 | 10.95 | 10.20 | 1.07x |
-| 16 | 14.76 | 13.65 | 1.08x |
-| 32 | 18.79 | 17.95 | 1.05x |
-| 64 | 22.82 | 22.41 | 1.02x |
+Compute speedup and improvement:
+
+```python
+baseline_s = 10.95
+opt_s = 10.20
+
+speedup = baseline_s / opt_s
+improvement_pct = (baseline_s - opt_s) / baseline_s * 100
+```
+
+If your measured E2E improvement is small, sanity-check the MoE share using `references/e2e-delta-math.md`.
 
 ## Troubleshooting
 
-### Monokernel Not Activating
+### Optimized path not activating
+- Verify the enable flag is set (env var / config).
+- Verify a compiled specialization exists for your `(dtype, TP/EP, bucket set)`.
+- Verify your bucket guard matches the validated envelope.
+- Use Nsight Systems to confirm which kernels run under the captured graph.
 
-Check for this log message during model loading:
-```
-INFO ... Using MoE Monokernel backend (TP=1)
-```
+### “No E2E win” even though microbench is faster
+Common causes:
+- MoE is a small fraction of end-to-end (`f` small) → expected E2E gain is bounded (see `references/e2e-delta-math.md`).
+- Graph breaks or unexpected fallbacks (different kernels between baseline and optimized runs).
+- Another bottleneck dominates (attention/KV/cache/scheduler).
 
-If missing, verify:
-1. `VLLM_USE_MOE_MONOKERNEL=1` is set
-2. Model is Qwen3-Coder-30B-A3B with FP8 quantization
-3. TP=1 (monokernel doesn't support TP>1)
+### High variance / poor reproducibility
+- Increase iterations.
+- Ensure the GPU is isolated (no other jobs), not power/thermal limited.
+- Use a consistent warmup protocol.
 
-### Similar Latency Between Baseline and Monokernel
+## Recording results
 
-Possible causes:
-- Batch size too large (>64 tokens through MoE → fallback)
-- Prefill-heavy workload (monokernel not used during prefill)
-- Other bottlenecks dominating (attention, shared experts)
+Write results to `{artifact_dir}/validation_results.md` with:
+- full repro commands (baseline + optimized) and env vars
+- the bucket set and capture/compile settings
+- baseline vs optimized tables (speedup + improvement)
+- evidence that the optimized path executed
 
-### Results Not Reproducible
-
-Ensure:
-1. Same number of warmup iterations
-2. GPU is not thermal throttling
-3. No other workloads on the GPU
-4. Same vLLM version and configuration
-
-## Integration with Phase 4 Validation
-
-After running E2E latency benchmarks, document results in `{artifact_dir}/validation_results.md`:
-
-```markdown
-## E2E Latency Results
-
-| Batch Size | Baseline (s) | Monokernel (s) | Speedup |
-|------------|-------------|----------------|---------|
-| 4 | X.XX | Y.YY | Z.ZZx |
-| 8 | X.XX | Y.YY | Z.ZZx |
-| 32 | X.XX | Y.YY | Z.ZZx |
-
-### Recommendation
-- Enable monokernel for batch_size ≤ {threshold}
-- Expected improvement: {X}% for typical serving load
-```
+Use `references/validation-defaults.md` for the minimum reporting template and default gates.

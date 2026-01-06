@@ -2,9 +2,42 @@
 
 This document provides a deterministic algorithm for solving tile sizes that fit within shared memory constraints.
 
+## Contents
+- Overview
+- Ownership Considerations
+- Token‑Major Tiling Heuristic
+- Occupancy and Register Pressure
+- Expert‑Major Tiling (if applicable)
+
+## Search anchors
+SRAM tetris, M_t, N_t, K_slices, occupancy, registers, token-major, expert-major.
+
 ## Overview
 
 SRAM Tetris is the process of fitting activation tiles, weight tiles, partial results, and metadata into the shared memory budget. Unlike heuristic approaches, this systematic solver guarantees a valid configuration or reports that none exists.
+
+## Ownership Considerations
+
+- **Token-major**: prefer `M_t = 1` (one token per block) and size K-slices to match ownership.
+- **Expert-major**: `M_t = 8/16` is typical and improves reuse within a block.
+
+If ownership is token-major, avoid large `M_t` values that increase SMEM without increasing reuse.
+
+### Token‑Major Tiling Heuristic
+
+When token‑major is chosen:
+- Set `M_t = 1` or `2` (one token per block or per warp group).
+- Increase `K_slices` to fill SMs; parallelism comes from K/N tiles, not M.
+- Prefer smaller `N_t` to reduce register pressure, since reuse is limited.
+
+## Occupancy and Register Pressure
+
+Even when SMEM fits, register pressure can reduce occupancy and hurt performance.
+
+Checklist:
+- Use `--ptxas -v` to inspect register count.
+- Target 1 CTA/SM; if register-limited, reduce `N_t` or warp count.
+- Consider `__launch_bounds__` to cap registers and preserve occupancy.
 
 ## Shared Memory Budget
 

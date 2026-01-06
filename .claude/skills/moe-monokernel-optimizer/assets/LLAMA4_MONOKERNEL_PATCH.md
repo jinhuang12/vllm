@@ -2,6 +2,8 @@
 
 The version of vLLM used is 0.10.2.
 
+Note: This patch is a top_k=1, Llama4-specific reference. Do not assume it generalizes to top_k>1 or large E without revisiting ownership and fusion boundary decisions.
+
 ## Full Implementation
 
 ```

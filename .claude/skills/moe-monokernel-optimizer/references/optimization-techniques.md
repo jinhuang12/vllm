@@ -1,6 +1,36 @@
-# Optimization Techniques Reference
+# Optimization Techniques (Catalog)
 
-## T1: Full MoE Monokernel Fusion
+This is a technique catalog. Use it **after** you’ve picked a route and architecture:
+- Route selection: `references/route-selection-decision-tree.md`
+- Architecture pattern: `references/architecture-pattern.md`
+- Fusion ROI math: `references/fusion-feasibility-heuristics.md`
+
+## Contents
+- Pattern applicability table
+- T1–T13 techniques (with applicability + gotchas)
+
+## Search anchors
+token-major, expert-major, cooperative, split-kernel, hybrid, MMA, buffering, cp.async, TMA, epilogue fusion
+
+## Pattern applicability (quick index)
+
+| Pattern | Best‑fit Techniques |
+|---------|---------------------|
+| Token‑major | T1 (conditional), T7, T8, T11, T12 |
+| Expert‑major | T1, T5, T6, T7, T8, T11, T13 |
+| Cooperative | U5, T3, T6, T7 |
+| Split‑kernel | T5, T6, T7 (routing/prepare), T11 |
+| Hybrid large‑grid | T5, T7 (routing/prepare), T11 (epilogue fusion) — see `hybrid-large-grid-fusion.md` |
+
+## Wrapper/dispatch guidance (keep it boring)
+- Prefer a **small number** of pre-instantiated kernels (or template specializations) with **Python-side dispatch**.
+- Keep dispatch keys explicit and stable under CUDA graphs (bucketed shapes, dtype, TP/EP, arch).
+- Avoid hidden allocations inside the op; preallocate scratchpad and pass it in when possible (`references/cudagraph-safety.md`).
+- For scaffolding patterns, see `references/code-templates.md` and the Llama4 patch in `assets/LLAMA4_MONOKERNEL_PATCH.md`.
+
+---
+
+## T1: Full MoE Monokernel Fusion (Conditional)
 
 Single cooperative kernel that fuses:
 1. Router logits → top-k selection
@@ -10,10 +40,11 @@ Single cooperative kernel that fuses:
 5. Down-projection GEMM → BF16 output
 
 **Applicability**:
-- Best for decode (M ≤ 64), latency-critical
+- Best for decode (M ≤ 64) **and** low M_avg with token-major ownership
+- Avoid when M_avg is high or ownership is expert-major (prefer split-kernel / grouped GEMM)
 - Less attractive for massive prefill (M > 256)
 
-**Decision Metric**: Fusion beneficial when `kernel_launch_overhead × num_kernels > compute_time × 0.1`. For BS 8-64, ~5μs per launch is significant vs ~50-100μs compute.
+**Decision Metric**: Fusion beneficial when `kernel_launch_overhead × num_kernels > compute_time × 0.1` **and** `M_avg < M_AVG_THRESHOLD`. For BS 8-64, ~5μs per launch is significant vs ~50-100μs compute.
 
 ## T2: Template Specialization + Python Dispatch
 
@@ -32,6 +63,8 @@ MOEMONOKERNEL_WRAPPER_IMPLEMENTATION(moe_monokernel_BS64_E16_TP8_impl, Dims_BS64
 4. Python dispatch via if/else on `(M, E, TP)`
 
 ## T3: In-Kernel Router Selection
+
+Use only when routing must be fused. If routing is done outside the kernel, skip T3 and pass top-k ids/weights in as inputs.
 
 **Strategy by (M, E_local)**:
 
@@ -182,8 +215,10 @@ Only persist what's needed across phases:
 ```
 Requirement: Grid size ≤ SM count.
 
-### U6: Monokernel Replaces (Not Adds To) Fused MoE
-Wire directly into MoE method, disable cutlass/triton paths for matching dims.
+Use only when per‑expert load is balanced and barriers are amortized; otherwise prefer split kernels.
+
+### U6: Monokernel As Fast Path
+Wire monokernel as a conditional fast path and keep fused MoE as a fallback for mismatched dims or regressions.
 
 ---
 
@@ -273,11 +308,11 @@ __device__ void moe_down_projection_split_h(
     uint32_t k_end = (split_idx == split_factor - 1) ? Dims::K : (split_idx + 1) * k_per_split;
 
     // Process this K-slice for this pair
-    // IMPORTANT: Must use atomicAdd since multiple blocks write to same output
+    // IMPORTANT: Output overlaps across blocks; require reduction (atomic or staged)
     for (uint32_t k = k_start; k < k_end; k += W_DOWN_TILE) {
         // ... compute partial result for K-slice ...
 
-        // Atomic accumulation required
+        // Atomic or staged accumulation required
         atomicAdd(&scratchpad->output_accum[token_idx * Dims::K + k], partial_result);
     }
 }
@@ -301,7 +336,7 @@ def should_use_split_h(batch_size: int, top_k: int, sm_count: int) -> bool:
 
 | Pro | Con |
 |-----|-----|
-| Better SM utilization for tiny batches | Requires atomicAdd (contention) |
+| Better SM utilization for tiny batches | Requires reduction (atomic/staged) |
 | Hides memory latency with more blocks | More complex block assignment |
 | Can achieve 80%+ SM utilization at BS=1 | Additional coordination overhead |
 

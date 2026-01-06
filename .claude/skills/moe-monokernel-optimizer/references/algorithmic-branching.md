@@ -1,92 +1,29 @@
-# Algorithmic Branching Decisions
+# Algorithmic Branching Decisions (Post‑Route)
 
-This document defines the key algorithmic decisions for MoE monokernel optimization.
+Use this **after** you’ve chosen a route + ownership model using:
+- `references/route-selection-decision-tree.md` (route)
+- `references/architecture-pattern.md` (architecture pattern)
 
-## Decision 0: Monokernel Applicability
+This file captures the “branch points” that typically decide correctness *and* performance once the high-level route is fixed.
 
-**When to use monokernel vs stock fused_moe.**
+## Contents
+- Decision A: Output accumulation path
+- Decision B: Sorter strategy
+- Decision C: Weight application order
+- Decision D: Shared expert strategy
+- Decision E: GEMM strategy
+- Decision F: SRAM tetris / tiling
+- Decision G: Warp configuration
+- Decision H: MMA selection
 
-### Saturation Score
+## Inputs (from `{artifact_dir}/constraints.md`)
+- Routing semantics (score func, renorm, shared experts, weight placement)
+- Topology: `E_local`, `top_k`, dims (`K`, `N`), TP/EP
+- Quant formats + scale layouts
+- Baseline Truth Snapshot: what is already fused / dominant kernels
 
-```python
-def should_use_monokernel(batch_size: int, top_k: int, sm_count: int) -> bool:
-    """
-    Calculate saturation score to determine kernel strategy.
-    
-    Saturation measures how well the workload fills the GPU:
-    - Low saturation (< 0.5): SM underutilization, monokernel wins
-    - High saturation (>= 0.5): Enough parallelism, stock kernel OK
-    """
-    saturation = (batch_size * top_k) / sm_count
-    
-    if batch_size <= 64 and saturation < 0.5:
-        return True   # Use monokernel
-    else:
-        return False  # Use stock fused_moe
-```
-
-### Hardware SM Counts
-
-| GPU | SM Count | Saturation Threshold (BS×K < 0.5×SM) |
-|-----|----------|--------------------------------------|
-| H100 SXM | 132 | BS × top_k < 66 |
-| H200 | 132 | BS × top_k < 66 |
-| L40S | 142 | BS × top_k < 71 |
-| A100 80GB | 108 | BS × top_k < 54 |
-
-### Examples
-
-```python
-# Qwen3-30B-A3B: top_k=8, L40S (142 SMs)
-# BS=1: saturation = 1*8/142 = 0.056 → USE MONOKERNEL
-# BS=8: saturation = 8*8/142 = 0.45 → USE MONOKERNEL  
-# BS=16: saturation = 16*8/142 = 0.90 → USE STOCK
-
-# Llama 4: top_k=1, H200 (132 SMs)
-# BS=1: saturation = 1*1/132 = 0.008 → USE MONOKERNEL
-# BS=64: saturation = 64*1/132 = 0.48 → USE MONOKERNEL
-# BS=128: saturation = 128*1/132 = 0.97 → USE STOCK
-```
-
----
-
-## Roofline Justification
-
-**Why monokernel works for low-batch MoE decode.**
-
-### Arithmetic Intensity
-
-```
-AI = FLOPs / Bytes_transferred
-
-For FP8 W8A8 MoE GEMM:
-- FLOPs per output: 2 × K (multiply-add)
-- Bytes per output: K × sizeof(FP8) = K bytes
-- AI ≈ 2 FLOPs/byte
-
-For BF16 MoE GEMM:
-- FLOPs per output: 2 × K
-- Bytes per output: K × sizeof(BF16) = 2K bytes
-- AI ≈ 1 FLOP/byte
-```
-
-### Ridge Point Comparison
-
-| GPU | Peak FP8 TFLOPs | HBM BW (GB/s) | Ridge Point (FLOPs/byte) |
-|-----|-----------------|---------------|--------------------------|
-| H100 SXM | 1979 | 3350 | ~590 |
-| H200 | 1979 | 4800 | ~412 |
-| L40S | 733 | 864 | ~848 |
-
-**MoE decode AI ≈ 1-2 FLOPs/byte**, which is **200-400× below ridge point**.
-
-### Implication
-
-At such low arithmetic intensity, performance is entirely memory-bandwidth limited. The monokernel advantage comes from:
-
-1. **Eliminating HBM round-trips**: Router → SMEM (not HBM) → GEMM
-2. **Fusing quantization**: Quantize activations in registers, not via global memory
-3. **Cooperative loading**: All SMs share weight loading overhead
+## Search anchors
+accumulation, atomics, block reduce, prefix sum, sort, weight placement, shared experts, grouped GEMM, tiling, warp specialization, MMA, cp.async, TMA
 
 ---
 
@@ -94,7 +31,7 @@ At such low arithmetic intensity, performance is entirely memory-bandwidth limit
 
 **How expert outputs combine into final result.**
 
-### Direct Write (top_k == 1)
+### Direct Write (unique ownership)
 
 When only one expert is selected per token, each expert writes directly:
 
@@ -103,23 +40,29 @@ When only one expert is selected per token, each expert writes directly:
 output[token_idx] = expert_output * routing_weight;
 ```
 
-**Use when**: `top_k == 1` (Llama 4)
+**Use when**: output elements are uniquely owned (often `top_k == 1` or token‑major K‑slice).
 
-### Atomic Accumulation (top_k > 1)
+### Conditional Accumulation (output overlap)
 
-When multiple experts contribute to each token:
+When multiple experts contribute to each token, the need for atomics depends on **ownership**.
 
 ```cpp
-// Multiple experts write to same output location
+// Expert‑major or Split‑H: multiple blocks write same output location
 atomicAdd(&output[token_idx], expert_output * routing_weight);
+
+// Token‑major K‑slice ownership: each block owns unique [token, k] range
+output[token_idx * K + k_idx] += expert_output * routing_weight;  // no atomics
 ```
 
-**Use when**: `top_k > 1` (Qwen3, DeepSeek, Mixtral)
+**Use atomics when**: ownership is expert‑major (or Split‑H) and multiple blocks write same output.
+**Avoid atomics when**: token‑major with K‑slice ownership.
 
 ### Configuration
 
 ```cpp
 #if TOP_K == 1
+    #define USE_ATOMICS 0
+#elif OWNERSHIP_TOKEN_MAJOR
     #define USE_ATOMICS 0
 #else
     #define USE_ATOMICS 1
@@ -163,59 +106,42 @@ This decision is **critical for numerical correctness**. Applying weights at the
 
 ### The Mathematical Difference
 
-For top_k=1 (single expert per token):
-```
-output = weight * activation(expert_output)
-       = activation(weight * expert_output)  // Equivalent when only one term
-```
-Order doesn't matter because there's only one expert contribution.
+Routing weights are part of the **model definition**. You must match where the model applies them.
 
-For top_k>1 (multiple experts per token):
+For any top_k:
 ```
-output = Σᵢ [weightᵢ * activation(expertᵢ_output)]  // CORRECT
-       ≠ activation(Σᵢ [weightᵢ * expertᵢ_output])  // WRONG
+output = Σᵢ [weightᵢ * activation(expertᵢ_output)]  // Typical MoE definition
 ```
-Each expert's activation must be computed independently, THEN weighted and summed.
 
-### Decision Logic
+**Important**: Even when `top_k=1`, `activation(weight * x)` is **not generally equivalent** to `weight * activation(x)` because activation is nonlinear. Only move weights across activation if the model definition explicitly does so (or if weights are constant 1.0).
 
-```cpp
-if (TOP_K == 1) {
-    // Llama 4 pattern: weight can be folded into scale before activation
-    // Because there's only one expert, order doesn't affect result
-    APPLY_WEIGHT = BEFORE_ACTIVATION;
-    
-    // In code:
-    float scaled = x * topk_weight * quantization_scale;
-    float result = silu(scaled);  // Weight already applied
-    
-} else {  // TOP_K > 1
-    // Qwen3/DeepSeek/Mixtral pattern: weight MUST be applied AFTER activation
-    // Each expert's contribution: output_i = weight_i * activation(gate_i, up_i)
-    APPLY_WEIGHT = AFTER_ACTIVATION;
-    
-    // In code:
-    float activated = silu(gate, x);  // Pure activation, no weight
-    float result = activated * topk_weight;  // Weight applied AFTER
-}
-```
+### Decision Logic (derive from model code)
+
+1. Read the model’s MoE forward path in vLLM.
+2. Identify where routing weights are applied:
+   - **After activation** (common): `output_i = weight_i * activation(gate_i, up_i)`
+   - **Before activation** (model‑specific): weight folded into input/scale **by design**
+3. Set `WEIGHT_AFTER_ACTIVATION` accordingly.
 
 ### Code Reference (from Qwen3 implementation)
 
 ```cpp
-// WRONG for top_k > 1 - DO NOT DO THIS:
+// WRONG when model expects post-activation weighting - DO NOT DO THIS:
 // float weighted_gate = gate * topk_weight;
 // float silu = (weighted_gate * x) / (1 + expf(-x));
 
-// CORRECT for top_k > 1:
+// CORRECT when model expects post-activation weighting:
 // Step 1: Compute SiLU without weight
 float silu_result = (gate * x) / (1.0f + expf(-x));
 
 // Step 2: Apply routing weight AFTER activation
 float final_output = silu_result * topk_weight;
 
-// Step 3: Accumulate (atomic for top_k > 1)
-atomicAdd(&output[token_idx], final_output);
+// Step 3: Accumulate (atomic only if ownership overlaps)
+// Expert‑major / Split‑H:
+//   atomicAdd(&output[token_idx], final_output);
+// Token‑major K‑slice:
+//   output[token_idx * K + k_idx] += final_output;
 ```
 
 ### Llama 4 vs Qwen3 Comparison
@@ -224,14 +150,16 @@ atomicAdd(&output[token_idx], final_output);
 |--------|-------------------|-----------------|
 | Weight timing | Before SiLU | After SiLU |
 | Can fold into scale | Yes | No |
-| Atomic output | No | Yes |
+| Atomic output | No | Yes (expert‑major), No (token‑major) |
 | Code pattern | `silu(x * weight * scale)` | `silu(gate, x) * weight` |
+
+These are model‑specific examples; do not infer weight placement from `top_k` alone.
 
 ### Configuration
 
 ```cpp
 // In kernel config
-static constexpr bool WEIGHT_AFTER_ACTIVATION = (TOP_K > 1);
+static constexpr bool WEIGHT_AFTER_ACTIVATION = {true/false};  // from model semantics
 
 // In up-projection reduction
 template <bool WeightAfter>
@@ -239,9 +167,9 @@ __device__ void apply_activation_and_weight(float gate, float x, float weight) {
     float silu = (gate * x) / (1.0f + expf(-x));
     
     if constexpr (WeightAfter) {
-        return silu * weight;  // top_k > 1
+        return silu * weight;
     } else {
-        return silu;  // top_k == 1, weight already folded
+        return silu;  // weight folded earlier by model definition
     }
 }
 ```
@@ -404,7 +332,7 @@ Multiple blocks collaborate on single token by splitting hidden dimension:
 ```cpp
 // Each block handles H_chunk of hidden dimension
 H_chunk = ceil(H / S);  // S = split factor
-// Output via atomicAdd from all blocks
+// Output reduction required across blocks (atomic or staged reduction)
 ```
 
 ### Standard Latency Kernel
@@ -446,7 +374,7 @@ def expected_weight_reuse(batch_size: int, top_k: int, num_experts: int) -> floa
     Based on Poisson occupancy model for uniform routing.
     """
     P = batch_size * top_k  # Total routed pairs
-    λ = P / num_experts     # Expected load per expert
+    λ = P / num_experts     # Expected load per expert (use E_local if EP pre-dispatch)
 
     if λ < 0.01:  # Edge case: very sparse
         return 1.0
@@ -547,17 +475,31 @@ START
   │     YES → Use stock fused_moe (DONE)
   │     NO  ↓
   │
-  ├─► Decision A: top_k == 1?
-  │     YES → USE_ATOMICS = false
-  │     NO  → USE_ATOMICS = true
+  ├─► Calculate M_avg = BS × top_k / E_global (uniform routing)
+  │
+  ├─► M_avg >= M_AVG_THRESHOLD?
+  │     YES → Prefer split-kernel or grouped GEMM (DONE)
+  │     NO  ↓
+  │
+  ├─► Decision 0b: ownership overlaps output?
+  │     YES → USE_ATOMICS = true (or staged reduction)
+  │     NO  → USE_ATOMICS = false (token-major K-slice)
+  │
+  ├─► Baseline routing share >= 15–20% AND barrier budget <= 2?
+  │     YES → Full monokernel is viable (continue)
+  │     NO  → Prefer split/hybrid; target expert kernel cost
+  │
+  ├─► Decision 0c: fusion boundary?
+  │     MONO → continue
+  │     SPLIT → split routing/quant + GEMM
   │
   ├─► Decision B: coalesce_size = E × dtype_bytes
   │     >= 128 → TOKENS_PER_WARP = 1
   │     < 128  → TOKENS_PER_WARP = 128 / coalesce_size
   │
-  ├─► Decision C: top_k == 1?
-  │     YES → APPLY_WEIGHT = before_activation
-  │     NO  → APPLY_WEIGHT = after_activation  (CRITICAL!)
+  ├─► Decision C: weight placement from model semantics
+  │     BEFORE → APPLY_WEIGHT = before_activation
+  │     AFTER  → APPLY_WEIGHT = after_activation
   │
   ├─► Decision D: num_shared_experts > 0?
   │     NO  → SHARED_STRATEGY = none
@@ -571,9 +513,9 @@ START
   │     r_max >= 2.0 → USE_EXPERT_GROUPING = true (Grouped-GEMM)
   │     r_max < 2.0  → USE_EXPERT_GROUPING = false (Per-pair GEMV)
   │
-  ├─► Decision G: top_k > 1?
-  │     YES → USE_FP32_ACCUMULATOR = true (BF16 atomics unreliable)
-  │     NO  → USE_FP32_ACCUMULATOR = false (direct BF16 write)
+  ├─► Decision G: output overlap?
+  │     YES → USE_FP32_ACCUMULATOR = true (atomic/staged reduction)
+  │     NO  → USE_FP32_ACCUMULATOR = false (direct write)
   │
   └─► Proceed to SRAM Tetris (tiling-config.md)
 ```
@@ -584,16 +526,16 @@ START
 
 **Detailed implementation for accumulating outputs from multiple experts.**
 
-This decision expands on Decision A for top_k > 1 cases, addressing the FP32 accumulator requirement and the pair-to-token index mapping.
+This decision expands on Decision 0b for top_k > 1 cases, addressing when FP32 scratchpad accumulation is required and how to map pair indices back to tokens.
 
 ### The Problem
 
 When top_k > 1, multiple experts contribute to each token's output:
-- BF16 `atomicAdd` is unreliable on some hardware (produces NaN/incorrect results)
-- Each (token, expert) pair must be correctly mapped back to its token index
-- Scratchpad memory must store FP32 accumulator + intermediate activations
+- Pair indices must map back to token indices for accumulation
+- FP32 accumulation is still recommended for numerical stability
+- **Atomics are only required when output ownership overlaps** (expert-major or split-H)
 
-### Solution: FP32 Scratchpad Accumulator
+### Solution: FP32 Scratchpad Accumulator (when ownership overlaps)
 
 ```cpp
 // Scratchpad structure for top_k > 1
@@ -652,7 +594,7 @@ __device__ void moe_down_accumulate_tc(
     // ... compute GEMM partial result d0 ...
 
     // Accumulate to FP32 buffer (multiple experts sum here)
-    // NOT atomic when blocks own disjoint K-slices
+    // Not atomic when blocks own disjoint K-slices
     scratchpad->output_accum[token_idx * Dims::HIDDEN_STATES + k_idx] += d0;
 }
 ```
@@ -660,7 +602,7 @@ __device__ void moe_down_accumulate_tc(
 ### Final Conversion Phase
 
 ```cpp
-// After all experts processed, convert FP32 → BF16
+// After all experts processed, convert FP32 → BF16 (only if scratchpad used)
 template <typename Dims>
 __device__ void convert_output_phase(
     MoEGemmSpec<Dims>* scratchpad,
@@ -684,13 +626,10 @@ __device__ void convert_output_phase(
 
 ```cpp
 // Decision tree for accumulation method
-if (TOP_K == 1) {
-    // Direct write - no accumulation needed
-    output[token * K + k] = __float2bfloat16(result);
-
-} else if (blocks_own_disjoint_k_slices) {
+if (blocks_own_disjoint_k_slices) {
     // Standard grid (one block per K/16 slice)
     // Direct += to FP32 accumulator - no race between blocks
+    // Or accumulate in registers and write directly to output
     scratchpad->output_accum[token * K + k] += result;
 
 } else {
@@ -704,7 +643,7 @@ if (TOP_K == 1) {
 
 | Configuration | Output Accumulator Size | Notes |
 |--------------|------------------------|-------|
-| BS=8, K=2048 | 8 × 2048 × 4 = 64 KB | FP32 per token |
+| BS=8, K=2048 | 8 × 2048 × 4 = 64 KB | Only if output overlaps |
 | BS=64, K=2048 | 64 × 2048 × 4 = 512 KB | Consider streaming |
 | BS=1, K=5120 | 1 × 5120 × 4 = 20 KB | Negligible |
 
@@ -714,7 +653,7 @@ if (TOP_K == 1) {
 // In kernel config
 template <typename Dims>
 struct AccumulationConfig {
-    static constexpr bool USE_FP32_ACCUMULATOR = (Dims::TOP_K > 1);
+    static constexpr bool USE_FP32_ACCUMULATOR = (Dims::OUTPUT_OVERLAP);
 
     // Scratchpad size for FP32 accumulator
     static constexpr size_t ACCUM_SIZE =

@@ -1,5 +1,22 @@
 # Qwen3-Coder-30B-A3B-Instruct-FP8 Validation Baseline
 
+## Contents
+- Model Configuration
+- Correctness Tolerances
+- Performance Targets
+- Multi-expert verification checklist
+- Block quantization verification
+- Benchmark + test scripts
+- Profiling commands
+- E2E latency benchmark results (example)
+- Known issues
+
+## Search anchors
+Qwen3, L40S, FP8, top_k=8, block scales, tolerances, speedup target, vllm bench latency, CUDA graphs, torch.compile.
+
+
+This file is model-specific. Do not generalize thresholds here to other MoE models.
+
 ## Model Configuration
 
 | Parameter | Value |

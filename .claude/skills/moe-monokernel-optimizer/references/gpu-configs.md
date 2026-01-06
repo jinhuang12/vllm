@@ -1,9 +1,26 @@
 # GPU Configuration Reference
 
+These are **hardware guardrails**, not decomposition decisions. Use them to bound feasibility (SMEM, cooperative launch, occupancy), then choose ownership/fusion based on M_avg and routing.
+
+## Contents
+- How to Use This in Phase 1/2
+- Supported Architectures
+- Shared Memory and Register Constraints
+- Cooperative Kernel Constraints
+- Rules of Thumb
+
+## Search anchors
+SM arch, SMEM, registers, cooperative grid, occupancy, M_avg, EP.
+
+## How to Use This in Phase 1/2
+- Check cooperative launch limits and SM count when considering monokernel.
+- Use SMEM budget to validate tile feasibility.
+- Do **not** pick ownership or tiling solely from this table.
+
 ## Supported Architectures
 
-| GPU | SM Arch | SMEM/SM | FP8 Support | TMA | Monokernel BS Threshold |
-|-----|---------|---------|-------------|-----|-------------------------|
+| GPU | SM Arch | SMEM/SM | FP8 Support | TMA | Heuristic BS Threshold (assumes low M_avg) |
+|-----|---------|---------|-------------|-----|-------------------------------------------|
 | H100/H200 | sm_90a | 228 KB | ✓ | ✓ | BS ≤ 128 |
 | L40S | sm_89 | 100 KB | ✓ | ✗ | BS ≤ 32 |
 | A100 | sm_80 | 164 KB | ✗ | ✗ | BS ≤ 64 |
@@ -11,15 +28,19 @@
 | RTX 4090 | sm_89 | 100 KB | ✓ | ✗ | BS ≤ 32 |
 | RTX 3090 | sm_86 | 100 KB | ✗ | ✗ | BS ≤ 32 |
 
-## Monokernel Zone Explanation
+## Monokernel “try zone” (rule of thumb)
 
-The **Monokernel Zone** is the batch size range where fused monokernel beats standard CUTLASS/Triton grouped GEMM.
+These thresholds answer only: “**is it worth trying** a cooperative monokernel for decode-like buckets on this GPU?”
+They are not sufficient to pick ownership/fusion boundaries. Use `references/route-selection-decision-tree.md` for route selection.
 
-**Why thresholds differ by hardware:**
-- **H200 (3.35 TB/s)**: High bandwidth means monokernel's fusion benefits persist to larger batches
-- **L40S (864 GB/s)**: Lower bandwidth means dense kernels catch up faster as batch grows
+Rule of thumb:
+- Smaller batches underfill large-grid GEMMs; cooperative fusion *may* win if it avoids DRAM hops and keeps barriers low.
+- Larger batches saturate the GPU; hybrid/split designs tend to win unless you have a very large hop to remove.
 
-**Recommended approach**: Benchmark BS=1 to BS=128, find crossover point.
+Practical guidance:
+- Benchmark a bucket sweep (e.g., BS=1→128) and record the crossover point in your Phase 1 snapshot.
+- Always compute `P=BS*top_k` and `M_avg≈BS*top_k/E_local` from `constraints.md`.
+
 
 ## TMA (Tensor Memory Accelerator)
 
@@ -123,16 +144,12 @@ self.monokernel_variants = {
 
 ## Cooperative Launch Constraints
 
-Grid size must be ≤ SM count for cooperative kernel launch:
+Cooperative launch requires **grid size ≤ max active blocks** for the kernel, which depends on SM resources (registers, SMEM, block size).  
+SM count is a rough upper bound, but **not the true limit**.
 
-| GPU | SM Count | Max Grid Size |
-|-----|----------|---------------|
-| H100 SXM | 132 | 132 |
-| H100 PCIe | 114 | 114 |
-| H200 | 132 | 132 |
-| L40S | 142 | 142 |
-| A100 40GB | 108 | 108 |
-| A100 80GB | 108 | 108 |
+Guidance:
+- Use `cudaOccupancyMaxActiveBlocksPerMultiprocessor` (or Nsight Compute occupancy) to determine max active blocks.
+- Ensure `gridDim.x <= max_active_blocks_per_SM * SM_count`.
 
 ## Split-H Thresholds by GPU
 

@@ -2,6 +2,16 @@
 
 This document compares implementation patterns across different MoE models to help generalize the monokernel approach. Each section includes detailed code snippets from reference implementations.
 
+
+## Contents
+- Reference implementations
+- Architectural decisions comparison
+- Pattern sections (routing / accumulation / scales / tiling)
+- Takeaways
+
+## Search anchors
+model comparison, Llama4, Qwen3, top_k, routing semantics, accumulation/reduction, ownership, FP8 block scales, scratchpad.
+
 ## Reference Implementations
 
 | Model | Location | Hardware | Key Characteristics |
@@ -11,12 +21,21 @@ This document compares implementation patterns across different MoE models to he
 
 ## Architectural Decisions Comparison
 
+**Context (reference runs)**:
+
+| Model | E_local | EP Enabled | Notes |
+|-------|---------|------------|-------|
+| Llama 4 | 16 | No | TP=8 reference |
+| Qwen3 | 128 | No | TP=1 reference |
+
 | Decision | Llama 4 (top_k=1) | Qwen3 (top_k=8) | When to Use |
 |----------|------------------|-----------------|-------------|
 | **Routing** | Single-expert selection | Multi-expert with softmax | top_k determines approach |
-| **Accumulation** | Direct write to output | FP32 scratchpad + accumulate | top_k > 1 requires accumulation |
-| **Weight Application** | Before activation (fold into scale) | After activation | top_k > 1 must apply after |
+| **Accumulation** | Direct write to output | FP32 scratchpad + accumulate (expert-major) | top_k > 1 requires accumulation, atomics only if output overlaps |
+| **Weight Application** | Before activation (fold into scale) | After activation | Based on model semantics |
 | **Scale Layout** | Per-tensor: `[E, K]` | Per-block: `[E, K/128, N/128]` | Model quantization format |
+| **Ownership (recommended)** | Token‑major | Hybrid or expert‑major | Based on M_avg and EP |
+| **Atomics required?** | No | Only if output overlaps | Token‑major avoids atomics |
 
 ---
 
@@ -60,7 +79,8 @@ __device__ static void top1_BS64(
             }
         }
 
-        // Lane 0 stores result - NO softmax needed for top_k=1
+        // Lane 0 stores result - top_k=1 often skips softmax
+        // NOTE: Some models still apply non‑unit weights even for top_k=1.
         if (lane == 0) {
             shmem->topk_ids[tok] = best_idx;
             shmem->topk_weights[tok] = 1.0f;  // Weight is always 1.0
@@ -148,7 +168,7 @@ __device__ static void top8_warp_parallel(
 }
 ```
 
-**Key Difference**: top_k=1 skips softmax (weight=1.0), while top_k>1 requires softmax normalization over selected experts.
+**Key Difference**: top_k=1 often skips softmax in some models, while top_k>1 typically uses softmax normalization over selected experts. Always verify model semantics.
 
 ---
 
@@ -186,7 +206,7 @@ __device__ inline void moe_down_reduction(
 }
 ```
 
-### Qwen3: FP32 Accumulation (top_k=8)
+### Qwen3: FP32 Accumulation (top_k=8, expert-major)
 
 ```cuda
 // From csrc/moe/moe_monokernel/src/moe_down_projection.cu
@@ -233,6 +253,7 @@ __device__ static void moe_down_accumulate_tc(
         }
     }
 }
+// Token-major alternative: each block owns token + K-slice and writes directly (no atomics).
 
 // Final conversion from FP32 accumulator to BF16 output
 template <typename Dims>
@@ -251,7 +272,7 @@ __device__ void convert_output_fp32_to_bf16(
 }
 ```
 
-**Key Difference**: top_k>1 requires FP32 accumulator because BF16 atomicAdd is unreliable. The `pair_idx / TOP_K` conversion maps expert-pair indices back to token indices for correct accumulation.
+**Key Difference**: when output overlaps (expert‑major or split‑H), use an FP32 accumulator because BF16 atomicAdd is unreliable. The `pair_idx / TOP_K` conversion maps expert‑pair indices back to token indices for correct accumulation.
 
 ---
 

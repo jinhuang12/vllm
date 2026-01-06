@@ -1,8 +1,50 @@
 # Router Design Reference
 
+## Contents
+- Overview
+- Router Semantics Checklist
+- Strategy Selection Matrix
+- Warp‑Level Patterns
+
+## Search anchors
+topk, routing, renormalize, norm_topk_prob, weight placement, stable ordering, shared experts.
+
 ## Overview
 
 In-kernel top-k selection using warp-level primitives, avoiding separate router kernel launch.
+Use only when routing must be fused. For split-kernel paths, run a standalone router and pass top-k ids/weights into GEMM.
+
+## Top‑8 (E≤256) recommendation: k‑way merge (avoid iterative delete)
+
+For `top_k=8` and `E≤256`, a common baseline pattern is:
+- each lane holds 4 logits
+- repeat 8 times: pick a lane-local best, warp-reduce to global best, then “delete” the selected expert (set to `-inf`) and repeat
+
+This is simple but does **8 full warp reductions** plus repeated delete scans.
+
+Prefer a deterministic k‑way merge:
+- Each lane sorts its 4 candidates locally (small fixed sort network).
+- Maintain a per-lane cursor into the sorted list.
+- Repeat 8 times: each lane proposes `cand = v[cursor]`, warp-reduce to best `(value, tie_key)`, then only the owning lane increments its cursor.
+
+Generalization notes:
+- If `E` is not exactly 128, each lane holds `P = ceil(E/32)` candidates (padding with `-inf` for out-of-range).
+- For `E=160`, `P=5`; for `E=256`, `P=8`. Use the same merge logic; only the per-lane local sort changes.
+
+Deterministic tie-break matters for equal logits; a practical tie-key is `(mantissa_bits << bits) | expert_id` so that equal values choose lowest expert id.
+
+For a worked, model‑agnostic hybrid implementation pattern (including routing k‑way merge), see `examples/HYBRID_FUSION_KWAYMERGE_W1_EPILOGUE.md`.
+
+## Router Semantics Checklist (before reordering)
+
+Confirm these from the model code:
+- Are routing weights renormalized after top‑k? (`norm_topk_prob`)
+- Are weights applied before or after activation?
+- Are weights multiplied into activation scales?
+- Is stable token ordering required for correctness?
+- Are shared experts always active?
+
+Do not infer any of these from `top_k` alone.
 
 ## Strategy Selection Matrix
 
