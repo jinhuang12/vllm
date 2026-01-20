@@ -7,13 +7,120 @@ Always prefer **model-specific** tolerances and invariants from:
 - a model-specific baseline doc (example: `validation/QWEN3_BASELINE.md`).
 
 ## Contents
+- **Dual Baseline Requirement (NON-NEGOTIABLE)**
+- **Production Parity Requirement (NON-NEGOTIABLE)**
 - Default correctness tolerances (starting points)
 - Default kernel perf gate (Phase 4.2)
 - Default end-to-end gate (Phase 4.3)
 - Required reporting checklist for `validation_results.md`
 
 ## Search anchors
-tolerance, atol, rtol, speedup, CUDA graphs parity, torch.compile parity, kernel perf gate, E2E gate, enablement evidence.
+tolerance, atol, rtol, speedup, CUDA graphs parity, torch.compile parity, kernel perf gate, E2E gate, enablement evidence, fused_experts, fused_moe, production parity.
+
+---
+
+## Dual Baseline Requirement (NON-NEGOTIABLE)
+
+**BLOCKING**: Validation MUST compare against vLLM's actual production kernels, not naive PyTorch.
+
+### Correctness Baseline
+```python
+# REQUIRED: Use vLLM's actual fused_experts or fused_moe
+from vllm.model_executor.layers.fused_moe import fused_experts
+# or
+from vllm.model_executor.layers.fused_moe import fused_moe
+
+baseline_out = fused_experts(x, w1, w2, topk_weights, topk_ids, ...)
+```
+
+### Performance Baseline
+```python
+# REQUIRED: Measure vLLM's actual kernel time
+# NOT: naive PyTorch loops (for expert in range(E): ...)
+
+# Use the same fused_experts/fused_moe call path that vLLM uses in production
+```
+
+### INVALID Baselines (DO NOT USE)
+```python
+# WRONG - naive PyTorch loops:
+for expert_idx in range(num_experts):
+    expert_out = torch.matmul(x_expert, weights[expert_idx])
+    output.index_add_(0, indices, expert_out)
+
+# WRONG - manual per-expert GEMM:
+for e in range(E):
+    mask = (expert_ids == e)
+    out[mask] = F.linear(x[mask], w[e])
+```
+
+**Verification**: Run `python scripts/verify_phase4_gates.py {artifact_dir}` and ensure it returns exit code 0.
+
+---
+
+## Production Parity Requirement (NON-NEGOTIABLE)
+
+**BLOCKING**: All measurements MUST use production-equivalent settings.
+
+### Required Environment
+```bash
+# MUST be set for BOTH baseline and optimized measurements:
+export VLLM_TORCH_COMPILE_LEVEL=3  # Production default
+export VLLM_USE_V1=1               # V1 engine
+
+# CUDA graphs enabled by default (do NOT disable)
+```
+
+### Forbidden Settings
+```bash
+# DO NOT USE these in validation:
+export TORCH_COMPILE_DISABLE=1     # FORBIDDEN
+--enforce-eager                     # FORBIDDEN
+VLLM_TORCH_COMPILE_LEVEL=0         # FORBIDDEN for validation
+```
+
+### Benchmark Requirements
+```python
+# Benchmark script MUST NOT contain:
+os.environ["TORCH_COMPILE_DISABLE"] = "1"  # FORBIDDEN
+enforce_eager=True                          # FORBIDDEN
+
+# Benchmark script SHOULD contain:
+os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "3"  # Explicit production parity
+```
+
+### Kernel-Level Benchmark Requirements (NON-NEGOTIABLE)
+
+For kernel-level (isolated) benchmarks comparing Triton vs CUDA C++:
+
+**REQUIRED**: Capture kernel times under CUDA graphs
+```python
+# Option A: Use torch.cuda.make_graphed_callables
+graphed_baseline = torch.cuda.make_graphed_callables(baseline_fn, (inputs,))
+graphed_monokernel = torch.cuda.make_graphed_callables(monokernel_fn, (inputs,))
+
+# Option B: Manual graph capture
+g = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g):
+    baseline_out = baseline_fn(*inputs)
+g.replay()  # Timed iterations
+```
+
+**WHY**: Launch overhead differences between Triton (many small ops) and CUDA C++
+(single kernel) are ~100-200 µs. CUDA graphs eliminate this, enabling fair comparison.
+
+**INVALID**: Timing with torch.cuda.Event alone without CUDA graph capture
+```python
+# WRONG - unfair comparison due to launch overhead:
+start.record()
+baseline_out = fused_experts(...)  # Triton launch overhead: ~50-100 µs
+end.record()
+```
+
+**Verification**: The `verify_phase4_gates.py` script checks for CUDA graph usage.
+If absent, the `production_parity` gate will FAIL.
+
+---
 
 ## Default correctness tolerances (starting points)
 

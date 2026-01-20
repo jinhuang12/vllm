@@ -62,6 +62,9 @@ Typical flow:
 2. Prepare kernel: build packed token/expert lists
 3. GEMM kernel: grouped by expert or token-major K-slice
 
+Hopper note (sm_90a):
+- If output overlap would force heavy atomics or scatter-like stores on the critical path, consider producing a **contiguous** intermediate and doing a separate **token-major aggregation** (gather+sum) kernel.
+
 ---
 
 ## Hybrid Pattern (Expert‑major Up, Token‑major Down)

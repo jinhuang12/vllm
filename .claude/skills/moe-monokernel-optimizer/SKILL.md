@@ -11,31 +11,57 @@ Design specialized MoE kernels for vLLM that reduce launch overhead and memory t
 
 fused_moe, FusedMoE, cooperative monokernel, hybrid fusion, split kernel, CUDA graphs, torch.compile, routing, top_k, SRAM tetris, atomics, production parity
 
-## Non-Negotiables
+## Non-Negotiables (BLOCKING)
 
-1. **Measure the right baseline (production parity)**
-   - Benchmark under CUDA graphs / torch.compile with the same settings as production
-   - Measure GPU kernel time, not just kernel count
-   - See `references/profiling-launch-vs-kernel.md`
+These are NOT advisory. Violation blocks phase progression.
 
-2. **Do not assume model semantics**
-   - Verify routing math by reading vLLM model code
-   - Record in `{artifact_dir}/constraints.md` using `references/moe-parameters-template.md`
-   - Match exactly: scoring (softmax/sigmoid), renorm, weight placement, accumulation
+1. **RUN nsys profiling with production parity** (BLOCKING for Phase 2)
+   - MUST run `nsys profile` with vLLM-specific flags (see `references/nsys-profiling-guide.md`)
+   - MUST measure vLLM's actual `fused_experts`/`fused_moe` kernel times
+   - MUST document baseline timings in constraints.md (not just commands)
+   - Verify: `python scripts/verify_phase1_baseline.py {artifact_dir}` returns 0
 
-3. **Pick fusion boundary deliberately**
-   - Use `references/route-selection-decision-tree.md` to choose:
+2. **VERIFY routing math from vLLM source** (BLOCKING)
+   - MUST read vLLM model file (e.g., `vllm/model_executor/models/qwen2_moe.py`)
+   - MUST record in `{artifact_dir}/constraints.md` using `references/moe-parameters-template.md`
+   - MUST match exactly: scoring (softmax/sigmoid), renorm, weight placement, accumulation
+
+3. **SELECT fusion boundary using decision tree** (BLOCKING for Phase 3)
+   - MUST use `references/route-selection-decision-tree.md` to select:
      - A) Cooperative monokernel
      - B) Hybrid large-grid fusion
      - C) Split-kernel graph-captured
-   - Do not default to "single mega-kernel" without profiling evidence
+   - MUST document rationale with profiling evidence
+   - Do NOT default to "single mega-kernel" without data
 
-4. **CUDA graphs safety is required**
-   - Correct stream, no hidden allocations, stable shapes per bucket
+4. **ENSURE CUDA graphs safety** (BLOCKING for Phase 5)
+   - MUST use correct stream, no hidden allocations, stable shapes per bucket
    - See `references/cudagraph-safety.md`
 
-5. **No ungrounded performance claims**
-   - Never claim a win without measurement on target buckets with CUDA graphs enabled
+5. **COMPARE against vLLM baseline (not PyTorch)** (BLOCKING for Phase 4)
+   - MUST import `fused_experts` or `fused_moe` from vLLM as baseline
+   - MUST run benchmarks with production settings (torch.compile enabled)
+   - MUST include `torch.allclose()` numerical comparison in tests
+   - Verify: `python scripts/verify_phase4_gates.py {artifact_dir}` returns 0
+   - Naive PyTorch loops are NOT valid baselines
+
+6. **RUN verify_phase4_gates.py before Phase 4 completion** (BLOCKING)
+   - MUST run: `python scripts/verify_phase4_gates.py {artifact_dir}`
+   - MUST return exit code 0
+   - MUST record result in state.json: `"verification_run": {"phase4": {"status": "PASS", "date": "..."}}`
+   - If script fails: DO NOT proceed to Phase 5, fix blockers first
+   - If script not run: Phase 4 is INCOMPLETE regardless of other results
+
+7. **KERNEL benchmarks under CUDA graphs** (BLOCKING for Phase 4)
+   - MUST capture both baseline AND monokernel in CUDA graphs for fair comparison
+   - MUST time graph replays, NOT individual kernel launches
+   - Triton vs CUDA C++ launch overhead difference is ~50-100 µs - graphs eliminate this
+   - See `references/validation-defaults.md` § "Kernel-Level Benchmark Requirements"
+   - FORBIDDEN: `TORCH_COMPILE_DISABLE=1` or `VLLM_TORCH_COMPILE_LEVEL=0` in benchmarks
+
+8. **Do not skip full-model E2E because "weights aren't available"**
+   - If you need E2E to compute MoE share `f` (Phase 1) or to validate speedup (Phase 4.3), and the model isn't cached locally: **download the weights**.
+   - Only skip E2E if the **user explicitly waives** the E2E requirement (or the model is gated and the user cannot/does not want to provide access).
 
 ## Execution Model: Orchestrator + Task Subagents
 
@@ -101,6 +127,7 @@ Use `rg`/grep with search anchors to locate details.
 
 | Topic | File |
 |-------|------|
+| Nsys profiling | `references/nsys-profiling-guide.md` |
 | Route decision | `references/route-selection-decision-tree.md` |
 | Algorithmic branching | `references/algorithmic-branching.md` |
 | SRAM/tiling | `references/tiling-config.md` |
@@ -119,6 +146,55 @@ For high-risk decisions, consider invoking the `llm-council` skill:
 - When stuck after 2+ attempts
 
 Not mandatory—use engineering judgment. See `orchestration/llm-council.md`.
+
+## Escalation Protocol
+
+When a Task encounters a blocker it cannot resolve:
+
+### 1. Update state.json with blocker status
+
+```json
+{
+  "status": "blocked",
+  "blocker": {
+    "description": "Description of issue",
+    "severity": "critical|major|minor",
+    "gate": "gate_4_1_correctness",
+    "attempts": 2,
+    "escalation_needed": true
+  }
+}
+```
+
+### 2. Create blocker file
+
+Save detailed blocker info to: `{artifact_dir}/blockers/{phase}_{stage}_{date}.md`
+
+Use template from `orchestration/blocker-template.md`.
+
+### 3. Orchestrator action on blockers
+
+| Severity | Action |
+|----------|--------|
+| **critical** | STOP. Invoke llm-council. Do NOT proceed. |
+| **major** | Adjust constraints, re-spawn task with modified parameters |
+| **minor** | Document and continue, but flag for review |
+
+### 4. Verification scripts (BLOCKING)
+
+Before marking any phase complete, run verification:
+
+```bash
+# Phase 1 → Phase 2 gate
+python scripts/verify_phase1_baseline.py {artifact_dir}
+# Exit code must be 0 to proceed
+
+# Phase 4 → Phase 5 gate
+python scripts/verify_phase4_gates.py {artifact_dir}
+# Exit code must be 0 to proceed
+```
+
+**If verification fails**: Do NOT proceed. Update state.json with `"status": "blocked"`.
 
 ## Quick Start
 

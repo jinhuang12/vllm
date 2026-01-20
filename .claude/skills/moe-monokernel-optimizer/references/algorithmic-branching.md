@@ -57,6 +57,17 @@ output[token_idx * K + k_idx] += expert_output * routing_weight;  // no atomics
 **Use atomics when**: ownership is expert‑major (or Split‑H) and multiple blocks write same output.
 **Avoid atomics when**: token‑major with K‑slice ownership.
 
+### Hopper (sm_90a) policy note: avoid "scatter/atomic epilogues" when they serialize GEMM
+
+On Hopper, if your Phase 1 profiling indicates that output overlap forces heavy atomics or a scatter-like store on the MoE critical path, consider changing the output strategy to:
+
+- **contiguous output** from the down-projection (packed-by-pair or packed-by-expert), then
+- a separate **token-major aggregation** kernel (gather+sum) to produce final `[token, K]`.
+
+Why: this keeps the GEMM epilogue regular and can preserve WGMMA/TMA overlap; irregularity moves into a smaller token-major pass.
+
+Kill criteria (under CUDA graphs): stop if (a) MoE GPU kernel time does not improve for every validated bucket, or (b) NCU shows reduced GEMM tensor-core utilization/occupancy with no compensating savings.
+
 ### Configuration
 
 ```cpp

@@ -32,11 +32,79 @@ Capture model semantics and baseline truth snapshot for {model_id} on {hardware}
 - Target: {model_id}, {hardware}, {dtype}, TP={tp}, EP={ep}
 - Batch buckets: {batch_buckets}
 
+## Fast Phase-1 Bucket Set (Time-Bounded Default)
+
+Unless you have a stronger reason, constrain Phase 1 profiling to **two buckets** to keep iteration time low:
+- `batch_size ∈ {8, 64}`
+- `input_len = 1024`, `output_len = 32`
+
+Expand to more buckets only after Phase 2 has a clear win hypothesis.
+
+## BLOCKING REQUIREMENTS (ALL must be completed)
+
+These are NOT optional. Phase 2 CANNOT start until ALL are met.
+
+### Requirement 1: nsys Profile Files MUST Exist
+```bash
+# RUN this command (not just document it):
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_TORCH_COMPILE_LEVEL=3 \
+nsys profile \
+  --trace-fork-before-exec=true \
+  --cuda-graph-trace=node \
+  -o {artifact_dir}/runs/baseline \
+  vllm bench latency \
+    --model {model_id} \
+    --batch-size 8 \
+    --input-len 1024 --output-len 2 \
+    --num-iters-warmup 5 \
+    --num-iters 1
+
+# VERIFY file exists:
+ls {artifact_dir}/runs/baseline.nsys-rep
+# If no file, you have NOT completed this requirement
+
+# Extract MoE kernel summary:
+nsys stats --report cuda_gpu_kern_sum {artifact_dir}/runs/baseline.nsys-rep \
+  | grep -E "fused_moe|fused_experts|topk"
+```
+
+### Requirement 2: Baseline MUST Be vLLM Production Kernels
+Document actual kernel timings from nsys, specifically:
+- `fused_moe` or `fused_experts` kernel times (NOT naive PyTorch loops)
+- CUDA graphs MUST be enabled during profiling
+- torch.compile MUST be at production level (VLLM_TORCH_COMPILE_LEVEL=3)
+
+### Requirement 3: Timing Data MUST Be Numbers (Not Commands)
+constraints.md MUST contain actual measured values like:
+```
+## Baseline Truth Snapshot (BS=8)
+- fused_moe kernel time = 523.4 µs
+- topk_softmax kernel time = 45.2 µs
+- Total MoE time = 671.1 µs
+```
+Documenting "run this command" is NOT sufficient.
+
+### Requirement 4: Baseline Normalization (CRITICAL if applicable)
+If baseline MoE kernels fall back to a default/tuner-missing config (common for Triton MoE kernels):
+- Generate a tuned baseline config (bounded tuner is acceptable)
+- **Re-run the baseline snapshot after normalization** (do NOT use the un-tuned timings)
+- Use the *normalized* baseline for route selection in Phase 2
+- Otherwise you may optimize the wrong target (the un-tuned baseline is artificially slow)
+
+### Requirement 5: E2E Baseline MUST Exist
+You must record at least one **full-model** E2E latency baseline in Phase 1:
+- Run `vllm bench latency` for at least one representative bucket
+- If model weights are not cached locally: **download them** (do not skip)
+- If download is blocked (gated/auth/terms/network/disk): set `state.json` status to `blocked` and ask user for waiver
+- This is required to compute MoE share `f = T_moe / T_total`
+
 ## Instructions
 
 1. **Read first**:
+   - `.claude/skills/moe-monokernel-optimizer/references/nsys-profiling-guide.md` (practical commands)
    - `.claude/skills/moe-monokernel-optimizer/references/moe-parameters-template.md`
-   - `.claude/skills/moe-monokernel-optimizer/references/profiling-launch-vs-kernel.md`
+   - `.claude/skills/moe-monokernel-optimizer/references/profiling-launch-vs-kernel.md` (conceptual)
 
 2. **Locate vLLM model code**:
    - Find MoE implementation in `vllm/model_executor/models/`
@@ -49,26 +117,43 @@ Capture model semantics and baseline truth snapshot for {model_id} on {hardware}
    - Shared experts (if any)
    - Accumulation: direct write vs atomics vs reduce
 
-4. **Run baseline profiling** (production parity):
-   - Enable CUDA graphs and torch.compile
-   - Profile for batch sizes: {batch_buckets}
-   - Separate GPU kernel time from launch overhead
-   - Record per-bucket timings
+4. **RUN baseline profiling** (DO NOT SKIP):
+   - Use commands from Requirement 1 above (single BS=8 baseline)
+   - Extract MoE kernel times using `nsys stats`
+   - Record timings WITH ACTUAL NUMBERS in constraints.md
 
 5. **Write constraints.md** using template from references/moe-parameters-template.md
+
+6. **Hopper IO sanity-check (sm_90a only)**:
+   - If targeting H100/H200, check whether the MoE critical path is limited by **output atomics / scatter-like stores / heavy epilogues** (vs pure GEMM math)
+   - If yes, prefer designs that keep GEMM stores **regular/contiguous** and move irregularity into a separate **token-major aggregation** step (instead of fusing scatter/atomics into a GEMM epilogue)
+   - Treat as a hypothesis and gate by CUDA-graph kernel-time wins
 
 ## Output
 Create `{artifact_dir}/constraints.md` with:
 - Target envelope section
 - Model semantics section (routing, activation, weight placement)
-- Baseline Truth Snapshot (bucket timings under CUDA graphs)
+- Baseline Truth Snapshot (BS=8 timings under CUDA graphs) WITH NUMBERS
 - "Already fused?" checklist
 
+## VERIFICATION (MUST RUN BEFORE COMPLETION)
+```bash
+python .claude/skills/moe-monokernel-optimizer/scripts/verify_phase1_baseline.py {artifact_dir}
+# Exit code MUST be 0 to proceed
+# If non-zero: DO NOT mark phase complete, fix blockers first
+```
+
 ## State Update
-When complete, update `{artifact_dir}/state.json`:
+ONLY after verification passes, update `{artifact_dir}/state.json`:
 ```json
 {"phase": "2_planning", "status": "pending", "last_update": "YYYY-MM-DD"}
 ```
+
+## On Blocker
+If you cannot complete a BLOCKING REQUIREMENT:
+1. Update state.json: `"status": "blocked", "blocker": {"description": "...", "severity": "critical"}`
+2. Create blocker file: `{artifact_dir}/blockers/phase1_{date}.md`
+3. Do NOT mark phase complete
 ```
 
 ---
@@ -86,6 +171,26 @@ Choose fusion route, make algorithmic decisions, produce implementation plan.
 - Constraints: {artifact_dir}/constraints.md (READ THIS FIRST)
 - Target: {model_id}, {hardware}, TP={tp}
 
+## BLOCKING REQUIREMENTS (Phase 2)
+
+### Requirement 1: Use Optimization Plan Template
+Write `{artifact_dir}/optimization_plan.md` using `references/optimization-plan-template.md`:
+- Copy/paste the template structure
+- Reject the plan if it contains placeholders ("1. 2. 3." or empty sections)
+- Must include ranked top-10 opportunity list (section 3A) with evidence
+- Must include 2-3 active hypotheses tied to opportunity IDs (section 3B)
+
+### Requirement 2: Fusion Enumeration
+Enumerate at least 2 concrete fusion opportunities (or prove none exist):
+- Each opportunity must cite Phase 1 evidence (kernel name, time)
+- Compute required savings vs baseline and tie to dominant kernel metrics
+
+### Requirement 3: Mid-Stage Replanning Rule
+Do NOT change the plan mid-implementation:
+- If profiling during Phase 3 indicates the plan is wrong, STOP
+- Trigger Phase 2 re-plan with updated evidence
+- Do NOT thrash by repeatedly modifying approach during implementation
+
 ## Instructions
 
 1. **Read first**:
@@ -93,6 +198,7 @@ Choose fusion route, make algorithmic decisions, produce implementation plan.
    - `.claude/skills/moe-monokernel-optimizer/references/route-selection-decision-tree.md`
    - `.claude/skills/moe-monokernel-optimizer/references/algorithmic-branching.md`
    - `.claude/skills/moe-monokernel-optimizer/references/fusion-feasibility-heuristics.md`
+   - `.claude/skills/moe-monokernel-optimizer/references/optimization-plan-template.md`
 
 2. **Compute derived values**:
    - P = BS × top_k (token-expert pairs)
@@ -118,6 +224,9 @@ Choose fusion route, make algorithmic decisions, produce implementation plan.
 6. **Define kill criteria** (when to pivot routes):
    - List 2-3 measurable "stop" conditions
 
+7. **Optional: Council review**:
+   - If risk tier is high (semantics changes, top_k>1, major fusion boundary change), consider invoking `llm-council` per `orchestration/llm-council.md`
+
 ## Output
 Create `{artifact_dir}/optimization_plan.md` with:
 - Route decision + rationale
@@ -142,6 +251,42 @@ If monokernel is not applicable (baseline already optimal, infeasible savings):
 ---
 
 ## Phase 3: Implementation Stages
+
+## Phase 3 General Requirements (apply to all stages)
+
+### Grid Barrier Limits (Cooperative Route)
+Minimize global barriers (`grid.sync`) to ≤ 1–2 unless M_avg is large enough to amortize.
+Each additional barrier is a tax that must be justified by measured savings.
+
+### Split Kernels Warning
+If the "win" comes only from CUDA graph replay (vs baseline also using graphs), that is NOT sufficient:
+- Baseline also benefits from CUDA graphs
+- Must show kernel-time improvement with both under graphs
+
+### Do NOT Change Plan Mid-Stage
+If profiling during implementation indicates the plan is wrong:
+1. STOP implementation
+2. Update state.json with findings
+3. Return to Phase 2 to re-plan with new evidence
+4. Do NOT thrash by repeatedly modifying approach
+
+### Route-Specific Checklists
+
+**A) Cooperative monokernel**:
+- [ ] Use `references/code-templates.md` and `references/tiling-config.md` for kernel structure and SRAM budgeting
+- [ ] Minimize `grid.sync` barriers; treat each barrier as a tax that must be amortized
+- [ ] Ensure accumulation semantics match baseline (especially for top_k>1)
+
+**B) Hybrid large-grid fusion**:
+- [ ] Keep baseline large-grid GEMM(s); fuse *around* them (see `references/hybrid-large-grid-fusion.md`)
+- [ ] Target "material fusion" deliverables (e.g., W1 epilogue fusion, routing+prepare fusion)
+- [ ] Do not double-count: verify what baseline already fuses before claiming a win
+
+**C) Split-kernel graph-captured route**:
+- [ ] Prefer fewer, simpler kernels that each keep a large grid and high occupancy
+- [ ] Make workspace allocation explicit and reusable; avoid per-iteration allocations
+
+---
 
 ### Stage 3.1: Routing and Prepare
 
@@ -344,47 +489,158 @@ Prove correctness, kernel performance, and e2e latency improvement.
 - CUDA directory: {cuda_dir}
 - Batch buckets: {batch_buckets}
 
+## BLOCKING REQUIREMENTS (ALL must be completed)
+
+These are NOT optional. Phase 5 CANNOT start until ALL are met.
+
+### Requirement 1: Baseline MUST Be vLLM (NOT Naive PyTorch)
+```python
+# CORRECT - import vLLM's actual production kernel:
+from vllm.model_executor.layers.fused_moe import fused_experts
+# or
+from vllm.model_executor.layers.fused_moe import fused_moe
+
+# WRONG - do NOT use naive PyTorch loops as baseline:
+# for expert_idx in range(num_experts):  # WRONG
+#     out += torch.matmul(x, expert_weights[expert_idx])  # WRONG
+```
+
+### Requirement 2: Numerical Comparison MUST Use torch.allclose
+```python
+# Test file MUST contain numerical comparison:
+baseline_output = fused_experts(x, w1, w2, topk_weights, topk_ids, ...)
+monokernel_output = monokernel_forward(x, w1, w2, topk_weights, topk_ids, ...)
+
+assert torch.allclose(
+    monokernel_output,
+    baseline_output,
+    atol=TOLERANCE,
+    rtol=TOLERANCE
+), f"FAIL: max diff = {(monokernel_output - baseline_output).abs().max()}"
+
+# Smoke tests (shape, NaN checks) alone are NOT sufficient
+```
+
+### Requirement 3: Production Parity Environment
+Benchmarks MUST run with production settings:
+```python
+# REQUIRED - do NOT disable these:
+os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "3"  # Production level
+# CUDA graphs enabled by default
+
+# FORBIDDEN - do NOT use:
+# os.environ["TORCH_COMPILE_DISABLE"] = "1"  # WRONG
+# enforce_eager=True  # WRONG
+```
+
+### Requirement 4: Kernel Benchmarks Under CUDA Graphs (BLOCKING)
+For kernel-level (isolated) comparisons between Triton and CUDA C++:
+```python
+# REQUIRED: Wrap both baseline and monokernel in CUDA graphs
+import torch.cuda
+
+# Capture baseline graph
+g_baseline = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g_baseline):
+    baseline_out = fused_experts(x, w1, w2, ...)
+
+# Capture monokernel graph
+g_mono = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g_mono):
+    mono_out = token_major_down_projection(...)
+
+# Time graph replays (NOT individual kernel launches)
+start.record()
+for _ in range(iters):
+    g_baseline.replay()  # Graph replay, not kernel launch
+end.record()
+```
+
+**Rationale**: Triton kernels have ~50-100 µs launch overhead per invocation.
+CUDA C++ kernels have ~5-10 µs launch overhead. Without CUDA graphs, this
+difference dominates timing and makes comparisons meaningless.
+
+**INVALID** (timing without graph capture):
+```python
+# WRONG - unfair due to launch overhead difference:
+start.record()
+baseline_out = fused_experts(...)  # Triton: ~50-100 µs overhead
+end.record()
+# vs
+start.record()
+mono_out = monokernel(...)  # CUDA C++: ~5-10 µs overhead
+end.record()
+```
+
+### Requirement 5: ALL Kill Criteria MUST Be Evaluated
+Every kill criterion from Phase 2 MUST have a result (PASS/FAIL).
+"TODO", "optional", or "skip" are NOT valid results.
+
+Update state.json with:
+```json
+"kill_criteria_results": {
+    "criterion_1_xxx": "PASS - measured X vs Y",
+    "criterion_2_xxx": "PASS - no regression",
+    "criterion_3_xxx": "PASS - occupancy verified via NCU",
+    "criterion_4_xxx": "PASS - MoE is 25% of E2E time"
+}
+```
+
 ## Instructions
 
 1. **Read first**:
    - `.claude/skills/moe-monokernel-optimizer/references/validation-defaults.md`
    - `.claude/skills/moe-monokernel-optimizer/validation/E2E_LATENCY_GUIDE.md`
 
-2. **Gate 4.1: Correctness**
-   - Compare outputs vs baseline for all batch buckets
-   - Use tolerances from validation-defaults.md
-   - If top_k > 1: test reduction edge cases
-   - **If fails**: Stop, use investigation-playbook.md § Correctness
+2. **Gate 4.1: Correctness** (BLOCKING)
+   - Import vLLM's `fused_experts` or `fused_moe` as baseline
+   - Use `torch.allclose()` with tolerances from validation-defaults.md
+   - Test ALL batch buckets
+   - **If fails**: STOP. Use investigation-playbook.md § Correctness
 
-3. **Gate 4.2: Kernel Performance**
-   - Measure GPU kernel time under CUDA graphs
+3. **Gate 4.2: Kernel Performance** (BLOCKING)
+   - Baseline = vLLM's fused_moe kernel (NOT naive PyTorch)
+   - Measure under CUDA graphs + torch.compile enabled
    - Gate: optimized ≤ baseline for ALL buckets
-   - Run NCU to verify no occupancy regression
-   - **If fails**: Stop, use investigation-playbook.md § Kernel Perf
+   - Run NCU to verify occupancy
+   - **If fails**: STOP. Use investigation-playbook.md § Kernel Perf
 
-4. **Gate 4.3: E2E Latency**
-   - Run `vllm bench latency` with identical settings
-   - Compare baseline vs monokernel
+4. **Gate 4.3: E2E Latency** (BLOCKING)
+   - Run `vllm bench latency` with production settings
+   - Both baseline and optimized must use same environment
    - Calculate improvement percentage
+   - Document actual numbers (not estimates)
 
 ## Output
 Create `{artifact_dir}/validation_results.md` with:
 - Correctness: pass/fail, max diff, tolerance used
-- Kernel perf: per-bucket timings, speedup
+- Kernel perf: per-bucket timings vs vLLM baseline (NOT PyTorch)
 - E2E: latency comparison, improvement %
 
+Create/update `{artifact_dir}/benchmark_validation.py` with:
+- Import from vllm.model_executor.layers.fused_moe (NOT naive loops)
+- torch.allclose numerical comparison
+- Production parity environment (no TORCH_COMPILE_DISABLE)
+
+## VERIFICATION (MUST RUN BEFORE COMPLETION)
+```bash
+python .claude/skills/moe-monokernel-optimizer/scripts/verify_phase4_gates.py {artifact_dir}
+# Exit code MUST be 0 to proceed
+# If non-zero: DO NOT mark phase complete, fix blockers first
+```
+
 ## State Update
-When complete:
+ONLY after verification passes, update `{artifact_dir}/state.json`:
 ```json
 {"phase": "5_integration", "status": "pending", "last_update": "YYYY-MM-DD"}
 ```
 
 ## On Failure
-If any gate fails, update state:
-```json
-{"phase": "4_validation", "status": "needs_investigation", "notes": "Gate 4.X failed: <reason>"}
-```
-Follow investigation-playbook.md with bounded cycles.
+If any gate fails OR verification script returns non-zero:
+1. Update state.json: `"status": "blocked", "blocker": {"description": "...", "severity": "critical"}`
+2. Create blocker file: `{artifact_dir}/blockers/phase4_{date}.md`
+3. Do NOT declare "SHIP"
+4. Follow investigation-playbook.md with bounded cycles
 ```
 
 ---
