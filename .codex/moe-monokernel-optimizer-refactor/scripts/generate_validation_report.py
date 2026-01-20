@@ -213,7 +213,7 @@ def main() -> None:
         lines.append("## E2E latency (vllm bench latency)")
         lines.append("")
         lines.append(
-            f"- TODO: run `python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir} --run`."
+            f"- TODO: run `python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}`."
         )
         lines.append("")
     else:

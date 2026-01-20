@@ -1,0 +1,60 @@
+{
+  "attention": [
+    "sgl-kernel/csrc/attention/",
+    "sgl-kernel/python/sgl_kernel/flash_attn.py",
+    "sgl-kernel/python/sgl_kernel/flash_mla.py",
+    "python/sglang/srt/layers/attention/",
+    "python/sglang/srt/layers/attention/fla/",
+    "benchmark/kernels/decoding_attention_triton/",
+    "benchmark/kernels/sliding_window_attention_triton/"
+  ],
+  "allreduce": [
+    "sgl-kernel/csrc/allreduce/",
+    "sgl-kernel/python/sgl_kernel/allreduce.py",
+    "python/sglang/srt/distributed/device_communicators/custom_all_reduce.py",
+    "benchmark/kernels/all_reduce/",
+    "benchmark/kernels/flashinfer_allreduce_fusion/"
+  ],
+  "jit-codegen": [
+    "python/sglang/jit_kernel/"
+  ],
+  "triton": [
+    "python/sglang/srt/layers/attention/fla/",
+    "python/sglang/srt/layers/attention/triton_ops/",
+    "python/sglang/srt/layers/moe/fused_moe_triton/"
+  ],
+  "norm": [
+    "sgl-kernel/csrc/elementwise/fused_add_rms_norm_kernel.cu",
+    "sgl-kernel/python/sgl_kernel/elementwise.py",
+    "python/sglang/jit_kernel/norm.py",
+    "python/sglang/srt/layers/layernorm.py"
+  ],
+  "activation": [
+    "sgl-kernel/csrc/elementwise/activation.cu",
+    "sgl-kernel/python/sgl_kernel/elementwise.py",
+    "python/sglang/srt/layers/activation.py"
+  ],
+  "quantization": [
+    "sgl-kernel/csrc/gemm/",
+    "sgl-kernel/csrc/quantization/",
+    "sgl-kernel/python/sgl_kernel/quantization/",
+    "python/sglang/srt/layers/quantization/",
+    "benchmark/kernels/quantization/"
+  ],
+  "moe": [
+    "sgl-kernel/csrc/moe/",
+    "sgl-kernel/csrc/expert_specialization/",
+    "sgl-kernel/python/sgl_kernel/moe.py",
+    "python/sglang/srt/layers/moe/",
+    "benchmark/kernels/fused_moe_triton/"
+  ],
+  "benchmark": [
+    "benchmark/kernels/",
+    "sgl-kernel/benchmark/",
+    "python/sglang/jit_kernel/benchmark/"
+  ],
+  "test": [
+    "sgl-kernel/tests/",
+    "python/sglang/jit_kernel/tests/"
+  ]
+}

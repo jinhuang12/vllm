@@ -66,10 +66,27 @@ scoring_func, norm_topk_prob, routed_scaling_factor, shared_experts, tie-break, 
 
 This section is the **input to route selection**. Collect it under the *same serving mode* you will ship (CUDA graphs, torch.compile, TP/EP, bucketed shapes). Use `references/profiling-launch-vs-kernel.md` if launch time vs kernel time is confusing.
 
+### F0) Full-model E2E baseline (required)
+
+You must record at least one **full-model** E2E latency baseline in Phase 1 (to compute MoE share `f = T_moe / T_total` and sanity-check that MoE is worth optimizing).
+
+- If the model is not cached locally: **download the weights** (do not skip E2E because the cache is empty).
+- If you cannot download due to gating/auth/terms, or due to network/disk constraints:
+  - mark the target `blocked` in `{artifact_dir}/state.json`,
+  - document the blocker in `{artifact_dir}/constraints.md`,
+  - and ask the user explicitly whether they want to waive the E2E requirement.
+
+Record:
+- the exact `vllm bench latency` command(s),
+- the bucket(s) used (BS, input_len, output_len),
+- the serving parity knobs (CUDA graphs / torch.compile / TP/EP),
+- the resulting E2E latency numbers.
+
 ### F1) Buckets + modes
 - Buckets measured (must match production): `BS = {...}` (and sequence length regime)
 - CUDA graphs mode: on/off + capture details (static shapes/buckets?)
 - torch.compile mode: on/off + backend (if relevant)
+- Evidence files: record trace paths + exact commands (prefer `nsys` with `--cuda-graph-trace=node`; see `references/nsys-profiling-guide.md`).
 
 ### F2) Kernel-time breakdown (GPU time)
 For 1–2 representative buckets (and then for all “in-envelope” buckets later), record:
@@ -148,6 +165,12 @@ For the dominant GEMM-like kernel(s), note:
   - Per-token scales materialized:
 
 ## F) Baseline Truth Snapshot (production parity)
+### Full-model E2E baseline (required)
+- E2E command(s):
+- Buckets and workload:
+- Parity knobs (CUDA graphs / torch.compile / TP/EP):
+- E2E results (avg/p50/p90 etc):
+
 ### Buckets + modes
 - Buckets measured:
 - CUDA graphs mode:

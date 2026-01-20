@@ -7,20 +7,21 @@ This is a technique catalog. Use it **after** you’ve picked a route and archit
 
 ## Contents
 - Pattern applicability table
-- T1–T13 techniques (with applicability + gotchas)
+- T1–T12 + T14 techniques (with applicability + gotchas)
 
 ## Search anchors
-token-major, expert-major, cooperative, split-kernel, hybrid, MMA, buffering, cp.async, TMA, epilogue fusion
+token-major, expert-major, cooperative, split-kernel, hybrid, MMA, buffering, cp.async, TMA, epilogue fusion, W1, SwiGLU, topk, k-way merge, sorting network, bitonic merge, SonicMoE, FlashInfer
 
 ## Pattern applicability (quick index)
 
 | Pattern | Best‑fit Techniques |
 |---------|---------------------|
-| Token‑major | T1 (conditional), T7, T8, T11, T12 |
-| Expert‑major | T1, T5, T6, T7, T8, T11, T13 |
-| Cooperative | U5, T3, T6, T7 |
-| Split‑kernel | T5, T6, T7 (routing/prepare), T11 |
-| Hybrid large‑grid | T5, T7 (routing/prepare), T11 (epilogue fusion) — see `hybrid-large-grid-fusion.md` |
+| Token‑major | T1 (conditional), T8, T10, T11, T14 |
+| Expert‑major | T1, T5, T6, T11 |
+| Cooperative | U5, T3, T6 |
+| Split‑kernel | T5, T10 (routing/prepare), T11 (W1 epilogue fusion), T14 |
+| Hybrid large‑grid | T10 (routing/prepare), T11 (W1 epilogue fusion) — see `hybrid-large-grid-fusion.md` |
+| System / attention backend | T12 (FlashInfer kernel survey + feasibility) |
 
 ## Wrapper/dispatch guidance (keep it boring)
 - Prefer a **small number** of pre-instantiated kernels (or template specializations) with **Python-side dispatch**.
@@ -178,6 +179,176 @@ struct MoEGemmSpec {
 ```
 bytes ≈ BS_max × K × 1 + (BS_max + 8) × N × 4 + BS_max × 4
 ```
+
+## T10: Faster Top‑K Routing (Small‑K) via Sorting-Network / K‑Way Merge (SonicMoE‑style)
+
+**What it is**: replace a slow MoE routing & prepare stage with a small‑K GPU kernel that uses warp‑level primitives and a deterministic tie-break.
+
+This technique is motivated by SonicMoE’s router top‑k optimization for small `K`. **Must read**: `references/router-design.md`.
+
+**Use when (evidence required)**:
+- `top_k` is small and fixed (commonly `8` or `16`), and `E_local` is moderate (≤256 is the common “warp-friendly” range).
+- Baseline routing is not already fused into the expert GEMM path (or is not already using a specialized small‑K kernel).
+
+**Do not use when**:
+- Routing is not in the top‑N kernels by GPU time (you won’t buy an E2E win).
+- Your model uses nontrivial grouped routing / shared experts semantics you cannot faithfully reproduce (treat as a separate semantics variant and gate explicitly).
+
+**Implementation options (pick one; keep it shape-gated)**:
+- **Sorting network / bitonic merge** (SonicMoE-style): good for small, fixed `K`; deterministic; maps well to warp operations.
+- **K‑way merge**: each lane pre-sorts a small local list once, then selects `K` winners via repeated warp-reduce where only the winning lane advances its cursor.
+
+**Determinism + semantics constraints (non-negotiable)**:
+- Deterministic tie-break (recommended): `(score desc, expert_id asc)`.
+- Scoring semantics must match the model:
+  - selection function (softmax vs sigmoid(+bias) vs custom)
+  - whether weights are renormalized after selection (`norm_topk_prob`)
+  - where weights are applied (pre/post activation / folded into scales)
+
+**vLLM integration pattern (recommended)**:
+- Add a new routing custom op that returns `(topk_ids, topk_weights)` and “prepare” outputs.
+- Dispatch to a small set of specializations keyed by `(top_k, E_local, semantics)`; fall back otherwise.
+- Gate with an env var and strict shape checks; keep CUDA-graph safe (`references/cudagraph-safety.md`).
+
+**Prepare (routing → expert-local grouping)**
+- If baseline prepare is already fast, keep it and only swap selection.
+- If prepare is material, produce (at minimum):
+  - `expert_offsets[E_local+1]` (prefix sum over per-expert counts)
+  - `pair_indices[total_pairs]` (stable grouping of token-expert pairs by expert)
+
+**Expected profiler signature**
+- `nsys` kernel ranking: router/top‑k kernel time decreases materially, or a slow `torch.topk` kernel disappears.
+- End-to-end: any win is limited by MoE share `f` (use `references/e2e-delta-math.md` to sanity-check expected delta).
+
+**Kill criteria**
+- No MoE GPU kernel-time reduction in the target buckets under CUDA graphs.
+- Any correctness mismatch beyond declared tolerances (especially routing weights semantics).
+- You needed to broaden the dispatch envelope so far that maintenance risk dominates.
+
+## T11: W1 Epilogue Fusion (Activation + Quant) into Expert GEMM (Hybrid Large‑Grid)
+
+**What it is**: fuse activation (e.g., SiLU/SwiGLU) and W2-input quantization (e.g., FP8) into the **W1 expert GEMM epilogue**, so you delete real kernel work and avoid large intermediate writes/reads.
+
+Baseline pattern (common):
+1) W1 expert GEMM writes `[M*top_k, 2*N_local]` to global memory
+2) activation kernel produces `[M*top_k, N_local]`
+3) quant kernel produces FP8 activations (+ scale metadata) for W2
+4) W2 expert GEMM consumes FP8 activations
+
+**Use when (evidence required)**:
+- `nsys` shows activation and/or quant kernels are present and material, and the intermediate tensor is large enough that removing a round-trip is plausible ROI.
+- Baseline W1 kernel does not already fuse the epilogue (verify with kernel list; do not guess).
+
+**Preconditions / constraints**
+- Activation can be computed locally per output tile (no global sync).
+- Quantization metadata semantics must match the baseline (per-tensor vs per-block/grouped scales, scale layout, saturation rules).
+- Epilogue register pressure must stay bounded (avoid spills that slow the GEMM enough to erase the win).
+
+**Implementation sketch (Triton or CUDA)**
+- Locate the expert GEMM kernel used for W1 (often called from `fused_experts` or an MoE runner).
+- Add a fused-epilogue variant that:
+  - computes W1 tile
+  - applies activation (SwiGLU/SiLU etc.)
+  - quantizes to the exact FP8 format expected by W2 and writes FP8 (+ scales)
+- Wire under an env var gate; preserve a fallback.
+
+**Expected profiler signature**
+- Activation/quant kernels disappear or shrink substantially; total MoE GPU kernel time decreases under CUDA graphs.
+- W1 kernel may get slightly slower, but total should improve; validate with both `nsys` and a small `ncu` spot-check for spills/occupancy regression.
+
+**Kill criteria**
+- W1 kernel slows enough (regs/spills/occupancy drop) that total MoE kernel time does not improve.
+- Any quantization metadata mismatch (silent accuracy loss risk).
+- Baseline already had the epilogue fused (no remaining work to delete).
+
+## T12: FlashInfer Kernel Survey + Feasibility Scoring (Attention / Operator Backends)
+
+**What it is**: systematically enumerate which FlashInfer kernel families could apply to your target (decode/prefill attention, paged KV cache, optional variants like cascade/sparse), then score feasibility and expected ROI under production parity.
+
+This technique is about *planning and triage*, not “blindly switch to FlashInfer”.
+
+**Why it belongs in MoE work**: in many real deployments, attention or KV-cache plumbing dominates end-to-end. If attention is the hotspot, optimizing MoE cannot deliver the target win even if MoE becomes 0µs.
+
+### Step 1: Determine whether FlashInfer is worth considering (evidence gate)
+
+Only do the FlashInfer survey if Phase‑1 `nsys` shows attention/KV-cache kernels are a top share in the target regime (prefill or decode).
+
+### Step 1.5: How vLLM typically integrates FlashInfer (preferred path)
+
+In vLLM, FlashInfer is usually consumed via **existing config-backed integration points**, not by directly calling FlashInfer APIs from random model code:
+
+- **`torch.compile` / Inductor pattern-rewrite passes** (best example):
+  - Enable via compilation config flags such as:
+    - `-cc.pass_config.fuse_allreduce_rms=true`
+  - vLLM then registers a pass (e.g., AllReduce fusion) that pattern-matches a known subgraph and replaces it with FlashInfer fused kernels when available.
+- **Backend selection via config** (attention/serving):
+  - vLLM exposes attention backend controls that may route into FlashInfer (including TRTLLM attention backend selection through FlashInfer).
+- **Distributed comm helpers**:
+  - Some all-to-all paths can use FlashInfer comm kernels when available.
+
+**Important**: if the FlashInfer kernel family you want is **not already integrated** behind a vLLM config flag / backend selection / compiler pass, then Codex must do the integration itself:
+- add a wrapper/custom-op or backend dispatch site,
+- add shape/dtype/arch guards + a fallback when FlashInfer is missing,
+- make it CUDA-graph friendly (workspace reuse, stable shapes per bucket),
+- add correctness + performance validation evidence under production parity.
+
+### Step 2: Enumerate “available FlashInfer kernels” (kernel families + variants)
+
+Use the `gpu-kernel-optimizer` FlashInfer corpus index as the starting point:
+- `.codex/skills/gpu-kernel-optimizer/references/corpus.flashinfer.md`
+
+Primary “kernel family” entry points (plan/run + backend selection):
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/flashinfer/attention.py` (BatchAttention plan/run, paged KV-cache)
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/flashinfer/decode.py`
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/flashinfer/prefill.py`
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/flashinfer/page.py` (paged KV layout helpers)
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/flashinfer/cascade.py`
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/flashinfer/sparse.py`
+
+Variant/feature definitions (what knobs exist):
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/include/flashinfer/attention/variants.cuh`
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/include/flashinfer/attention/decode.cuh`
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/include/flashinfer/attention/hopper/*` (SM90)
+- `.codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/include/flashinfer/attention/blackwell/*` (SM100)
+
+Practical “gather” recipe (copy/paste):
+```bash
+# List attention-related python entry points
+rg -n \"class BatchAttention|BatchPrefill|BatchDecode|determine_attention_backend\" \
+  .codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/flashinfer
+
+# Jump to CUDA launch sites / bindings
+rg -n \"batch_(decode|prefill|attention)\" \
+  .codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/csrc | head
+
+# Find variant/feature switches (masking, sliding window, alibi, logits soft cap)
+rg -n \"use_(custom_mask|sliding_window|logits_soft_cap|alibi)\" \
+  .codex/skills/gpu-kernel-optimizer/assets/corpora/flashinfer/include/flashinfer/attention/variants.cuh
+```
+
+### Step 3: Compute feasibility (score each kernel family against your target)
+
+For each FlashInfer kernel family you might use (prefill/decode/paged/cascade/sparse), record:
+- **Regime**: decode vs prefill, bucket set (BS, seq_len, head_dim)
+- **Requirements**: dtype(s), head_dim constraints, KV layout (paged), mask/pos-enc features, arch (SM80/SM90/SM100)
+- **Integration cost**:
+  - 1: already supported by vLLM backend selection and matches your config
+  - 3: minor glue (workspace planning / dispatch / guards)
+  - 5: major integration (new backend, API/shape contract changes)
+- **CUDA graph friendliness**: plan/run staging, workspace reuse, shape stability across buckets
+
+Score each candidate (0–5):
+- **Impact**: time share of the targeted attention/KV kernels in `nsys`
+- **Feasibility**: how directly it drops into vLLM for your config (layout/dtype/arch)
+- **Risk**: numerical parity, backend compatibility, graph-capture stability
+
+Write the result as candidate OP rows in the Phase‑2 opportunity list (Section 3A).
+
+### Step 4: Expected ROI sanity-check
+
+Compute a conservative end-to-end bound:
+- If attention share is `s_attn`, a 20% attention speedup cannot yield >`0.2 * s_attn` end-to-end improvement.
+- Use `references/e2e-delta-math.md` style reasoning to avoid chasing impossible wins.
 
 ## Unique Insights (U1-U6)
 

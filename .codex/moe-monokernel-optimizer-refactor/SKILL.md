@@ -11,6 +11,14 @@ Design MoE kernel-fusion optimizations for **vLLM inference** that beat the **pr
 
 production parity, CUDA graphs, torch.compile, fused_moe, FusedMoE, router logits, top_k, renorm, TP, EP, token-major, expert-major, shared experts, cooperative_groups, SM80, SM90, FP8, BF16, nsys, ncu
 
+## Workflow **CRITICAL**
+
+- You **MUST** follow the stage-gated checklist in `orchestration/task-guide.md` (canonical).
+- Use `rg`/grep with the Search anchors above to locate details in references without reading everything.
+- Track resumable progress in `{artifact_dir}/state.json` (recommended).
+- If Phase 4 fails, use `orchestration/investigation-prompts.md` (do not thrash).
+- Use `orchestration/llm-council.md` to decide when to invoke the separate `llm-council` skill.
+
 ## Non‑negotiables
 
 1. **Measure the right baseline (production parity)**
@@ -42,13 +50,9 @@ production parity, CUDA graphs, torch.compile, fused_moe, FusedMoE, router logit
    - Guard the monokernel by the exact envelope you validated (model id, dtype, TP/EP, shapes, batch buckets).
    - Preserve a correct fallback outside the envelope.
 
-## How to execute
-
-- Follow the stage-gated checklist in `orchestration/task-guide.md` (canonical).
-- Use `rg`/grep with the Search anchors above to locate details in references without reading everything.
-- Track resumable progress in `{artifact_dir}/state.json` (recommended).
-- If Phase 4 fails, use `orchestration/investigation-prompts.md` (do not thrash).
-- Use `orchestration/llm-council.md` to decide when to invoke the separate `llm-council` skill.
+7. **Do not skip full-model E2E because “weights aren’t available”**
+   - If you need E2E to compute MoE share `f` (Phase 1) or to validate speedup (Phase 4.3), and the model isn’t cached locally: **download the weights**.
+   - Only skip E2E if the **user explicitly waives** the E2E requirement (or the model is gated and the user cannot/does not want to provide access).
 
 ## Deterministic helper scripts (optional)
 
@@ -56,13 +60,14 @@ These are **measurement + reporting plumbing**. They are designed to be safe def
 
 - `scripts/new_target.py`: scaffold `{artifact_dir}` + `state.json` + `target.json`.
 - `scripts/collect_env.py`: capture `env.json`/`env.md` for reproducible reporting.
-- `scripts/run_vllm_bench_latency_sweep.py`: run baseline vs optimized **batch-size sweep** via `vllm bench latency` (defaults to **dry-run**; requires `--run`).
+- `scripts/run_vllm_bench_latency_sweep.py`: run baseline vs optimized **batch-size sweep** via `vllm bench latency` (loads the model once per label by default; archives existing output dir automatically; emits `logs/` + `status/` heartbeats; supports per-label flags via `bench.{baseline,opt}_extra_args`; use `--out-name ...` to avoid collisions, and `--execution-mode cli_per_bs` for legacy per-batch-size CLI runs).
 - `scripts/generate_validation_report.py`: generate `{artifact_dir}/validation_results.md` from recorded evidence (no guessing).
 
 ## Canonical references (read as needed)
 
 - **Route + ownership decisions**: `references/route-selection-decision-tree.md`
 - **Triage math + stop conditions**: `references/e2e-delta-math.md`, `references/fusion-feasibility-heuristics.md`
+- **Optimization plan template (Phase 2)**: `references/optimization-plan-template.md`
 - **Routing implementation**: `references/router-design.md`
 - **Tiling + SRAM constraints**: `references/tiling-config.md`, `references/gpu-configs.md`
 - **Architecture patterns (post-route)**: `references/architecture-pattern.md`, `references/algorithmic-branching.md`
@@ -82,8 +87,7 @@ Open these only when you need deeper detail or concrete examples:
 - **Reference implementation patch (top_k=1)**: `assets/LLAMA4_MONOKERNEL_PATCH.md`
 - **Worked examples**:
   - `examples/MODELS_COMPARISON.md`
-  - `examples/HYBRID_FUSION_KWAYMERGE_W1_EPILOGUE.md`
-  - `examples/ADVANCED_SONICMOE_ROUTING_PREPARE_PORT.md`
+  - `examples/W1_EPILOGUE_FUSION.md`
 
 ## Required outputs (per target)
 

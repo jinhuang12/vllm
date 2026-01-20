@@ -1,5 +1,7 @@
 # Profiling: Launch/API Time vs Kernel Execution Time
 
+> For practical vLLM nsys commands and MoE-specific workflow, see `nsys-profiling-guide.md`.
+
 MoE optimization discussions often conflate:
 - **CPU launch/API overhead** (Python → CUDA API calls)
 - **GPU kernel execution time** (actual GPU work)

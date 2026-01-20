@@ -21,6 +21,24 @@ vllm bench latency, VLLM_USE_MOE_MONOKERNEL, CUDA graphs, torch.compile, enforce
 
 ## Quickstart
 
+## Ensure model weights are present (do not skip)
+
+If the model is not already cached locally, download the weights before benchmarking.
+
+Common options:
+
+```bash
+# Fast download (if hf_transfer is available in your env)
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# Download into the default HF cache (usually ~/.cache/huggingface/hub)
+huggingface-cli download <MODEL_ID> --local-dir-use-symlinks False
+```
+
+Notes:
+- If the repo is gated and requires acceptance/auth, the download will fail until credentials/terms are satisfied.
+- Do not mark E2E as “NOT RUN” just because the cache was empty; either download, or mark the run as blocked and ask the user for an explicit waiver.
+
 ### Baseline run
 
 ```bash

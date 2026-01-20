@@ -236,6 +236,8 @@ def _target_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
             "runner": "vllm_bench_latency",
             "vllm_cmd": "vllm",
             "extra_args": [],
+            "baseline_extra_args": [],
+            "opt_extra_args": [],
             "baseline_env": {},
             "opt_env": {
                 "VLLM_USE_MOE_MONOKERNEL": "1"
