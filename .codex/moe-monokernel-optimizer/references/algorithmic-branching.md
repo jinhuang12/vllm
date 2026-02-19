@@ -1,158 +1,29 @@
-# Algorithmic Branching Decisions
+# Algorithmic Branching Decisions (Post‑Route)
 
-This document defines the key algorithmic decisions for MoE monokernel optimization.
+Use this **after** you’ve chosen a route + ownership model using:
+- `references/route-selection-decision-tree.md` (route)
+- `references/architecture-pattern.md` (architecture pattern)
+
+This file captures the “branch points” that typically decide correctness *and* performance once the high-level route is fixed.
 
 ## Contents
-- Decision 0: Monokernel Applicability
-- Decision 0b: Ownership Model
-- Decision A: Output Accumulation Path
-- Decision B: Sorter Strategy
-- Decision C: Weight Application Order
-- Decision D: Shared Expert Strategy
-- Decision E: GEMM Strategy
-- Decision F: SRAM Tetris / Tiling
-- Decision G: Warp Configuration
-- Decision H: MMA Selection
+- Decision A: Output accumulation path
+- Decision B: Sorter strategy
+- Decision C: Weight application order
+- Decision D: Shared expert strategy
+- Decision E: GEMM strategy
+- Decision F: SRAM tetris / tiling
+- Decision G: Warp configuration
+- Decision H: MMA selection
+
+## Inputs (from `{artifact_dir}/constraints.md`)
+- Routing semantics (score func, renorm, shared experts, weight placement)
+- Topology: `E_local`, `top_k`, dims (`K`, `N`), TP/EP
+- Quant formats + scale layouts
+- Baseline Truth Snapshot: what is already fused / dominant kernels
 
 ## Search anchors
-Ownership, token-major, expert-major, M_avg, E_local, EP, grid.sync, atomics, fusion boundary, baseline delta.
-
-## Decision 0: Monokernel Applicability
-
-**When to use monokernel vs stock fused_moe.**
-
-This decision must consider **both** saturation and per‑expert M under uniform routing.
-Saturation alone is insufficient for sparse‑M regimes (top_k>1 with large E_global).
-
-**Barrier budget gate**: If the design needs >1–2 grid‑wide `grid.sync` barriers, prefer split‑kernel or token‑major unless M_avg is large and work is balanced.
-
-### Saturation + Uniform‑Routing M_avg
-
-```python
-def m_avg_uniform(batch_size: int, top_k: int, e_global: int) -> float:
-    """
-    Uniform routing estimate:
-      M_avg = expected token‑expert pairs per expert (per rank cancels out).
-    """
-    return (batch_size * top_k) / e_global
-
-
-def should_use_monokernel(batch_size: int, top_k: int, sm_count: int, bs_threshold: int) -> bool:
-    """
-    Saturation measures how well the workload fills the GPU:
-    - Low saturation (< 0.5): SM underutilization, fusion may help
-    - High saturation (>= 0.5): Enough parallelism, stock kernel often OK
-    """
-    saturation = (batch_size * top_k) / sm_count
-    return batch_size <= bs_threshold and saturation < 0.5
-
-# Note: bs_threshold is hardware-specific (see gpu-configs.md).
-```
-
-### M_avg Thresholds (Uniform Routing Heuristic)
-
-```
-M_avg = BS * top_k / E_local   # use E_global only if EP is not pre-dispatch
-
-If M_avg < 8:    expert‑major GEMM is usually under‑utilized → prefer token‑major or split kernels
-If 8–16:         hybrid or benchmark (token‑major down‑proj often wins)
-If >= 16:        expert‑major may be viable (weight reuse can pay off)
-
-If you have routing traces, prefer **measured per‑expert counts** (p50/p95) over uniform M_avg.
-```
-
-### Hardware SM Counts
-
-| GPU | SM Count | Saturation Threshold (BS×K < 0.5×SM) |
-|-----|----------|--------------------------------------|
-| H100 SXM | 132 | BS × top_k < 66 |
-| H200 | 132 | BS × top_k < 66 |
-| L40S | 142 | BS × top_k < 71 |
-| A100 80GB | 108 | BS × top_k < 54 |
-
-### Examples
-
-```python
-# Qwen3-30B-A3B: top_k=8, L40S (142 SMs)
-# BS=1: saturation = 1*8/142 = 0.056 → USE MONOKERNEL
-# BS=8: saturation = 8*8/142 = 0.45 → USE MONOKERNEL  
-# BS=16: saturation = 16*8/142 = 0.90 → USE STOCK
-
-# Llama 4: top_k=1, H200 (132 SMs)
-# BS=1: saturation = 1*1/132 = 0.008 → USE MONOKERNEL
-# BS=64: saturation = 64*1/132 = 0.48 → USE MONOKERNEL
-# BS=128: saturation = 128*1/132 = 0.97 → USE STOCK
-
-# DeepSeek‑like (E_global=256, top_k=8, BS=8)
-# M_avg = 8*8/256 = 0.25 → expert‑major will be sparse → prefer token‑major or split kernels
-
-**EP note**: If EP is enabled and dispatch happens before the kernel, use `E_local` for M_avg and ownership decisions.
-```
-
----
-
-## Decision 0b: Ownership Model (Uniform Routing)
-
-Choose **token‑major** vs **expert‑major** based on M_avg.
-If routing histograms are available, prefer p50/p95 per‑expert counts over uniform M_avg.
-
-```python
-def choose_ownership(batch_size: int, top_k: int, e_global: int) -> str:
-    m_avg = m_avg_uniform(batch_size, top_k, e_global)
-    if m_avg < 8:
-        return "token_major"   # M too small for expert‑major
-    if m_avg < 16:
-        return "hybrid"        # token‑major down‑proj, expert‑major up‑proj
-    return "expert_major"
-```
-
-## Decision 0c: Fusion Boundary
-
-Decide single cooperative kernel vs split kernels **after** ownership is chosen.
-
-Guidelines:
-- **Token‑major**: prefer **split kernels** (prepare/quantize, up‑proj, down‑proj, convert) to avoid grid.sync barriers.
-- **Expert‑major**: cooperative monokernel can be viable if M_avg is large and grid.sync count is low.
-
-## Roofline Justification
-
-**Why monokernel works for low-batch MoE decode.**
-
-### Arithmetic Intensity
-
-```
-AI = FLOPs / Bytes_transferred
-
-For FP8 W8A8 MoE GEMM:
-- FLOPs per output: 2 × K (multiply-add)
-- Bytes per output: K × sizeof(FP8) = K bytes
-- AI ≈ 2 FLOPs/byte
-
-For BF16 MoE GEMM:
-- FLOPs per output: 2 × K
-- Bytes per output: K × sizeof(BF16) = 2K bytes
-- AI ≈ 1 FLOP/byte
-```
-
-### Ridge Point Comparison
-
-| GPU | Peak FP8 TFLOPs | HBM BW (GB/s) | Ridge Point (FLOPs/byte) |
-|-----|-----------------|---------------|--------------------------|
-| H100 SXM | 1979 | 3350 | ~590 |
-| H200 | 1979 | 4800 | ~412 |
-| L40S | 733 | 864 | ~848 |
-
-**MoE decode AI ≈ 1-2 FLOPs/byte**, which is **200-400× below ridge point**.
-
-### Implication
-
-At such low arithmetic intensity, performance is entirely memory-bandwidth limited. The monokernel advantage comes from:
-
-1. **Eliminating HBM round-trips**: Router → SMEM (not HBM) → GEMM
-2. **Fusing quantization**: Quantize activations in registers, not via global memory
-3. **Cooperative loading**: All SMs share weight loading overhead
-
-**Caveat**: In sparse‑M regimes (low per‑expert counts), kernels can be **latency/occupancy/sync‑bound** rather than bandwidth‑bound. Use roofline as one lens, not the sole decision driver.
+accumulation, atomics, block reduce, prefix sum, sort, weight placement, shared experts, grouped GEMM, tiling, warp specialization, MMA, cp.async, TMA
 
 ---
 
@@ -185,6 +56,17 @@ output[token_idx * K + k_idx] += expert_output * routing_weight;  // no atomics
 
 **Use atomics when**: ownership is expert‑major (or Split‑H) and multiple blocks write same output.
 **Avoid atomics when**: token‑major with K‑slice ownership.
+
+### Hopper (sm_90a) policy note: avoid “scatter/atomic epilogues” when they serialize GEMM
+
+On Hopper, if your Phase 1 profiling indicates that output overlap forces heavy atomics or a scatter-like store on the MoE critical path, consider changing the output strategy to:
+
+- **contiguous output** from the down-projection (packed-by-pair or packed-by-expert), then
+- a separate **token-major aggregation** kernel (gather+sum) to produce final `[token, K]`.
+
+Why: this keeps the GEMM epilogue regular and can preserve WGMMA/TMA overlap; irregularity moves into a smaller token-major pass.
+
+Kill criteria (under CUDA graphs): stop if (a) MoE GPU kernel time does not improve for every validated bucket, or (b) NCU shows reduced GEMM tensor-core utilization/occupancy with no compensating savings.
 
 ### Configuration
 

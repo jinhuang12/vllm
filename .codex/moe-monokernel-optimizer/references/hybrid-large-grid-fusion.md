@@ -9,6 +9,9 @@ Use this when the baseline expert GEMM(s) are already strong (high occupancy / g
 - Routing/prepare fusion patterns
 - Validation under CUDA graphs
 
+## Search anchors
+hybrid, large-grid, W1 epilogue fusion, activation, SwiGLU/SiLU, FP8 quantization, routing+prepare fusion, Triton fused_moe_kernel, occupancy, grid.sync, CUDA graphs.
+
 ## Core idea
 
 Keep the baseline **large‑grid expert GEMM kernel(s)** (often Triton `fused_moe_kernel`) and fuse *around* them:

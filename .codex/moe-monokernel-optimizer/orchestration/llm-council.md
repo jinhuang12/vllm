@@ -1,46 +1,47 @@
 # LLM Council Policy
 
-Use `llm-council` as a **de-risking tool** for correctness‑sensitive or high‑impact changes. This file is the single source of truth for when and how to invoke it.
+Use the separate `llm-council` skill as a **de-risking tool** for correctness-sensitive or high-impact decisions.
 
-## Risk‑Tier Policy
+This file defines:
+- when council review is required vs recommended
+- what to prepare for review
+- how to integrate feedback
 
-**Required (high‑risk)**
-- Kernel math / accumulation / reduction changes
-- Memory layout or shared‑memory staging changes (cp.async/TMA)
-- `top_k > 1` routing + accumulation behavior
-- Major tiling or fusion‑boundary changes with cross‑batch impact
+## Risk-tier policy
 
-**Recommended (medium‑risk)**
-- After Phase 2 when the plan makes non‑trivial architectural choices
-- After Phase 4 if conclusions rely on noisy perf signals
-- When stuck after 2+ distinct attempts
+**Required (high risk)**
+- Changes to **math/semantics** (routing scoring, renorm, scaling factors, accumulation/reduction)
+- Any change that affects **numerical equivalence** across tokens/experts
+- Major layout changes (shared-memory staging, cp.async/TMA, reorderings)
+- `top_k > 1` designs with overlap/reduction complexity
+- A large fusion-boundary redesign (cooperative ↔ hybrid ↔ split)
 
-**Optional (low‑risk)**
-- Mechanical refactors, docs, small glue changes with low blast radius
+**Recommended (medium risk)**
+- After Phase 2 when the plan makes non-trivial architectural choices
+- After a Phase 4 investigation when conclusions rely on noisy perf signals
+- When stuck after 2 distinct attempts
 
-## Checkpoints
+**Optional (low risk)**
+- Minor refactors, comments, logging, small guard fixes
 
-For **high‑risk** stages, prefer two checkpoints:
-1. **Approach checkpoint**: before writing significant code
-2. **Implementation checkpoint**: after code + validation, before marking complete
+## How to invoke
 
-For **medium‑risk** stages, one checkpoint (usually final) is sufficient.
+1. Create `.llm-council/context.md` (or `{artifact_dir}/investigation/council_context.md`) with:
+   - target: model, hardware, dtype, TP/EP
+   - baseline truth snapshot (bucket timings)
+   - current route decision and why
+   - the exact change proposal (diff or bullet list)
+   - success criteria + kill criteria
+   - links to relevant artifacts (`constraints.md`, `optimization_plan.md`, traces)
+2. In chat, invoke council by name (example):
+   - “Use llm-council to review my proposed fix for …”
+3. Summarize accepted vs rejected feedback and why, and record it in `state.json`.
 
-## How to Invoke
+## Blocked tasks
 
-1. Invoke the `llm-council` skill by name in chat (e.g., “Use llm-council to review …”).
-2. Follow its instructions to prepare `.llm-council/context.md`.
-3. Run the critics (parallel by default; sequential optional).
-4. Summarize accepted/rejected feedback and why.
-
-## Blocked Tasks
-
-If a stage is blocked after 3 attempts:
-1. Read `{artifact_dir}/blockers/{stage}_blocker.md`.
-2. Invoke `llm-council` for a fresh perspective.
-3. Update blocker/state files with the council’s feedback.
-4. Retry the stage with the new context.
-
-## State Tracking (Recommended)
-
-If invoked, record a short summary in `{artifact_dir}/state.json` for resumability. If not invoked, do **not** block completion.
+If a stage is blocked after **3** attempts:
+1. Write `{artifact_dir}/blockers/{stage}_blocker.md` (what is blocked + what evidence you have).
+2. Invoke council with the blocker context.
+3. Either:
+   - incorporate the guidance and retry once, or
+   - declare `escalate_human` with a handoff summary.

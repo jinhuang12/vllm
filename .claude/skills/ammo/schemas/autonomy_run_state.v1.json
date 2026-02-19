@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Autonomy Run State v1",
+  "type": "object",
+  "required": [
+    "mode",
+    "cycle",
+    "newly_mined_count",
+    "eligible_remaining_count",
+    "terminate_reason"
+  ],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["single_wave", "bounded_exhaustion"]
+    },
+    "cycle": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "newly_mined_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "eligible_remaining_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "terminate_reason": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "no_new_above_threshold",
+        "all_remaining_blocked",
+        "all_remaining_non_improving",
+        "manual_stop"
+      ]
+    }
+  }
+}

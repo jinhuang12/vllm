@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Artifact Bundle v2",
+  "type": "object",
+  "required": [
+    "version",
+    "system",
+    "framework",
+    "workload",
+    "parity",
+    "baseline",
+    "incumbent",
+    "candidates",
+    "validation",
+    "decision",
+    "stage",
+    "status",
+    "last_update"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "2"
+    },
+    "system": {
+      "type": "object",
+      "required": ["gpu", "driver", "cuda"],
+      "properties": {
+        "gpu": {"type": "string"},
+        "driver": {"type": "string"},
+        "cuda": {"type": "string"}
+      }
+    },
+    "framework": {
+      "type": "object",
+      "required": ["name", "adapter", "adapter_maturity"],
+      "properties": {
+        "name": {"type": "string"},
+        "adapter": {"type": "string"},
+        "adapter_maturity": {"type": "string", "enum": ["stable", "beta"]},
+        "adapter_config": {"type": "object"}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "required": ["model_id", "dtype", "buckets"],
+      "properties": {
+        "model_id": {"type": "string"},
+        "dtype": {"type": "string"},
+        "tp": {"type": "integer"},
+        "ep": {"type": "integer"},
+        "buckets": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "parity": {
+      "type": "object",
+      "properties": {
+        "cuda_graphs": {"type": "string"},
+        "torch_compile": {"type": "string"},
+        "notes": {"type": "string"}
+      }
+    },
+    "baseline": {"type": "object"},
+    "incumbent": {"type": "object"},
+    "candidates": {
+      "type": "array",
+      "items": {"$ref": "opportunity_record.v1.json"}
+    },
+    "validation": {"type": "object"},
+    "decision": {"$ref": "maintenance_decision.v1.json"},
+    "stage": {"type": "string"},
+    "status": {"type": "string"},
+    "last_update": {"type": "string"}
+  }
+}

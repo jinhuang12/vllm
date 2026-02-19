@@ -1,0 +1,33 @@
+{
+  "name": "my-project-adapter",
+  "maturity": "beta",
+  "supported_regimes": [
+    "default"
+  ],
+  "baseline_cmd_templates": [
+    "{baseline_command}"
+  ],
+  "profile_cmd_templates": [
+    "{profile_command}"
+  ],
+  "e2e_cmd_templates": [
+    "{e2e_command}"
+  ],
+  "mining_evidence": {
+    "workflow_summary": "Describe how Stage 2 bottlenecks are mined and ranked for this adapter.",
+    "required_artifacts": [
+      "{artifact_dir}/nsys_mining.md",
+      "{artifact_dir}/nsys_mining.json"
+    ]
+  },
+  "fastpath_evidence_rules": {
+    "require_patterns": [],
+    "forbid_patterns": []
+  },
+  "parallel_safe": true,
+  "parallel_hypothesis_limit": 3,
+  "parallel_notes": "Document contention and isolation requirements for concurrent candidate runs.",
+  "known_limitations": [
+    "Fill this list with explicit unsupported scenarios"
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "name": "vllm",
+  "maturity": "stable",
+  "supported_regimes": [
+    "offline-benchmark",
+    "serve-like-latency"
+  ],
+  "baseline_cmd_templates": [
+    "python scripts/collect_env.py --artifact-dir {artifact_dir}",
+    "{baseline_command}"
+  ],
+  "profile_cmd_templates": [
+    "{profile_command}"
+  ],
+  "e2e_cmd_templates": [
+    "python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}"
+  ],
+  "mining_evidence": {
+    "workflow_summary": "Use $vllm-fusion-opportunity-miner on exported nsys sqlite, then rank Stage 2 opportunities from nsys_mining outputs.",
+    "required_artifacts": [
+      "{artifact_dir}/nsys_mining.md",
+      "{artifact_dir}/nsys_mining.json"
+    ]
+  },
+  "fastpath_evidence_rules": {
+    "require_patterns": [],
+    "forbid_patterns": []
+  },
+  "parallel_safe": true,
+  "parallel_hypothesis_limit": 3,
+  "parallel_notes": "Use isolated worktrees and avoid overlapping benchmark windows on the same GPU when collecting promotion-grade evidence.",
+  "known_limitations": [
+    "baseline_command and profile_command must be provided per deployment because vLLM launch flags vary by model/runtime configuration",
+    "E2E sweep expects {artifact_dir}/target.json to exist and be production-parity configured",
+    "This adapter does not infer correctness tolerances; define tolerances in validation artifacts before ship decisions"
+  ]
+}

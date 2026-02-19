@@ -1,5 +1,7 @@
 # Profiling: Launch/API Time vs Kernel Execution Time
 
+> For practical vLLM nsys commands and MoE-specific workflow, see `nsys-profiling-guide.md`.
+
 MoE optimization discussions often conflate:
 - **CPU launch/API overhead** (Python → CUDA API calls)
 - **GPU kernel execution time** (actual GPU work)
@@ -54,4 +56,3 @@ NCU is the right tool for “why is my fused kernel slower even though it does l
 - If your baseline already runs under CUDA graphs and kernel time dominates, “launch overhead” savings are often single‑digit µs.
 - If your fused kernel increases dynamic shared memory enough to go from 2 CTAs/SM → 1 CTA/SM, it can lose even if it saves memory traffic.
 - If your approach adds `grid.sync`, treat it like a tax that must be amortized by substantial work per barrier.
-

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMMO"
+  short_description: "Stage-gated NVIDIA GPU optimization orchestrator with parallel top-3 execution"
+  default_prompt: "Use $ammo to run constraints -> baseline/profiling -> optimization plan -> parallel top-3 implementation via multi-agent worktrees -> hybrid validation (subagent local + orchestrator acceptance) -> bounded-exhaustion autonomy until termination reason is explicit -> ROI decision. Require machine-readable validation summary and pass check_parallel_evidence/check_validation_results/check_autonomy_completion before marking run complete."

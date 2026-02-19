@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Validation Record v1",
+  "type": "object",
+  "required": [
+    "run_id",
+    "candidate_id",
+    "layer",
+    "gate",
+    "result",
+    "run_context",
+    "command_fingerprint",
+    "evidence_paths",
+    "record_hash"
+  ],
+  "properties": {
+    "run_id": {"type": "string"},
+    "candidate_id": {"type": "string"},
+    "layer": {"type": "string", "enum": ["local", "acceptance"]},
+    "gate": {"type": "string", "enum": ["correctness", "kernel", "e2e"]},
+    "result": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]},
+    "run_context": {"type": "string"},
+    "command_fingerprint": {"type": "string"},
+    "evidence_paths": {"type": "array", "items": {"type": "string"}},
+    "record_hash": {"type": "string"}
+  }
+}

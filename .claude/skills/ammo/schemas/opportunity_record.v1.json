@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Opportunity Record v1",
+  "type": "object",
+  "required": [
+    "id",
+    "scope",
+    "evidence",
+    "impact_score",
+    "feasibility_score",
+    "risk_score",
+    "priority",
+    "incumbent_interaction"
+  ],
+  "properties": {
+    "id": {"type": "string"},
+    "scope": {"type": "string", "enum": ["kernel", "graph", "runtime"]},
+    "evidence": {"type": "string"},
+    "impact_score": {"type": "number"},
+    "feasibility_score": {"type": "number"},
+    "risk_score": {"type": "number"},
+    "priority": {"type": "number"},
+    "incumbent_interaction": {"type": "string", "enum": ["preserve", "modify", "disable"]}
+  }
+}

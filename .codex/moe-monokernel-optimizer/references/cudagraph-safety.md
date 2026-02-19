@@ -1,43 +1,60 @@
 # CUDA Graphs Safety Checklist (Custom CUDA Ops)
 
-This is a high‑frequency failure mode in MoE optimization work: a kernel “works” in eager but fails (or silently slows down) under CUDA graphs.
+A common failure mode in MoE optimization work is a custom CUDA op that:
+- works in eager mode, but
+- fails during CUDA graph capture, causes graph breaks, or silently regresses latency under graphs.
 
-## Required: stream correctness
+Use this checklist for *every* new custom op on the hot path.
 
-- Launch kernels on the **current PyTorch stream**, not the CUDA default stream.
-  - In C++/CUDA extensions: use `at::cuda::getDefaultCUDAStream()` only if you have explicitly switched; otherwise use `at::cuda::getDefaultCUDAStream()` is wrong for graph capture in typical vLLM flows.
-  - Prefer: `cudaStream_t stream = at::cuda::getDefaultCUDAStream()` only when PyTorch is actually running on that stream; otherwise use `at::cuda::getDefaultCUDAStream()` is misleading.
-  - Practical rule: use `at::cuda::getDefaultCUDAStream()` **never** for vLLM; use `at::cuda::getCurrentCUDAStream()` instead.
+## 1) Stream correctness (must)
 
-## Required: device + stream guards
+**Rule:** launch on the **current PyTorch CUDA stream** for the current device.
 
-- Use `at::cuda::CUDAGuard` (or equivalent) to ensure the right device is set before launching.
-- Do not call `cudaDeviceSynchronize()` or introduce host syncs inside code that may run during capture.
+In C++/CUDA extensions, prefer:
 
-## Required: allocations and shape stability
+```cpp
+#include <ATen/cuda/CUDAContext.h>
+cudaStream_t stream = at::cuda::getDefaultCUDAStream();   // usually NOT what you want
+cudaStream_t stream = at::cuda::getCurrentCUDAStream();   // what you want for graph capture
+```
 
-- Avoid allocating temporary tensors inside the capture region.
-  - Prefer: preallocate scratch buffers (workspace) and reuse.
-- Ensure capture uses stable shapes:
-  - Same batch buckets, same hidden dims, same top_k, same quant format.
-  - If your kernel has dynamic shared memory size, keep it constant within a bucket.
+Rationale:
+- vLLM / PyTorch may run work on non-default streams (especially with graphs).
+- Launching on the default stream can introduce hidden sync and/or break capture assumptions.
 
-## Required: error visibility
+## 2) Device + stream guards (must)
 
-For debugging capture failures:
-- Set `CUDA_LAUNCH_BLOCKING=1` to surface the true failing op (slow, but clarifies).
-- Use `TORCH_SHOW_CPP_STACKTRACES=1` for better call stacks.
+- Use `at::cuda::CUDAGuard` (or equivalent) to set the correct device before launching.
+- Do not call `cudaDeviceSynchronize()` or introduce any host-side synchronization in code that can run during capture.
+- If you must synchronize for debugging, gate it behind a debug env var and keep it off by default.
 
-## Verification procedure (minimum)
+## 3) Allocations + shape stability (must)
 
-1. Run eager correctness test.
-2. Run the same correctness test with CUDA graphs enabled (or within `vllm bench latency`).
-3. Nsight Systems trace: confirm your op is captured and not causing graph breaks.
+- **No allocations during capture**:
+  - Avoid `at::empty`, `new`, `malloc`, or creating temporary tensors inside the captured region.
+  - Prefer: explicit workspaces that are preallocated and reused.
+- **Stable shapes per bucket**:
+  - CUDA graphs require stable shapes for captured paths.
+  - Ensure the op sees consistent shapes within a bucket (same hidden dims, same top_k, same quant format, same workspace sizes).
+- If your kernel uses dynamic shared memory, keep the dynamic SMEM size constant within a bucket.
 
-## Common gotchas
+## 4) Error visibility (debug toolkit)
 
-- Accidentally using the default stream in a custom op: passes eager, crashes or misbehaves in capture.
-- Hidden device mismatch (multi‑GPU/TP): kernel launches on a different device than inputs.
-- Implicit allocations during capture (e.g., creating small tensors, calling `at::empty`).
-- Divergent control flow by batch size bucket that changes dynamic SMEM requirements.
+When capture fails or output is wrong:
+- `CUDA_LAUNCH_BLOCKING=1` (slow, but surfaces the true failing op)
+- `TORCH_SHOW_CPP_STACKTRACES=1` (better call stacks)
 
+## 5) Minimum verification procedure
+
+1. Eager correctness test (unit test or small harness).
+2. The *same* correctness test under CUDA graphs (or within `vllm bench latency` with graphs enabled).
+3. Nsight Systems trace:
+   - Confirm your op is captured (no graph breaks).
+   - Confirm there are no unexpected gaps, memcpys, or sync nodes.
+
+## 6) Common gotchas (quick scan)
+
+- Default-stream launches in a graph-captured workload.
+- Hidden device mismatch in multi-GPU (TP/EP) setups.
+- Implicit temporary allocations during capture.
+- Divergent control flow by bucket that changes workspace or dynamic SMEM requirements.

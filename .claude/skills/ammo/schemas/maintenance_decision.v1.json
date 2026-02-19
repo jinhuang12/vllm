@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Maintenance Decision v1",
+  "type": "object",
+  "required": [
+    "correctness_gate",
+    "kernel_gate",
+    "e2e_gate",
+    "roi_tier",
+    "complexity_penalty",
+    "ship_recommendation",
+    "envelope",
+    "rollback"
+  ],
+  "properties": {
+    "correctness_gate": {"type": "string", "enum": ["pass", "fail", "waived", "blocked"]},
+    "kernel_gate": {"type": "string", "enum": ["pass", "fail", "waived", "blocked"]},
+    "e2e_gate": {"type": "string", "enum": ["pass", "fail", "waived", "blocked"]},
+    "roi_tier": {"type": "string", "enum": ["S", "A", "B", "C"]},
+    "complexity_penalty": {"type": "string"},
+    "ship_recommendation": {"type": "string", "enum": ["ship", "ship_restricted", "reject"]},
+    "envelope": {"type": "string"},
+    "rollback": {"type": "string"}
+  }
+}

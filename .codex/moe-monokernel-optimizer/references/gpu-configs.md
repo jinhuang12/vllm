@@ -28,17 +28,19 @@ SM arch, SMEM, registers, cooperative grid, occupancy, M_avg, EP.
 | RTX 4090 | sm_89 | 100 KB | ✓ | ✗ | BS ≤ 32 |
 | RTX 3090 | sm_86 | 100 KB | ✗ | ✗ | BS ≤ 32 |
 
-## Monokernel Zone Explanation
+## Monokernel “try zone” (rule of thumb)
 
-The **Monokernel Zone** is the batch size range where fused monokernel beats standard CUTLASS/Triton grouped GEMM **when M_avg is small**.
+These thresholds answer only: “**is it worth trying** a cooperative monokernel for decode-like buckets on this GPU?”
+They are not sufficient to pick ownership/fusion boundaries. Use `references/route-selection-decision-tree.md` for route selection.
 
-**Always compute**: `M_avg = BS * top_k / E_local` (use E_global only if EP is not pre‑dispatch). If `M_avg >= 8`, monokernel is often a poor fit; prefer split‑kernel or expert‑grouped GEMM.
+Rule of thumb:
+- Smaller batches underfill large-grid GEMMs; cooperative fusion *may* win if it avoids DRAM hops and keeps barriers low.
+- Larger batches saturate the GPU; hybrid/split designs tend to win unless you have a very large hop to remove.
 
-**Why thresholds differ by hardware:**
-- **H200 (3.35 TB/s)**: High bandwidth means monokernel's fusion benefits persist to larger batches
-- **L40S (864 GB/s)**: Lower bandwidth means dense kernels catch up faster as batch grows
+Practical guidance:
+- Benchmark a bucket sweep (e.g., BS=1→128) and record the crossover point in your Phase 1 snapshot.
+- Always compute `P=BS*top_k` and `M_avg≈BS*top_k/E_local` from `constraints.md`.
 
-**Recommended approach**: Benchmark BS=1 to BS=128, find crossover point.
 
 ## TMA (Tensor Memory Accelerator)
 

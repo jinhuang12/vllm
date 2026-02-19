@@ -5,7 +5,7 @@ description: Design and implement MoE kernel fusion optimizations for vLLM infer
 
 # MoE Monokernel Optimizer
 
-Design specialized MoE kernels for vLLM that reduce launch overhead and memory traffic by fusing phases when beneficial.
+Design MoE kernel-fusion optimizations for **vLLM inference** that beat the **production-parity baseline** (CUDA graphs / torch.compile), without regressing correctness.
 
 ## Search Anchors
 
@@ -96,7 +96,7 @@ Phase 4: Validation      → {artifact_dir}/validation_results.md
 Phase 5: Integration     → vLLM dispatch path
 ```
 
-See `orchestration/checklist.md` for detailed phase gates.
+You **MUST** follow the stage-gated checklist in `orchestration/task-guide.md` (canonical)
 
 ### State File
 
@@ -137,6 +137,10 @@ Use `rg`/grep with search anchors to locate details.
 | E2E math | `references/e2e-delta-math.md` |
 | Graph safety | `references/cudagraph-safety.md` |
 | Investigation | `references/investigation-playbook.md` |
+
+### Worked examples
+- `examples/MODELS_COMPARISON.md`
+- `examples/W1_EPILOGUE_FUSION.md`
 
 ## LLM Council (Recommended)
 

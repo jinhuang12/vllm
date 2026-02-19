@@ -1,60 +1,34 @@
 # MoE Monokernel Optimization Guide for vLLM
 
+## How to use this guide
+- Treat `references/optimization-techniques.md` as the **compact technique catalog**.
+- Use this file as a **narrative deep dive** into the Llama4-style cooperative monokernel design and its tradeoffs.
+
+## Contents
+- Overview (production-parity framing)
+- Key dimensions and specialization strategy
+- Kernel design notes (routing/prepare/quant/GEMMs)
+- Tiling, SMEM/regs budgeting, and multi-buffering
+- Cooperative-grid costs (`grid.sync`) and when to avoid them
+- Debugging + profiling pointers
+
+## Search anchors
+Llama4, top_k=1, cooperative monokernel, cooperative_groups, grid.sync, dynamic shared memory, FP8, cp.async, tensor cores, tiling, multi-buffering, scratchpad.
+
+
 ## Overview
 
 This document describes advanced CUDA kernel optimization techniques for Mixture-of-Experts (MoE) models, based on the monokernel implementation for Llama4 Scout/Maverick in vLLM 0.10.2. The patch replaces vLLM's standard multi-kernel MoE implementation with a **single cooperative kernel** that fuses routing, token preparation, input quantization, up-projection GEMM, SiLU activation, and down-projection GEMM.
 
-**Key Insight**: For small batch sizes (≤64 tokens), kernel launch overhead and intermediate memory traffic dominate compute time.
+**Key Insight**: Small decode buckets can be overhead- and memory-hop-sensitive in **eager** mode, but under **CUDA graphs / torch.compile** the launch/API component is often amortized. In production-parity runs, fusion must usually win by reducing **kernel time** (or by eliminating **DRAM-level** intermediate traffic), not just by reducing kernel count.
 
 **Important**: This guide is based on a top_k=1 Llama4 monokernel. Do not assume a single cooperative kernel is always optimal. For top_k>1 with large E, use M_avg and ownership to decide the fusion boundary; split-kernel or grouped GEMM often wins.
 
----
-
-## Pattern Taxonomy (choose before optimizing)
-
-- **Pattern A: Cooperative expert‑major monokernel**  
-  One persistent kernel, expert‑major ownership, grid.sync between phases.
-- **Pattern B: Token‑major / token‑owned output**  
-  Each block owns a token + K‑slice; avoids atomics and reduces sync pressure.
-- **Pattern C: Hybrid**  
-  Expert‑major up‑proj, token‑major down‑proj (common for top_k>1).
-- **Pattern D: Split kernels + CUDA graphs**  
-  Router/prepare and GEMMs separated; relies on graphs/compile to remove launch overhead.
-
-Use Pattern A only when M_avg and ownership justify cooperative sync.
-
-## Execution Flow Comparison
-
-### Standard vLLM (5-7 kernel launches)
-```
-[Routing] → GlobalMem → [Permute] → GlobalMem → [Quantize] → GlobalMem → [GEMM1] → GlobalMem → [Activation] → GlobalMem → [GEMM2]
-```
-
-### Monokernel (1 cooperative kernel)
-```
-[Single Kernel]
-  ├─ Routing (shared memory)
-  ├─ Prepare/Sort (shared memory)  
-  ├─ Scale/Quantize (shared memory → scratchpad)
-  ├─ Up-Projection + SiLU (shared memory)
-  ├─ grid.sync()
-  └─ Down-Projection (shared memory → output)
-```
-
-**Avoid cooperative grid.sync** when per‑expert token counts are highly imbalanced (EP + top_k>1) or when CUDA graphs already remove launch overhead.
-
-### Split-Kernel (2-3 kernel launches)
-```
-[Router/Prepare] → [Up-Projection + Activation] → [Down-Projection]
-```
-
-| Aspect | Standard vLLM | Monokernel | Impact |
-|--------|---------------|------------|--------|
-| Kernel launches | 5-7 | 1 | Eliminates ~15-30μs overhead |
-| Global memory round-trips | 6+ | 2 | ~4x bandwidth reduction |
-| Intermediate tensors | Multiple allocations | Single scratchpad | Reduced memory footprint |
-
-**Decision Metric**: Fusion is beneficial when `kernel_launch_overhead × num_kernels > compute_time × 0.1`. For BS 8-64, the ~5μs per kernel launch is significant relative to ~50-100μs compute time.
+**Decision Metric (production parity)**:
+1) Use Nsight Systems under CUDA graphs to find the required µs savings to beat baseline.  
+2) Compute a fusion **memory-hop upper bound** (bytes_saved → time_saved_max_us).  
+3) If the upper bound is smaller than the required savings, the fusion is low-probability unless it is a “true epilogue” that does not reduce GEMM occupancy/grid.  
+See `references/fusion-feasibility-heuristics.md`.
 
 ---
 

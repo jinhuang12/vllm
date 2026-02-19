@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Adapter Manifest v1",
+  "type": "object",
+  "required": [
+    "name",
+    "maturity",
+    "supported_regimes",
+    "baseline_cmd_templates",
+    "profile_cmd_templates",
+    "e2e_cmd_templates",
+    "mining_evidence",
+    "fastpath_evidence_rules",
+    "known_limitations"
+  ],
+  "properties": {
+    "name": {"type": "string"},
+    "maturity": {"type": "string", "enum": ["stable", "beta"]},
+    "supported_regimes": {"type": "array", "items": {"type": "string"}},
+    "baseline_cmd_templates": {"type": "array", "items": {"type": "string"}},
+    "profile_cmd_templates": {"type": "array", "items": {"type": "string"}},
+    "e2e_cmd_templates": {"type": "array", "items": {"type": "string"}},
+    "mining_evidence": {
+      "type": "object",
+      "required": ["workflow_summary", "required_artifacts"],
+      "properties": {
+        "workflow_summary": {"type": "string"},
+        "required_artifacts": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "fastpath_evidence_rules": {
+      "type": "object",
+      "required": ["require_patterns", "forbid_patterns"],
+      "properties": {
+        "require_patterns": {"type": "array", "items": {"type": "string"}},
+        "forbid_patterns": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "parallel_safe": {"type": "boolean"},
+    "parallel_hypothesis_limit": {"type": "integer", "minimum": 1},
+    "parallel_notes": {"type": "string"},
+    "known_limitations": {"type": "array", "items": {"type": "string"}}
+  }
+}

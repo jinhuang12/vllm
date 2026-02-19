@@ -1,0 +1,267 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Artifact Bundle v4",
+  "type": "object",
+  "required": [
+    "version",
+    "system",
+    "framework",
+    "workload",
+    "parity",
+    "constraints",
+    "baseline",
+    "incumbent",
+    "candidates",
+    "validation",
+    "decision",
+    "stage",
+    "status",
+    "last_update",
+    "execution_mode",
+    "autonomy_mode",
+    "orchestration",
+    "parallel_candidates",
+    "acceptance_validation",
+    "exhaustion_state",
+    "validation_convergence",
+    "promotion_history"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "4"
+    },
+    "system": {
+      "type": "object",
+      "required": ["gpu", "driver", "cuda"],
+      "properties": {
+        "gpu": {"type": "string"},
+        "driver": {"type": "string"},
+        "cuda": {"type": "string"}
+      }
+    },
+    "framework": {
+      "type": "object",
+      "required": ["name", "adapter", "adapter_maturity"],
+      "properties": {
+        "name": {"type": "string"},
+        "adapter": {"type": "string"},
+        "adapter_maturity": {"type": "string", "enum": ["stable", "beta"]},
+        "adapter_config": {"type": "object"}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "required": ["model_id", "dtype", "buckets"],
+      "properties": {
+        "model_id": {"type": "string"},
+        "dtype": {"type": "string"},
+        "tp": {"type": "integer"},
+        "ep": {"type": "integer"},
+        "buckets": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "parity": {
+      "type": "object",
+      "properties": {
+        "cuda_graphs": {"type": "string"},
+        "torch_compile": {"type": "string"},
+        "notes": {"type": "string"}
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "required": [
+        "status",
+        "snapshot_id",
+        "evidence_links",
+        "parity_signature",
+        "adapter_required_fields_complete",
+        "notes"
+      ],
+      "properties": {
+        "status": {"type": "string", "enum": ["pending", "complete", "blocked"]},
+        "snapshot_id": {"type": "string"},
+        "evidence_links": {"type": "array", "items": {"type": "string"}},
+        "parity_signature": {"type": "string"},
+        "adapter_required_fields_complete": {"type": "boolean"},
+        "notes": {"type": "string"}
+      }
+    },
+    "baseline": {"type": "object"},
+    "incumbent": {"type": "object"},
+    "candidates": {
+      "type": "array",
+      "items": {"$ref": "opportunity_record.v1.json"}
+    },
+    "validation": {"type": "object"},
+    "decision": {"$ref": "maintenance_decision.v1.json"},
+    "stage": {"type": "string"},
+    "status": {"type": "string"},
+    "last_update": {"type": "string"},
+    "execution_mode": {
+      "type": "string",
+      "enum": ["parallel_default", "serial"]
+    },
+    "autonomy_mode": {
+      "type": "string",
+      "enum": ["single_wave", "bounded_exhaustion"]
+    },
+    "orchestration": {
+      "type": "object",
+      "required": ["strategy", "monitor_policy", "last_checkpoint", "interventions"],
+      "properties": {
+        "strategy": {"type": "string"},
+        "monitor_policy": {"type": "string"},
+        "last_checkpoint": {"type": "string"},
+        "interventions": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "parallel_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "candidate_id",
+          "rank",
+          "worktree_path",
+          "branch",
+          "subagent_id",
+          "state",
+          "local_validation",
+          "acceptance_validation",
+          "evidence_manifest",
+          "checkpoints",
+          "blockers"
+        ],
+        "properties": {
+          "candidate_id": {"type": "string"},
+          "rank": {"type": "integer", "minimum": 1},
+          "worktree_path": {"type": "string"},
+          "branch": {"type": "string"},
+          "subagent_id": {"type": "string"},
+          "state": {
+            "type": "string",
+            "enum": ["pending", "running", "pass", "fail", "blocked", "aborted"]
+          },
+          "local_validation": {
+            "type": "object",
+            "required": ["correctness", "kernel", "e2e"],
+            "properties": {
+              "correctness": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]},
+              "kernel": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]},
+              "e2e": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]}
+            }
+          },
+          "acceptance_validation": {
+            "type": "object",
+            "required": ["correctness", "kernel", "e2e"],
+            "properties": {
+              "correctness": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]},
+              "kernel": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]},
+              "e2e": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]}
+            }
+          },
+          "evidence_manifest": {"type": "string"},
+          "checkpoints": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["timestamp", "status", "note"],
+              "properties": {
+                "timestamp": {"type": "string"},
+                "status": {"type": "string"},
+                "note": {"type": "string"}
+              }
+            }
+          },
+          "blockers": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "acceptance_validation": {
+      "type": "object",
+      "required": ["status", "summary"],
+      "properties": {
+        "status": {"type": "string", "enum": ["pending", "in_progress", "complete", "blocked"]},
+        "summary": {"type": "string"}
+      }
+    },
+    "exhaustion_state": {
+      "type": "object",
+      "required": [
+        "cycle",
+        "newly_mined_count",
+        "eligible_remaining_count",
+        "terminate_reason"
+      ],
+      "properties": {
+        "cycle": {"type": "integer", "minimum": 0},
+        "newly_mined_count": {"type": "integer", "minimum": 0},
+        "eligible_remaining_count": {"type": "integer", "minimum": 0},
+        "terminate_reason": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "no_new_above_threshold",
+            "all_remaining_blocked",
+            "all_remaining_non_improving",
+            "manual_stop"
+          ]
+        }
+      }
+    },
+    "validation_convergence": {
+      "type": "object",
+      "required": ["failure_signatures"],
+      "properties": {
+        "failure_signatures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "candidate_id",
+              "gate",
+              "signature",
+              "consecutive_count",
+              "action"
+            ],
+            "properties": {
+              "candidate_id": {"type": "string"},
+              "gate": {"type": "string", "enum": ["correctness", "kernel", "e2e"]},
+              "signature": {"type": "string"},
+              "consecutive_count": {"type": "integer", "minimum": 0},
+              "action": {
+                "type": "string",
+                "enum": ["continue", "blocked", "escalate_human"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "promotion_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "step",
+          "candidate_id",
+          "stack_state",
+          "acceptance_gate_hash",
+          "status"
+        ],
+        "properties": {
+          "step": {"type": "integer", "minimum": 1},
+          "candidate_id": {"type": "string"},
+          "stack_state": {"type": "string"},
+          "acceptance_gate_hash": {"type": "string"},
+          "status": {
+            "type": "string",
+            "enum": ["kept", "dropped", "rolled_back"]
+          }
+        }
+      }
+    }
+  }
+}

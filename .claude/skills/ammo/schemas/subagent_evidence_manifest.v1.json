@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMMO Subagent Evidence Manifest v1",
+  "type": "object",
+  "required": [
+    "version",
+    "run_id",
+    "candidate_id",
+    "subagent_id",
+    "baseline",
+    "candidate",
+    "command_fingerprint",
+    "gate_run_ids",
+    "artifact_hashes",
+    "activation_proof",
+    "gates",
+    "artifacts",
+    "notes"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1"
+    },
+    "run_id": {"type": "string"},
+    "candidate_id": {"type": "string"},
+    "subagent_id": {"type": "string"},
+    "baseline": {
+      "type": "object",
+      "required": ["command", "env", "flags"],
+      "properties": {
+        "command": {"type": "string"},
+        "env": {"type": "object", "additionalProperties": {"type": "string"}},
+        "flags": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["command", "env", "flags", "delta_summary"],
+      "properties": {
+        "command": {"type": "string"},
+        "env": {"type": "object", "additionalProperties": {"type": "string"}},
+        "flags": {"type": "array", "items": {"type": "string"}},
+        "delta_summary": {"type": "string"}
+      }
+    },
+    "command_fingerprint": {"type": "string"},
+    "gate_run_ids": {
+      "type": "object",
+      "required": ["correctness", "kernel", "e2e"],
+      "properties": {
+        "correctness": {"type": "string"},
+        "kernel": {"type": "string"},
+        "e2e": {"type": "string"}
+      }
+    },
+    "artifact_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "activation_proof": {
+      "type": "object",
+      "required": ["required_signatures", "observed_signatures", "proof_artifacts"],
+      "properties": {
+        "required_signatures": {"type": "array", "items": {"type": "string"}},
+        "observed_signatures": {"type": "array", "items": {"type": "string"}},
+        "proof_artifacts": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "gates": {
+      "type": "object",
+      "required": ["correctness", "kernel", "e2e"],
+      "properties": {
+        "correctness": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]},
+        "kernel": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]},
+        "e2e": {"type": "string", "enum": ["pass", "fail", "blocked", "not_run"]}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "required": ["correctness", "kernel", "e2e"],
+      "properties": {
+        "correctness": {"type": "array", "items": {"type": "string"}},
+        "kernel": {"type": "array", "items": {"type": "string"}},
+        "e2e": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "notes": {"type": "string"}
+  }
+}

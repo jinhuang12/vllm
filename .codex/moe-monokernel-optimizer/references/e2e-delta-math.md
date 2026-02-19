@@ -30,4 +30,3 @@ I_target <= f * (1 - s)  =>  (1 - s) >= I_target / f
 If `I_target / f` is implausibly large, switch to:
 - hybrid large‑grid fusion to harvest the most reliable µs wins, or
 - document the limitation and stop.
-

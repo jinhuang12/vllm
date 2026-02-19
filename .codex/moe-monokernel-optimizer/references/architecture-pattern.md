@@ -1,9 +1,10 @@
-# Kernel Architecture Patterns
+# Kernel Architecture Patterns (Post‑Route)
 
-This document describes the kernel architectures used in MoE monokernel optimization.
+Use this after you choose a route in `references/route-selection-decision-tree.md`.
+
+This file is about **how to structure kernels** (controller/worker, split-kernel flows, hybrid ownership), not about whether you *should* pick them.
 
 ## Contents
-- Pattern Selection (Monokernel vs Split)
 - Token-Major Ownership Pattern
 - Split-Kernel Pattern
 - Hybrid Pattern
@@ -11,15 +12,14 @@ This document describes the kernel architectures used in MoE monokernel optimiza
 - Split-H Strategy
 
 ## Search anchors
-token-major, expert-major, hybrid, split-kernel, cooperative, grid.sync, atomics, EP.
+token-major, expert-major, hybrid, split-kernel, cooperative, grid.sync, atomics, EP
 
-## Pattern Selection (Monokernel vs Split)
+## Where selection happens
+- Route (cooperative vs hybrid vs split): `references/route-selection-decision-tree.md`
+- Hardware guardrails (cooperative limits, batch thresholds): `references/gpu-configs.md`
+- “Is fusion worth it?” math: `references/fusion-feasibility-heuristics.md`
 
-Use ownership and M_avg to pick an architecture:
-
-- Token-major ownership + low M_avg: monokernel can work well and avoid atomics.
-- Expert-major ownership or high M_avg: prefer split-kernel or grouped GEMM.
-- In-kernel routing: only required when routing must be fused; otherwise route outside and pass top-k data in.
+---
 
 ## Token-Major Ownership Pattern
 
@@ -61,6 +61,9 @@ Typical flow:
 1. Router kernel: compute top-k ids and weights (optional sorting)
 2. Prepare kernel: build packed token/expert lists
 3. GEMM kernel: grouped by expert or token-major K-slice
+
+Hopper note (sm_90a):
+- If output overlap would force heavy atomics or scatter-like stores on the critical path, consider producing a **contiguous** intermediate and doing a separate **token-major aggregation** (gather+sum) kernel.
 
 ---
 
