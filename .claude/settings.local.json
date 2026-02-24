@@ -1,0 +1,53 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(wc:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)",
+      "Bash(find:*)",
+      "Bash(xargs ls:*)",
+      "Skill(pytorch-profiler-skill)",
+      "WebFetch(domain:docs.vllm.ai)",
+      "WebFetch(domain:docs.nvidia.com)"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-precompact.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-postcompact.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "TaskUpdate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-gate-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
