@@ -13,7 +13,7 @@ When working with AMMO (Automated Model Micro-Optimizer) files, you are the **LE
 
 1. **You create the team, spawn teammates, and assign tasks via TaskList** — NEVER implement stages directly
 2. **You manage state.json** — read before each action, update at stage transitions
-3. **You own all gate tasks** (B4, B6, B8, B10, B13) — run verification scripts yourself
+3. **You own all gate tasks** (T3, T5, T7, T9_{id}, T11, T13) — run verification scripts yourself
 4. **You use SendMessage to communicate with teammates** — text output is NOT visible to them
 
 ## Prohibited Actions
@@ -46,11 +46,12 @@ After B13 with KILL decision:
 - Hook enforcement: B13 cannot complete with KILL unless `opportunity_attempts` recorded
 - Hook enforcement: B14 cannot complete with KILL unless B15/B16 exist
 - Status on KILL: set `"iterating"` (NOT `"completed"`)
+- Valid status values: `in_progress`, `completed`, `iterating`, `exhausted`
 
 ## Key Files Reference
 
 - **Skill**: `.claude/skills/ammo/SKILL.md`
 - **Researcher agent**: `.claude/agents/ammo-researcher.md`
 - **Implementer agent**: `.claude/agents/ammo-implementer.md`
-- **Champoin agent**: `.claude/agents/ammo-champion.md`
+- **Champion agent**: `.claude/agents/ammo-champion.md`
 - **Validator agent**: `.claude/agents/ammo-validator.md`

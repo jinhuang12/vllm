@@ -42,7 +42,7 @@ Required sections in the proposal file:
 
 ## Round Structure
 
-Minimum **2 rounds** (1 if convergence shortcut applies), maximum **4 rounds**. Each round has three sequential phases.
+Normal minimum: **2 rounds**. With convergence shortcut: **1 round** (see above). Maximum: **4 rounds**. Each round has three sequential phases.
 
 ### Phase A: Evidence Presentation
 

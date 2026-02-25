@@ -14,6 +14,13 @@ Always record the exact commands and key findings in `validation_results.md`.
 
 nsys profile, nsys stats, CUDA graphs, torch.compile, fused_moe, fused_experts, topk_softmax, kernel timing, VLLM_WORKER_MULTIPROC_METHOD, ncu, Nsight Compute
 
+## Scope
+
+This guide covers **profiling (trace capture)** for kernel analysis in Stage 1.
+
+For **validation latency measurements** (Stages 5-6), use `scripts/run_vllm_bench_latency_sweep.py`
+instead — see `references/validation-defaults.md`.
+
 ## Table of contents
 1. Goals and non-goals
 2. Make runs comparable (vLLM setup)

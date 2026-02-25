@@ -95,7 +95,7 @@ Task(
     1. Run correctness tests for the modified component.
     2. Run kernel-level benchmarks (use only GPU {gpu_id}).
     3. Acquire the E2E GPU lock, then run E2E benchmarks.
-    4. Compare results against the baseline in {artifact_dir}/baseline_profile.json.
+    4. Compare results against the baseline in {artifact_dir}/constraints.md (Baseline Truth Snapshot section).
     5. Write results to {artifact_dir}/tracks/{op_id}/validation_results.md.
     6. Return pass/fail status and key metrics.
     """,

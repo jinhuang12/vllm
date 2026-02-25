@@ -7,6 +7,17 @@ Use this to validate that a kernel optimization improves *real* inference latenc
 
 This file focuses on **how to run and interpret** E2E benchmarks. Default gates + required reporting live in `references/validation-defaults.md`.
 
+## Tool Selection
+
+| Stage | Tool | Why |
+|-------|------|-----|
+| Stage 1 (profiling) | `nsys profile -- vllm bench latency` | Trace capture for kernel analysis |
+| Stages 5-6 (validation) | `scripts/run_vllm_bench_latency_sweep.py` | GPU-locked A/B comparison with fastpath evidence |
+| Development | `vllm bench latency` directly | Quick checks (GPU must be idle, not for validation_results.md) |
+
+The examples below show raw `vllm bench latency` for reference. For validation measurements
+reported in `validation_results.md`, always use the sweep script.
+
 ## Contents
 - Quickstart (baseline vs optimized)
 - Workload selection (decode-heavy vs prefill-heavy)

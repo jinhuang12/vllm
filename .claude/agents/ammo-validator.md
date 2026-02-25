@@ -41,7 +41,8 @@ Your job is to find flaws, not confirm success. Derive test methodology from the
 
 ### Gate 5.3: E2E Latency
 - Meet kill criteria from optimization_plan.md
-- Typical: ≥3% improvement on target batch sizes, <2% regression on non-target sizes
+- Default: ≥3% improvement on target batch sizes, no regression on non-target sizes
+- If regressions on non-target BS: proceed only if optimization can be gated to improved BS
 
 ## Key Constraints
 
@@ -57,7 +58,7 @@ If a gate fails, consult `references/validator-troubleshooting.md` for investiga
 
 ## Output
 
-Write `{artifact_dir}/validation_results.md` with:
+Write `{artifact_dir}/tracks/{op_id}/validation_results.md` (where `{op_id}` is the optimization candidate ID from your prompt) with:
 - Gate 5.1 results (per-bucket correctness)
 - Gate 5.2 results (per-bucket kernel speedup, weighted average)
 - Gate 5.3 results (per-batch-size E2E latency comparison)

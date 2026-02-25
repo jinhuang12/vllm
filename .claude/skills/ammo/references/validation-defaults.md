@@ -2,10 +2,6 @@
 
 Use this as the **default** guidance for Validation Stage (Stage 5) validation artifacts (`{artifact_dir}/validation_results.md`).
 
-Always prefer **model-specific** tolerances and invariants from:
-- existing vLLM tests for that model (best), or
-- a model-specific baseline doc (example: `validation/QWEN3_BASELINE.md`).
-
 ## Contents
 - **Dual Baseline Requirement (NON-NEGOTIABLE)**
 - **Production Parity Requirement (NON-NEGOTIABLE)**
@@ -13,9 +9,6 @@ Always prefer **model-specific** tolerances and invariants from:
 - Default kernel perf gate (Stage 5.2)
 - Default end-to-end gate (Stage 5.3)
 - Required reporting checklist for `validation_results.md`
-
-## Search anchors
-tolerance, atol, rtol, speedup, CUDA graphs parity, torch.compile parity, kernel perf gate, E2E gate, enablement evidence, fused_experts, fused_moe, production parity.
 
 ---
 
@@ -98,9 +91,12 @@ os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "3"  # Explicit production parity
 
 - Only one GPU benchmark process may run at a time on a given set of GPUs
 - Before starting any benchmark, verify GPU is idle: `nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader`
-- Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements — it holds a
-  system-wide GPU lock in `/tmp/ammo_gpu_locks/` to prevent concurrent runs
-- Do NOT run `vllm bench latency` directly — this bypasses the GPU lock
+- **Validation (Stages 5-6)**: Use `scripts/run_vllm_bench_latency_sweep.py` for all
+  E2E measurements — it holds a system-wide GPU lock to prevent concurrent runs
+- **Profiling (Stage 1)**: Direct `nsys profile -- vllm bench latency` is acceptable
+  for trace capture (see `nsys-profiling-guide.md`)
+- **Development**: Direct `vllm bench latency` is acceptable only if GPU is verified
+  idle and results will NOT be included in validation_results.md
 - If contention is detected mid-benchmark: STOP, report to lead, and re-run after GPU is clear
 
 **Why**: During the OLMo-3-7B verification run, concurrent GPU benchmarks inflated latencies
@@ -159,7 +155,8 @@ Also require:
 Measure **GPU kernel time** under CUDA graphs for the same bucket set as Stage 1.
 
 Default gate (safe, conservative):
-- **No regressions allowed**: `T_opt_bucket_us ≤ T_base_bucket_us` for *every* validated bucket in the fast-path envelope.
+- **Measurable speedup required**: `T_opt_bucket_us < T_base_bucket_us` with >1% improvement
+  for at least one target bucket, and no regressions on remaining buckets.
 
 Reporting requirements:
 - baseline vs optimized per-bucket table (µs + speedup)
@@ -175,9 +172,17 @@ If you are intentionally trading a small regression in one bucket for a larger g
 
 Run E2E under identical knobs and capture/compile settings.
 
+Default iteration counts:
+- **Profiling** (Stage 1): `--num-iters 1` (keep traces small)
+- **Validation** (Stage 5): Use `num_iters` from `target.json` (default: 20 via `new_target.py`)
+
 Default targets (adjust to business needs and component share `f`):
-- `BS ∈ {1, 4, 8}`: **≥ 3%** improvement
-- `BS ∈ {16, 32, 64}`: **> 0%** improvement
+- **Target batch sizes**: **≥ 3%** improvement
+- **Non-target batch sizes**: **no regression** (≥ 1.0x)
+- **If regressions on non-target BS**: proceed only if optimization can be gated
+  to the improved batch sizes via dispatch guard or enablement envelope
+
+Target batch sizes are defined per optimization in the kill criteria.
 
 If the target component is a small fraction of end-to-end, these targets may be physically impossible. Use `references/e2e-delta-math.md` to set realistic expectations.
 
@@ -203,7 +208,8 @@ Include:
 4) **Kernel perf (production parity)**
 - bucket set and capture mode
 - baseline vs optimized per-bucket µs table
-- profiler evidence that kernels were graph-captured and fast-path executed
+- fastpath evidence that optimized kernels executed (enablement log line or
+  `require_patterns` match from the sweep script's fastpath_evidence config)
 
 5) **E2E latency**
 - baseline vs optimized per-bucket table

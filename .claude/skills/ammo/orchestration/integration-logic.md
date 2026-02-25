@@ -58,7 +58,7 @@ pytest tests/path/to/component_1_tests.py
 pytest tests/path/to/component_2_tests.py
 
 # Run combined E2E benchmark
-python benchmarks/benchmark_latency.py --model {model} ...
+python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
 ```
 
 ### Combined Result Evaluation
@@ -78,7 +78,7 @@ The integration section of `state.json` records all decisions and results:
 ```json
 {
   "integration": {
-    "status": "PENDING | COMBINED | SINGLE | EXHAUSTED",
+    "status": "pending | validated | single_pass | combined | exhausted",
     "passing_candidates": [
       {
         "op_id": "op001",
@@ -116,7 +116,8 @@ The integration section of `state.json` records all decisions and results:
 
 | Status | Meaning |
 |--------|---------|
-| `PENDING` | Integration has not started yet |
-| `COMBINED` | Multiple candidates merged and validated successfully |
-| `SINGLE` | One candidate selected (either sole passer or best among overlapping) |
-| `EXHAUSTED` | No candidates passed validation; no optimization to ship |
+| `pending` | Integration has not started yet |
+| `validated` | Single candidate validated successfully |
+| `single_pass` | One candidate selected (sole passer or best among overlapping) |
+| `combined` | Multiple candidates merged and validated successfully |
+| `exhausted` | No candidates passed validation; no optimization to ship |

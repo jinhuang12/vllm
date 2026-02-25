@@ -61,7 +61,7 @@ Each debate round then has 3 phases:
 **Allowed**:
 - Roofline model calculations (arithmetic intensity, bandwidth bounds)
 - ISA inspection (`cuobjdump`, `ncu --query` for occupancy estimates)
-- Tiny kernel prototypes (< 100 lines, single-GPU, < 30 seconds runtime)
+- Tiny kernel prototypes (< 100 lines, single-GPU, < 2 min wall-clock)
 - nsys single-kernel traces (not full-model)
 - Memory layout analysis (stride calculations, bank conflict checks)
 

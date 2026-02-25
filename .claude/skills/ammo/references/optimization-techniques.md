@@ -133,13 +133,23 @@ bytes_Wd = 2 × W_DOWN_TILE × (N + pad) × sizeof_fp8
 
 ## T7: Warp Role Partitioning
 
+Warp counts are GPU-dependent:
+
+**H100/H200** (sm_90a, 4 Tensor Cores/SM):
 ```cpp
 static constexpr uint32_t TOTAL_WARP_COUNT = 12;  // 384 threads
 static constexpr uint32_t CALC_WARP_COUNT = 8;    // Warps 0-7: MMA
 static constexpr uint32_t PREFETCH_WARP_COUNT = 4; // Warps 8-11: async copy
 ```
 
-**Why 8:4?** H100 has 4 Tensor Cores/SM. 8 warps saturate TCs, 4 warps keep memory pipeline full.
+**L40S/A100** (sm_89/sm_80, 256 threads/block optimal):
+```cpp
+static constexpr uint32_t TOTAL_WARP_COUNT = 8;   // 256 threads
+static constexpr uint32_t CALC_WARP_COUNT = 6;    // Warps 0-5: MMA
+static constexpr uint32_t PREFETCH_WARP_COUNT = 2; // Warps 6-7: async copy
+```
+
+**Why 8:4 on H100?** H100 has 4 Tensor Cores/SM. 8 warps saturate TCs, 4 warps keep memory pipeline full.
 
 **Sync Only Calc Warps**:
 ```cpp
