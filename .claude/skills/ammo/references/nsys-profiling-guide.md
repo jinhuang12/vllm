@@ -394,4 +394,3 @@ apt install nsight-systems-cli
 - vLLM profiling docs: https://docs.vllm.ai/en/latest/contributing/profiling/
 - Nsight Systems User Guide: https://docs.nvidia.com/nsight-systems/UserGuide/index.html
 - Nsight Compute User Guide: https://docs.nvidia.com/nsight-compute/
-- `profiling-launch-vs-kernel.md` - Conceptual background on launch vs kernel time

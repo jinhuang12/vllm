@@ -38,9 +38,8 @@
         ]
       }
     ],
-    "PreToolUse": [
+    "TaskCompleted": [
       {
-        "matcher": "TaskUpdate",
         "hooks": [
           {
             "type": "command",

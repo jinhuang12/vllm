@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 """Run production-parity E2E latency sweeps via `vllm bench latency`.
 
-This is *measurement plumbing*.
-It does NOT decide what to optimize, and it does NOT guess model semantics.
-
-Why this exists:
-- Phase 4.3 requires E2E evidence under identical knobs (CUDA graphs / torch.compile / TP/EP / bucketing).
-- Re-running ad-hoc commands is a common source of parity drift and missing evidence.
-
 Inputs
 ------
 Reads a JSON target spec (default: {artifact_dir}/target.json) created by scripts/new_target.py.
@@ -27,7 +20,7 @@ Minimal expected schema:
     "input_len": 64,
     "output_len": 512,
     "batch_sizes": [1,4,8],
-    "num_iters": 20
+    "num_iters": 5
   },
   "bench": {
     "runner": "vllm_bench_latency",

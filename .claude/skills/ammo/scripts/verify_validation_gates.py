@@ -557,9 +557,26 @@ def main() -> int:
         action="store_true",
         help="Only output JSON, no human-readable summary",
     )
+    parser.add_argument(
+        "--track",
+        type=str,
+        default=None,
+        help="Validate a specific worktree track's artifacts. "
+             "When provided, artifact_dir is resolved relative to "
+             ".claude/worktrees/ammo-track-{track}/{artifact_dir}/",
+    )
 
     args = parser.parse_args()
-    artifact_dir = Path(args.artifact_dir).expanduser().resolve()
+
+    if args.track:
+        # Resolve artifact_dir relative to the track's worktree
+        artifact_dir = (
+            Path(".claude/worktrees")
+            / f"ammo-track-{args.track}"
+            / args.artifact_dir
+        ).expanduser().resolve()
+    else:
+        artifact_dir = Path(args.artifact_dir).expanduser().resolve()
 
     if not artifact_dir.exists():
         print(f"ERROR: Artifact directory does not exist: {artifact_dir}", file=sys.stderr)

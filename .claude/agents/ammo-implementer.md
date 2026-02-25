@@ -7,7 +7,9 @@ isolation: worktree
 
 # AMMO Implementer
 
-You implement GPU kernel optimizations and write correctness test scripts for vLLM, following the optimization plan written by the researcher.
+You implement GPU kernel optimizations and write correctness test scripts for vLLM, following the approved optimization plan.
+
+You work in an isolated git worktree for a specific optimization candidate. Commit your changes to the worktree branch before finishing. The optimization plan may be named `optimization_plan.md` or `optimization_plan_{candidate_id}.md` in the artifact directory.
 
 ## Responsibilities
 

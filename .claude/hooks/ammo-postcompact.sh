@@ -11,6 +11,8 @@ if [ -n "$CHECKPOINT_FILES" ]; then
     MODEL=$(jq -r '.model // "unknown"' "$CHECKPOINT_FILES" 2>/dev/null)
     STAGE=$(jq -r '.stage // "unknown"' "$CHECKPOINT_FILES" 2>/dev/null)
     TEAM_NAME=$(jq -r '.team_name // "unknown"' "$CHECKPOINT_FILES" 2>/dev/null)
+    DEBATE_TEAM=$(jq -r '.debate_team // ""' "$CHECKPOINT_FILES" 2>/dev/null)
+    TRACK_COUNT=$(jq -r '.track_count // 0' "$CHECKPOINT_FILES" 2>/dev/null)
 
     # Read current state for more context
     if [ -f "$STATE_FILE" ]; then
@@ -21,6 +23,15 @@ if [ -n "$CHECKPOINT_FILES" ]; then
         SUMMARY=""
     fi
 
+    # Build additional resume context for v2 features
+    EXTRA_CONTEXT=""
+    if [ -n "$DEBATE_TEAM" ] && [ "$DEBATE_TEAM" != "" ]; then
+        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n6. **Debate team active**: Check debate section in state.json. Read team config to message champions."
+    fi
+    if [ "$TRACK_COUNT" -gt 0 ] 2>/dev/null; then
+        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n7. **Parallel tracks ($TRACK_COUNT active)**: Check parallel_tracks in state.json for worktree paths and GPU assignments."
+    fi
+
     # Clean up checkpoint
     rm -f "$CHECKPOINT_FILES"
 
@@ -28,7 +39,7 @@ if [ -n "$CHECKPOINT_FILES" ]; then
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "# Session Resumed After Compaction\n\n## You Are The AMMO Lead Orchestrator\n\nThis session was compacted while orchestrating an AMMO optimization.\n\n### Immediate Actions\n\n1. **Read the skill**: \`.claude/skills/ammo/SKILL.md\`\n2. **Read team config**: \`~/.claude/teams/$TEAM_NAME/config.json\`\n3. **Run TaskList** to see task progress\n4. **Load state**: \`cat $STATE_FILE\`\n5. **Message idle teammates** to resume work\n\n### Model: $MODEL | Stage: $STAGE | Status: $CURRENT_STATUS\n### Summary: $SUMMARY\n\nYou are the LEAD — manage tasks and gates, do not implement directly."
+    "additionalContext": "# Session Resumed After Compaction\n\n## You Are The AMMO Lead Orchestrator\n\nThis session was compacted while orchestrating an AMMO optimization.\n\n### Immediate Actions\n\n1. **Read the skill**: \`.claude/skills/ammo/SKILL.md\`\n2. **Read team config**: \`~/.claude/teams/$TEAM_NAME/config.json\`\n3. **Run TaskList** to see task progress\n4. **Load state**: \`cat $STATE_FILE\`\n5. **Message idle teammates** to resume work${EXTRA_CONTEXT}\n\n### Model: $MODEL | Stage: $STAGE | Status: $CURRENT_STATUS\n### Summary: $SUMMARY\n\nYou are the LEAD — manage tasks and gates, do not implement directly."
   }
 }
 CONTEXT_EOF

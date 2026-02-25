@@ -11,7 +11,7 @@ Profile and optimize **GPU kernels** for **vLLM inference** that beat the **prod
 
 User provides: model_id, hardware, dtype, tp, component (or "auto").
 
-Lead (you) scaffolds artifact directory, creates team, spawns agents, creates task graph.
+Lead (you) scaffolds artifact directory, orchestrates the 6-stage pipeline using subagent invocations and an ephemeral debate team.
 
 ```bash
 python .claude/skills/ammo/scripts/new_target.py \
@@ -19,146 +19,140 @@ python .claude/skills/ammo/scripts/new_target.py \
   --model-id <MODEL_ID> --hardware <HW> --dtype <DTYPE> --tp <TP>
 ```
 
-### Team Setup
+## 6-Stage Workflow
 
 ```
-TeamCreate: ammo-{target}
-Spawn researcher: Task(subagent_type="general-purpose", name="researcher", team_name=...)
-  → Agent def: .claude/agents/ammo-researcher.md
-Spawn implementer: Task(subagent_type="general-purpose", name="implementer", team_name=...)
-  → Agent def: .claude/agents/ammo-implementer.md
+Stage 1: Baseline Capture        [main session + ammo-researcher subagent]   → constraints.md
+Stage 2: Bottleneck Mining        [main session + ammo-researcher subagent]   → bottleneck_analysis.md (grounded data only)
+Stage 3: Candidate Proposal + Debate [ephemeral agent team: N ammo-champion agents] → debate/summary.md
+Stage 4+5: Parallel Tracks        [2-3 worktrees, each: ammo-implementer + ammo-validator subagent]
+Stage 6: Integration Validation   [main session direct]                       → final decision
 ```
 
-## 5-Stage Workflow
+No persistent team across stages. Agents spawn when needed and terminate when done.
 
-```
-Stage 1: Baseline Capture       → constraints.md
-Stage 2: Bottleneck Mining       → bottleneck_analysis.md
-Stage 3: Optimization Planning   → optimization_plan.md
-Stage 4: Implementation          → kernel code + correctness tests
-Stage 5: Validation              → validation_results.md
-         → SHIP (done) or KILL → retry with next opportunity (up to max_attempts)
-```
+## Orchestration Model
+
+### Stages 1-2: Main Session + Subagents
+
+- Lead (you) invokes ammo-researcher as a subagent via Task tool for profiling, source analysis, bottleneck mining.
+- No TeamCreate. No persistent agents. Subagent returns results directly.
+- Lead runs gates (`verify_phase1_baseline.py`, Stage 2 review) between stages.
+
+### Stage 3: Candidate Proposal + Adversarial Debate
+
+- **TeamCreate**: `ammo-debate-{component}-{model_short}-{hardware}`
+- Spawn 2-4 ammo-champion agents. Each reads the grounded bottleneck_analysis.md independently.
+- **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists.
+- **Debate rounds**: Champions argue for their proposals, critique others, rebut. See `orchestration/debate-protocol.md`.
+- Main session selects 2-3 winners using scoring rubric (`references/debate-scoring-rubric.md`).
+- **TeamDelete** after selection.
+- **Debate is always mandatory.** If all champions independently converge on the same candidate in Phase 0 with micro-experiment evidence, the lead may shorten to 1 debate round instead of 2.
+
+### Stages 4-5: Parallel Worktree Tracks
+
+- Create isolated git worktrees for each winning candidate.
+- Per track: spawn ammo-implementer subagent -> compilation gate -> spawn ammo-validator subagent.
+- GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
+- See `orchestration/parallel-tracks.md`.
+
+### Stage 6: Integration Validation
+
+- If multiple candidates pass and target different components: cherry-pick both, re-run E2E.
+- If same component: pick best E2E.
+- If none pass: EXHAUSTED.
+- See `orchestration/integration-logic.md`.
 
 ## Task Graph
 
-| Task | Description | Owner | Depends |
-|------|-------------|-------|---------|
-| B1 | Scaffold artifact directory | lead | — |
-| B2 | Capture baseline (env + nsys + source + timings) | researcher | B1 |
-| B3 | Write constraints.md (invariants, baseline snapshot) | researcher | B2 |
-| B4 | **GATE**: run `verify_phase1_baseline.py` | lead | B3 |
-| B5 | Mine bottlenecks + rank opportunities | researcher | B4 |
-| B6 | **GATE**: Stage 2 review (bottleneck quality) | lead | B5 |
-| B7 | Select approach + write optimization_plan.md | researcher | B6 |
-| B8 | **GATE**: Stage 3 plan review | lead | B7 |
-| B9 | Implement optimization + write correctness tests | implementer | B8 |
-| B10 | **GATE**: compilation check (`python -c "import ..."`) | lead | B9 |
-| B11 | Review tests + correctness + kernel benchmarks | researcher | B10 |
-| B12 | E2E benchmarks + kill criteria eval + write results | researcher | B11 |
-| B13 | **GATE**: run `verify_validation_gates.py` | lead | B12 |
-| B14 | Route decision (SHIP → close, KILL → iterate) | lead | B13 |
+```
+T1:  Scaffold artifact directory                          [main]
+T2:  Baseline capture + constraints.md                    [ammo-researcher subagent]    <- T1
+T3:  GATE: verify_phase1_baseline.py                      [main]                        <- T2
+T4:  Bottleneck mining (grounded data only)                [ammo-researcher subagent]    <- T3
+T5:  GATE: Stage 2 review (no ungrounded estimates)       [main]                        <- T4
+T6:  Champion proposals + debate (TeamCreate -> Phase 0 -> rounds -> selection) [main + debate team] <- T5
+T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]                <- T6
 
-B11→B12 enforces GPU sequencing (no concurrent benchmarks).
-B14 is **always pre-created at startup**, blocked by B13.
+  +- Per winning candidate (parallel) -----------------------------------------+
+  | T8_{id}: Create worktree + implement                  [ammo-implementer]   <- T7   |
+  | T9_{id}: GATE: compilation check                      [main]               <- T8   |
+  | T10_{id}: Validate (correctness + kernel + E2E)       [ammo-validator]     <- T9   |
+  +-----------------------------------------------------------------------------+
 
-### Iteration Loop
+T11: GATE: All tracks have results                        [main]               <- all T10
+T12: Integration validation (if multiple pass)            [main]               <- T11
+T13: Final decision (SHIP / EXHAUSTED)                    [main]               <- T12
+```
 
-B14 handles routing after B13 completes:
+## Non-Negotiables (BLOCKING)
 
-**IF SHIP:**
-- Verify all kill criteria passed
-- Update state.json: status → "shipped"
-- Shut down team
-
-**IF KILL:**
-1. Record attempt in state.json `opportunity_attempts[]`
-2. Check attempt count vs `max_attempts`
-3. If exhausted → status: "exhausted", shut down
-4. Select next opportunity from bottleneck_analysis.md
-5. Update state.json: `current_opportunity_id`, stage → "3_planning_iteration"
-6. Create tasks:
-
-| Task | Description | Owner | Depends |
-|------|-------------|-------|---------|
-| B15 | Write updated optimization_plan.md | researcher | B14 |
-| B16 | **GATE**: iteration plan review | lead | B15 |
-| B9' | Implement optimization | implementer | B16 |
-| B10' | **GATE**: compilation check | lead | B9' |
-| B11' | Correctness + kernel benchmarks | researcher | B10' |
-| B12' | E2E benchmarks + kill eval | researcher | B11' |
-| B13' | **GATE**: run `verify_validation_gates.py` | lead | B12' |
-| B14' | Route decision (attempt N+1) | lead | B13' |
-
-Repeats until SHIP, all attempts exhausted (`max_attempts`), or BLOCKED.
-
-## Non-Negotiables
+These are NOT advisory. Violation blocks stage progression.
 
 1. **Production parity**: CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `TORCH_COMPILE_DISABLE=1`, `--enforce-eager`, `VLLM_TORCH_COMPILE_LEVEL=0`.
-2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch loops.
+2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
-4. **GPU sequencing**: E2E benchmarks (B12) blocked by kernel benchmarks (B11). Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements (holds system-wide GPU lock).
-5. **Full-model E2E**: Do not skip E2E because "weights aren't available" — download them. Only skip if user explicitly waives.
-6. **E2E delta math**: `E2E_improvement ≈ f × kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug.
+4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements.
+5. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
+6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug.
 
 ## State Management
 
-`state.json` in artifact directory tracks stage, status, opportunity, attempts:
+`state.json` in artifact directory tracks stage, status, debate, parallel tracks, and integration:
 
 ```json
 {
-  "target": { "model_id": "...", "hardware": "...", "dtype": "...", "tp": 1, "ep": 1, "component": "auto" },
+  "target": {"model_id": "...", "hardware": "...", "dtype": "...", "tp": 1, "component": "auto"},
   "stage": "1_baseline",
   "status": "in_progress",
   "current_opportunity_id": null,
   "max_attempts": 3,
   "opportunity_attempts": [],
   "route_decision": {},
-  "verification_run": { "stage1": null, "validation": null },
-  "last_update": "2026-02-23",
+  "verification_run": {"stage1": null, "validation": null},
+  "last_update": "2026-02-24",
   "summary": "Initialized.",
-  "team": { "name": "ammo-{target}", "members": ["lead", "researcher", "implementer"] },
-  "gpu_resources": { "gpu_count": 1, "gpu_model": "...", "memory_total_gib": 0, "cuda_visible_devices": "0" }
+  "team": {"name": null, "members": []},
+  "gpu_resources": {"gpu_count": 1, "gpu_model": "...", "memory_total_gib": 0, "cuda_visible_devices": "0"},
+  "debate": {
+    "team_name": null,
+    "candidates": [],
+    "rounds_completed": 0,
+    "max_rounds": 4,
+    "selected_winners": [],
+    "selection_rationale": null
+  },
+  "parallel_tracks": {},
+  "integration": {
+    "status": "pending",
+    "passing_candidates": [],
+    "conflict_analysis": null,
+    "combined_patch_branch": null,
+    "combined_e2e_result": null,
+    "final_decision": null
+  }
 }
 ```
 
-### Status Values
+### Stage Values
 
-- `"in_progress"` — stage is actively being worked
-- `"shipped"` — SHIP decision, workflow done
-- `"iterating"` — KILL decision, creating next attempt
-- `"exhausted"` — all `max_attempts` consumed, workflow done
-- `"blocked"` — unresolvable blocker, needs human
-
-`"completed"` is NOT a valid workflow-level status. It is only valid for individual task status.
-
-`TaskList` tracks task progress, ownership, and dependencies.
+`1_baseline` -> `2_bottleneck_mining` -> `3_debate` -> `4_5_parallel_tracks` -> `6_integration` -> `complete` | `exhausted`
 
 ## Communication Patterns
 
-- **Blocker escalation** (agent → lead): `SendMessage` with "BLOCKER [{severity}]: {description}". Save details to `{artifact_dir}/blockers/{stage}_{date}.md`.
-- **Critical stop** (lead → all): Broadcast to halt all work immediately.
-- **GPU contention alert**: Detected concurrent GPU processes during benchmark — stop and re-run.
-- **Shutdown**: Clean team termination via `SendMessage(type="shutdown_request")`.
-- **KILL→Pivot** (lead → researcher): Opportunity killed, selecting next from ranked list.
-
-## Resume Protocol
-
-After interruption or compaction:
-1. Read team config: `~/.claude/teams/ammo-*/config.json`
-2. Run `TaskList` to see task progress
-3. Read `state.json` from artifact directory
-4. Check artifact files for current stage deliverables
-5. Message idle teammates to resume work
-6. You are the LEAD — manage tasks and gates, do not implement directly.
+- **Blocker escalation**: Subagent returns error -> lead investigates.
+- **Debate moderation**: Lead broadcasts phase starts, champions message back on completion.
+- **Critical stop**: Lead broadcasts to halt debate team if needed.
+- **Shutdown**: Clean debate team termination via `shutdown_request` -> TeamDelete.
 
 ## Helper Scripts
 
 Run, don't modify:
+
 - `scripts/new_target.py` — Scaffold artifact directory
-- `scripts/collect_env.py` — Capture environment for reproducibility
-- `scripts/verify_phase1_baseline.py` — Stage 1→2 gate verification
-- `scripts/verify_validation_gates.py` — Stage 5 gate verification
+- `scripts/collect_env.py` — Capture environment
+- `scripts/verify_phase1_baseline.py` — Stage 1->2 gate
+- `scripts/verify_validation_gates.py` — Stage 5 gate (supports `--track` for per-track validation)
 - `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked)
 - `scripts/generate_validation_report.py` — Structured reporting
 
@@ -170,3 +164,54 @@ Run, don't modify:
 | Validation gates | `references/validation-defaults.md` |
 | CUDA graph safety | `references/cudagraph-safety.md` |
 | E2E latency | `references/e2e-latency-guide.md` |
+| E2E delta math | `references/e2e-delta-math.md` |
+| GPU hardware specs | `references/gpu-configs.md` |
+| Optimization techniques | `references/optimization-techniques.md` |
+| Fusion feasibility | `references/fusion-feasibility-heuristics.md` |
+| Code templates | `references/code-templates.md` |
+| Debate scoring | `references/debate-scoring-rubric.md` |
+| Validator troubleshooting | `references/validator-troubleshooting.md` |
+
+## Orchestration Docs
+
+| Topic | File |
+|-------|------|
+| Debate protocol | `orchestration/debate-protocol.md` |
+| Parallel tracks | `orchestration/parallel-tracks.md` |
+| Integration logic | `orchestration/integration-logic.md` |
+
+## Escalation Protocol
+
+When a subagent returns an error or a gate fails:
+
+| Severity | Action |
+|----------|--------|
+| **critical** | STOP. Broadcast halt if debate team active. |
+| **major** | Investigate, adjust constraints, re-run subagent. |
+| **minor** | Document and continue. |
+
+Save blocker details to `{artifact_dir}/blockers/{stage}_{date}.md`.
+
+## Resume Protocol
+
+After interruption or compaction:
+
+1. Read this skill file.
+2. Read `state.json` from artifact directory.
+3. Check which stage is active.
+4. If Stage 3 debate active: read debate team config, check debate artifacts.
+5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status.
+6. Resume from last completed gate.
+
+## Quick Start Examples
+
+**Example 1**: `User: "Use ammo for Qwen3-30B-A3B on L40S TP=1"` ->
+
+1. Scaffold artifact directory.
+2. Invoke ammo-researcher subagent for baseline + bottleneck mining.
+3. Run gates, spawn debate team for top candidates.
+4. Select winners, create parallel worktree tracks.
+5. Implement + validate in parallel.
+6. Integration if multiple pass -> SHIP or EXHAUSTED.
+
+**Example 2**: Resume -> Read `state.json`, check current stage, resume from last gate.

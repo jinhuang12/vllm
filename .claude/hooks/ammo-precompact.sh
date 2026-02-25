@@ -12,6 +12,8 @@ if [ -n "$STATE_FILES" ]; then
     STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILES" 2>/dev/null)
     STATUS=$(jq -r '.status // "unknown"' "$STATE_FILES" 2>/dev/null)
     TEAM_NAME=$(jq -r '.team.name // "unknown"' "$STATE_FILES" 2>/dev/null)
+    DEBATE_TEAM=$(jq -r '.debate.team_name // ""' "$STATE_FILES" 2>/dev/null)
+    TRACK_COUNT=$(jq -r '.parallel_tracks | length // 0' "$STATE_FILES" 2>/dev/null)
 
     # Create checkpoint for restoration
     CHECKPOINT_FILE="$STATE_DIR/compaction_checkpoint.json"
@@ -23,6 +25,8 @@ if [ -n "$STATE_FILES" ]; then
   "stage": "$STAGE",
   "status": "$STATUS",
   "team_name": "$TEAM_NAME",
+  "debate_team": "$DEBATE_TEAM",
+  "track_count": $TRACK_COUNT,
   "state_file": "$STATE_FILES",
   "skill_path": ".claude/skills/ammo/SKILL.md"
 }

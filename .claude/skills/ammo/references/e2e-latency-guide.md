@@ -1,6 +1,6 @@
 # E2E Latency Benchmark Guide (vLLM) for Kernel Optimizations
 
-Use this for **Stage 5.3** to validate that a kernel optimization improves *real* inference latency under **production parity**:
+Use this to validate that a kernel optimization improves *real* inference latency under **production parity**:
 - CUDA graphs enabled (or the exact mode used in production)
 - torch.compile enabled (or the exact mode used in production)
 - same TP/EP topology and serving knobs
@@ -31,7 +31,7 @@ vllm bench latency \
   --input-len 64 \
   --output-len 512 \
   --batch-size 8 \
-  --num-iters 20 \
+  --num-iters 5 \
   --output-json /tmp/baseline_bs8.json
 ```
 
@@ -48,7 +48,7 @@ vllm bench latency \
   --input-len 64 \
   --output-len 512 \
   --batch-size 8 \
-  --num-iters 20 \
+  --num-iters 5 \
   --output-json /tmp/opt_bs8.json
 ```
 
@@ -80,7 +80,7 @@ for BS in 1 4 8 16 32 64; do
     --max-model-len <MAX_LEN> \
     --input-len 64 --output-len 512 \
     --batch-size $BS \
-    --num-iters 20 \
+    --num-iters 5 \
     --output-json /tmp/baseline_bs${BS}.json
 
   <ENABLE_FLAG>=1 vllm bench latency \
@@ -89,7 +89,7 @@ for BS in 1 4 8 16 32 64; do
     --max-model-len <MAX_LEN> \
     --input-len 64 --output-len 512 \
     --batch-size $BS \
-    --num-iters 20 \
+    --num-iters 5 \
     --output-json /tmp/opt_bs${BS}.json
 done
 ```

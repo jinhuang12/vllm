@@ -52,3 +52,5 @@ After B13 with KILL decision:
 - **Skill**: `.claude/skills/ammo/SKILL.md`
 - **Researcher agent**: `.claude/agents/ammo-researcher.md`
 - **Implementer agent**: `.claude/agents/ammo-implementer.md`
+- **Champoin agent**: `.claude/agents/ammo-champion.md`
+- **Validator agent**: `.claude/agents/ammo-validator.md`

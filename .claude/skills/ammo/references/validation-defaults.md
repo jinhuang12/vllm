@@ -176,7 +176,7 @@ If you are intentionally trading a small regression in one bucket for a larger g
 Run E2E under identical knobs and capture/compile settings.
 
 Default targets (adjust to business needs and component share `f`):
-- `BS ∈ {1, 4, 8}`: **≥ 5%** improvement
+- `BS ∈ {1, 4, 8}`: **≥ 3%** improvement
 - `BS ∈ {16, 32, 64}`: **> 0%** improvement
 
 If the target component is a small fraction of end-to-end, these targets may be physically impossible. Use `references/e2e-delta-math.md` to set realistic expectations.

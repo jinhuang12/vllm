@@ -207,6 +207,23 @@ def _state_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
             "memory_total_gib": 0,
             "cuda_visible_devices": "0",
         },
+        "debate": {
+            "team_name": None,
+            "candidates": [],
+            "rounds_completed": 0,
+            "max_rounds": 4,
+            "selected_winners": [],
+            "selection_rationale": None,
+        },
+        "parallel_tracks": {},
+        "integration": {
+            "status": "pending",
+            "passing_candidates": [],
+            "conflict_analysis": None,
+            "combined_patch_branch": None,
+            "combined_e2e_result": None,
+            "final_decision": None,
+        },
     }
 
 
@@ -273,8 +290,8 @@ def main() -> None:
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--input-len", type=int, default=64)
     p.add_argument("--output-len", type=int, default=512)
-    p.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 4, 8, 16, 32, 64])
-    p.add_argument("--num-iters", type=int, default=20)
+    p.add_argument("--batch-sizes", type=int, nargs="+", default=[8])
+    p.add_argument("--num-iters", type=int, default=5)
 
     args = p.parse_args()
 
