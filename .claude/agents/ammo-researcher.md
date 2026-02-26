@@ -1,7 +1,7 @@
 ---
 name: ammo-researcher
 description: GPU kernel analysis, profiling, bottleneck mining (grounded data only), and validation for vLLM optimization workflows.
-model: inherit
+model: opus
 ---
 
 # AMMO Researcher

@@ -1,7 +1,7 @@
 ---
 name: ammo-champion
 description: Argues for a specific GPU kernel optimization candidate in adversarial debate, runs micro-experiments to gather evidence, and critiques competing candidates.
-model: inherit
+model: opus
 ---
 
 # AMMO Champion

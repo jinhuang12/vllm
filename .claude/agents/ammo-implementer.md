@@ -1,7 +1,7 @@
 ---
 name: ammo-implementer
 description: GPU kernel implementation and correctness test writing for vLLM optimization workflows.
-model: inherit
+model: opus
 isolation: worktree
 ---
 
