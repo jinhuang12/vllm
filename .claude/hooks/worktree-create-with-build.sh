@@ -16,7 +16,7 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 [ -z "$WORKTREE_NAME" ] && { echo "ERROR: No worktree name provided" >&2; exit 1; }
 
 MAIN_REPO="${CLAUDE_PROJECT_DIR:-$CWD}"
-if [ -f "$MAIN_REPO/.git" ]; then
+if [ -z "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$MAIN_REPO/.git" ]; then
     MAIN_REPO=$(git -C "$MAIN_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')
 fi
 
@@ -30,7 +30,13 @@ if [ -d "$WORKTREE_DIR" ]; then
 fi
 
 # ── 1. Create git worktree (with flock for concurrency safety) ──
-BRANCH_NAME="worktree-$WORKTREE_NAME"
+# Session-namespaced branch naming for cross-session safety
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+if [ -n "$SESSION_ID" ]; then
+    BRANCH_NAME="session/${SESSION_ID}/ammo-${WORKTREE_NAME}"
+else
+    BRANCH_NAME="worktree-${WORKTREE_NAME}"
+fi
 mkdir -p "$MAIN_REPO/.claude/worktrees"
 
 LOCKFILE="$MAIN_REPO/.claude/worktrees/.create-lock"

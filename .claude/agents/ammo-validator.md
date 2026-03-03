@@ -1,7 +1,7 @@
 ---
 name: ammo-validator
 description: Runs correctness tests, kernel benchmarks, and E2E validation for a specific optimization candidate in an isolated worktree track.
-model: inherit
+model: opus
 ---
 
 # AMMO Validator

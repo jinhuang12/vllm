@@ -32,22 +32,11 @@ if [ -n "$STATE_FILES" ]; then
 }
 EOF
 
-    cat << CONTEXT_EOF
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreCompact",
-    "additionalContext": "# AMMO Orchestrator Context\n\n## IMPORTANT: You are the LEAD orchestrator\n\nThis session is orchestrating the AMMO (Automated Model Micro-Optimizer) skill.\n\n### After Compaction\n\n1. **Read the skill**: \`.claude/skills/ammo/SKILL.md\`\n2. **Read team config**: \`~/.claude/teams/$TEAM_NAME/config.json\`\n3. **Run TaskList** to see task progress\n4. **Load state**: \`cat $STATE_FILES\`\n5. **Message idle teammates** to resume work\n\n### Model: $MODEL | Stage: $STAGE | Status: $STATUS\n\nDO NOT implement directly — delegate to teammates via task assignment."
-  }
-}
-CONTEXT_EOF
+    # PreCompact only supports exit codes (0=allow, 2=block), not hookSpecificOutput.
+    # Context injection happens in the SessionStart hook (ammo-postcompact.sh).
+    exit 0
 
 else
-    cat << 'EMPTY_EOF'
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreCompact",
-    "additionalContext": ""
-  }
-}
-EMPTY_EOF
+    # No AMMO state — allow compaction
+    exit 0
 fi
