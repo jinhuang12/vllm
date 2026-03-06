@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMMO"
+  short_description: "Stage-gated vLLM kernel optimization"
+  default_prompt: "Use $ammo to profile vLLM bottlenecks, debate custom-kernel candidates, and run worktree implementation plus validation tracks."

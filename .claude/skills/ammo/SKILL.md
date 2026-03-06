@@ -25,7 +25,7 @@ python .claude/skills/ammo/scripts/new_target.py \
 Stage 1: Baseline Capture        [main session + ammo-researcher subagent]   → constraints.md
 Stage 2: Bottleneck Mining        [main session + ammo-researcher subagent]   → bottleneck_analysis.md (grounded data only)
 Stage 3: Candidate Proposal + Debate [ephemeral agent team: N ammo-champion agents] → debate/summary.md
-Stage 4+5: Parallel Tracks        [2-3 worktrees, each: ammo-implementer + ammo-validator subagent]
+Stage 4+5: Parallel Tracks        [2-3 worktrees, each: ammo-implementer (implements + validates) + DA audit subagent]
 Stage 6: Integration Validation   [main session direct]                       → final decision
 ```
 
@@ -51,8 +51,8 @@ No persistent team across stages. Agents spawn when needed and terminate when do
 
 ### Stages 4-5: Parallel Worktree Tracks
 
-- Create isolated git worktrees for each winning candidate.
-- Per track: spawn ammo-implementer subagent -> compilation gate -> spawn ammo-validator subagent.
+- Per track: spawn ammo-implementer subagent (auto-creates worktree via `isolation: worktree`) -> frontmatter Stop hook (DA) verifies validation complete + Amdahl's sanity -> compilation gate -> state update.
+- The implementer handles BOTH implementation AND validation (correctness, kernel benchmarks, E2E). No separate validator agent.
 - GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
 - See `orchestration/parallel-tracks.md`.
 
@@ -75,9 +75,10 @@ T6:  Champion proposals + debate (TeamCreate -> Phase 0 -> rounds -> selection) 
 T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]                <- T6
 
   +- Per winning candidate (parallel) -----------------------------------------+
-  | T8_{id}: Create worktree + implement                  [ammo-implementer]   <- T7   |
-  | T9_{id}: GATE: compilation check                      [main]               <- T8   |
-  | T10_{id}: Validate (correctness + kernel + E2E)       [ammo-validator]     <- T9   |
+  | T8_{id}: Implement + validate (correctness+kernel+E2E) [ammo-implementer] <- T7   |
+  |          (frontmatter Stop hook = DA: Amdahl check, baseline, parity, cross-track) |
+  | T9_{id}: GATE: compilation check                       [main]              <- T8   |
+  | T10_{id}: State update                                 [main]              <- T9   |
   +-----------------------------------------------------------------------------+
 
 T11: GATE: All tracks have results                        [main]               <- all T10
@@ -95,6 +96,7 @@ These are NOT advisory. Violation blocks stage progression.
 4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements.
 5. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
 6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug.
+7. **Custom kernel mandate**: Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected outright in the Phase 0 eligibility gate.
 
 ## State Management
 
@@ -122,7 +124,7 @@ These are NOT advisory. Violation blocks stage progression.
     "selected_winners": [],
     "selection_rationale": null
   },
-  "parallel_tracks": {},
+  "parallel_tracks": {},  /* per-track: { status, correctness, kernel_speedup, e2e_speedup, validation_results_path } */
   "integration": {
     "status": "pending",
     "passing_candidates": [],
@@ -171,6 +173,7 @@ Run, don't modify:
 | Code templates | `references/code-templates.md` |
 | Debate scoring | `references/debate-scoring-rubric.md` |
 | Validator troubleshooting | `references/validator-troubleshooting.md` |
+| DA audit checklist | `references/da-audit-checklist.md` |
 
 ## Orchestration Docs
 
@@ -200,7 +203,7 @@ After interruption or compaction:
 2. Read `state.json` from artifact directory.
 3. Check which stage is active.
 4. If Stage 3 debate active: read debate team config, check debate artifacts.
-5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status.
+5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status. DA audit is embedded in each agent's frontmatter Stop hook — no separate spawn needed.
 6. Resume from last completed gate.
 
 ## Quick Start Examples

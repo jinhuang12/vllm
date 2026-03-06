@@ -4,19 +4,7 @@ Each winning candidate from Stage 3 gets its own git worktree, branch, and subag
 
 ## Worktree Creation
 
-The **main session** creates one worktree per winning candidate:
-
-```bash
-git worktree add .claude/worktrees/ammo-track-{op_id} -b ammo/{op_id}
-```
-
-Example for three winners:
-
-```bash
-git worktree add .claude/worktrees/ammo-track-op001 -b ammo/op001
-git worktree add .claude/worktrees/ammo-track-op002 -b ammo/op002
-git worktree add .claude/worktrees/ammo-track-op003 -b ammo/op003
-```
+Worktrees are created automatically by the Agent tool when spawning `ammo-implementer` subagents (which have `isolation: worktree` in their definition). The `WorktreeCreate` hook (`worktree-create-with-build.sh`) pre-configures Python isolation, copies `.so` files, and creates a per-worktree `.venv`.
 
 ## GPU Assignment
 
@@ -33,80 +21,87 @@ E2E benchmarks require exclusive GPU access. The existing flock mechanism serial
 flock /tmp/ammo_gpu_locks/gpu_all.lock -c "run_e2e_benchmark.sh"
 ```
 
+## Worktree Build Rules (CRITICAL — Read Before Running Any Commands)
+
+The worktree-create hook pre-configures Python isolation. Agents MUST follow these rules:
+
+| Change Type | Required Action | Time |
+|-------------|----------------|------|
+| **Pure Python** (model code, Triton kernels, configs) | Edit, test, commit. **NO rebuild.** | Immediate |
+| **C++ kernel** (csrc/ changes) | `cmake --preset release && cmake --build --preset release --target install` | ~5-55s (ccache) |
+
+**Why no rebuild for Python**: The hook copies all `.so` files from the main repo and configures `.pth` files so worktree Python code takes priority over the main repo. Triton kernels JIT-compile at runtime.
+
+**AVOID** — these are redundant and waste 10-15 minutes:
+- `pip install -e .` — triggers full C++ rebuild unnecessarily
+- `pip install -e . --no-build-isolation` — still rebuilds C++
+- `python setup.py build_ext --inplace` — unnecessary if no C++ changes
+
 ## Per-Track Execution Pipeline
 
 Each track follows these four steps **sequentially**. All tracks run **in parallel** with each other.
 
-### Step 1: Implementation (Subagent)
+### Step 1: Implementation + Validation (ammo-implementer Subagent)
 
-Main spawns an implementer subagent that writes the optimization code, then commits to the track branch.
+Main spawns an implementer subagent that writes the optimization code, runs validation (correctness tests, kernel benchmarks, E2E benchmarks), and writes `validation_results.md`. The implementer works in an isolated worktree (auto-created via `isolation: worktree`).
+
+A frontmatter Stop hook (DA) on the implementer verifies `validation_results.md` is complete, runs an Amdahl's Law sanity check, verifies baseline citation and production parity, and checks for cross-track contamination risk before allowing it to stop. If any check fails, the hook blocks the implementer and tells it what to fix.
 
 ```
-Task(
+Agent(
     subagent_type="ammo-implementer",
     prompt="""
-    You are implementing optimization {op_id} for the AMMO pipeline.
+    You are implementing and validating optimization {op_id} for the AMMO pipeline.
 
-    Worktree path: .claude/worktrees/ammo-track-{op_id}
     Artifact dir: {artifact_dir}
     Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
     Bottleneck analysis: {artifact_dir}/bottleneck_analysis.md
+    GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
+
+    ## Stage 1 Baseline (DO NOT RE-RUN)
+    Baseline E2E latency files (captured from clean main in Stage 1):
+    - Per-batch-size JSON: {artifact_dir}/runs/baseline_bs{N}.json
+    - Summary table: {artifact_dir}/constraints.md ("Baseline E2E latency" section)
+    - Kernel breakdown: {artifact_dir}/constraints.md ("Baseline Truth Snapshot" section)
+    Use these for ALL E2E comparisons. Do NOT run a baseline from the worktree.
+
+    ## Kill Criteria
+    {kill_criteria_from_optimization_plan}
 
     Instructions:
+    Phase 1 — Implementation:
     1. Read the optimization plan and bottleneck analysis for {op_id}.
-    2. Implement the optimization in the worktree.
-    3. Ensure all changes compile cleanly.
-    4. Commit all changes to the ammo/{op_id} branch with a descriptive message.
-    5. Return a summary of files changed and the approach taken.
-    """,
-    cwd=".claude/worktrees/ammo-track-{op_id}"
+    2. Implement the optimization.
+    3. If C++ changes (csrc/): run cmake --preset release && cmake --build --preset release --target install
+    4. Commit implementation.
+
+    Phase 2 — Validation:
+    5. Run correctness tests (Gate 5.1): torch.allclose() against vLLM production kernel.
+    6. Run kernel benchmarks (Gate 5.2): both baseline and optimized captured in CUDA graphs.
+    7. Run E2E benchmark (Gate 5.3): ONLY the optimized run. Compare against Stage 1 baseline.
+    8. Evaluate all kill criteria with definitive PASS/FAIL verdicts.
+    9. Write results to {artifact_dir}/tracks/{op_id}/validation_results.md.
+    10. Commit validation results.
+    11. Return: overall PASS/FAIL, key metrics, worktree path.
+    """
 )
 ```
 
-The implementer subagent returns upon completion. Main resumes.
+The implementer subagent returns upon completion. The frontmatter Stop hook (DA) has already verified validation completeness, Amdahl's Law sanity, baseline citation, production parity, and cross-track contamination awareness before allowing the implementer to stop. Main resumes and records the worktree path from the agent result.
 
 ### Step 2: Compilation Gate (Main Session)
 
-Main verifies the implementation compiles:
+Main verifies the implementation compiles from the implementer's worktree:
 
 ```bash
-cd .claude/worktrees/ammo-track-{op_id}
+cd {worktree_path}
+source .venv/bin/activate
 python -c "import vllm; print('compilation OK')"
 ```
 
 If compilation fails, the track is marked `FAILED` in `state.json` and no further steps run.
 
-### Step 3: Validation (Subagent)
-
-Main spawns a validator subagent that runs correctness tests, kernel benchmarks, and E2E benchmarks.
-
-```
-Task(
-    subagent_type="ammo-validator",
-    prompt="""
-    You are validating optimization {op_id} for the AMMO pipeline.
-
-    Worktree path: .claude/worktrees/ammo-track-{op_id}
-    Artifact dir: {artifact_dir}
-    GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
-    Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
-
-    Instructions:
-    1. Run correctness tests for the modified component.
-    2. Run kernel-level benchmarks (use only GPU {gpu_id}).
-    3. Acquire the E2E GPU lock, then run E2E benchmarks.
-    4. Compare results against the baseline in {artifact_dir}/constraints.md (Baseline Truth Snapshot section).
-    5. Write results to {artifact_dir}/tracks/{op_id}/validation_results.md.
-    6. Return pass/fail status and key metrics.
-    """,
-    cwd=".claude/worktrees/ammo-track-{op_id}",
-    env={"CUDA_VISIBLE_DEVICES": "{gpu_id}"}
-)
-```
-
-The validator subagent returns upon completion. Main resumes.
-
-### Step 4: State Update (Main Session)
+### Step 3: State Update (Main Session)
 
 Main reads the validation results and updates `state.json`:
 
@@ -127,6 +122,8 @@ Update `state.json` field `parallel_tracks.{op_id}.result` with:
 }
 ```
 
+**Note**: The DA audit is embedded in the implementer's frontmatter Stop hook — if the implementer returned successfully, the DA already passed (Amdahl's check, baseline citation, production parity, cross-track awareness). No separate DA artifact is produced.
+
 ## Result Collection
 
 After all tracks complete, main reads each track's outputs:
@@ -143,14 +140,14 @@ A track **passes** if all of the following hold:
 - Correctness tests pass (no regressions)
 - Kernel benchmark shows measurable speedup (>1% over baseline)
 - E2E benchmark shows non-negative impact (>=1.0x)
+- Implementer's frontmatter DA Stop hook passed (Amdahl's check, baseline citation, production parity)
 
 ## Worktree Cleanup
 
 After Stage 6 integration is complete (or a track is abandoned), clean up:
 
 ```bash
-git worktree remove .claude/worktrees/ammo-track-{op_id} --force
-git branch -d ammo/{op_id}
+git worktree remove {worktree_path} --force
 ```
 
 Run cleanup for all tracks, including failed ones. The integration branch (if created in Stage 6) is retained until the final patch is shipped.

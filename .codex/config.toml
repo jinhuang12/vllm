@@ -1,0 +1,24 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
+[features]
+multi_agent = true
+
+[[skills.config]]
+path = ".codex/skills/ammo"
+enabled = true
+
+[agents]
+# Root AMMO lead can spawn child roles, but child roles cannot spawn more agents.
+max_depth = 1
+
+[agents.ammo-researcher]
+description = "Profile vLLM baselines and produce grounded bottleneck analysis."
+config_file = "agents/ammo-researcher.toml"
+
+[agents.ammo-champion]
+description = "Debate custom-kernel candidates with micro-experiment-backed evidence."
+config_file = "agents/ammo-champion.toml"
+
+[agents.ammo-implementer]
+description = "Implement approved candidates and own correctness, kernel, and E2E validation in isolated worktrees."
+config_file = "agents/ammo-implementer.toml"

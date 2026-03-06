@@ -37,8 +37,20 @@ Required sections in the proposal file:
 | **Feasibility Math** | Expected kernel speedup derived from the micro-experiment, NOT from Stage 2 |
 | **Expected E2E Impact** | `f × kernel_speedup` where both factors have provenance |
 | **Kill Criteria** | What threshold defines failure for this candidate |
+| **Kernel Code Scope** | Specific kernel files to create/modify, language (CUDA/Triton/CUTLASS), estimated LOC — demonstrates this is custom kernel work |
 
 **CRITICAL**: `kernel_speedup` estimates MUST come from the champion's own micro-experiment. Stage 2 does not provide speedup estimates.
+
+### Proposal Eligibility Gate (Lead)
+
+After Phase 0 submissions, the lead checks each proposal against the **Custom Kernel Mandate** before any debate begins:
+
+- **Pass**: Proposal involves writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code.
+- **Reject**: Config-only changes, flag-flipping, parameter tuning, or no kernel code scope described.
+
+**Rejection action**: Message the champion to revise with a kernel-based proposal. If no compliant revision is submitted, the candidate is eliminated.
+
+**Non-compliant proposals MUST NOT advance to Round 1.**
 
 ## Round Structure
 
@@ -144,6 +156,7 @@ The summary includes: per-candidate scores, rationale for selection, and any con
 | Tiny kernel prototypes | <100 lines of code, <2 min wall-clock execution |
 | nsys single-kernel traces | One kernel invocation, existing binary only |
 | Memory layout analysis | Static analysis of tensor shapes and strides |
+| Kernel-level benchmarks | MUST use CUDA graph capture for both baseline and candidate kernels. Raw CUDA event timing without graph capture is INVALID for kernel speedup claims. See validation-defaults.md Kernel-Level Benchmark Requirements. |
 
 ### Forbidden
 
@@ -153,6 +166,15 @@ The summary includes: per-candidate scores, rationale for selection, and any con
 | vLLM source modifications | Belongs in Stage 4 |
 | Model weight downloads | Too slow, too large |
 | Any experiment >2 min | Blocks debate progress |
+| Kernel benchmarks without CUDA graph capture | Inflates/deflates results due to launch overhead asymmetry (see OP-001 postmortem) |
+
+### Cache-Sensitivity Requirements (BW-Bound Kernels)
+
+For kernels identified as bandwidth-bound (AI < breakeven threshold), micro-experiments MUST report:
+1. Loop-warmed time (100+ iterations on same tensors)
+2. Cold-cache time (single iteration after L2 flush or fresh random tensors)
+
+If the warm/cold ratio exceeds 1.5x, the speedup is cache-dependent. Use the cold-cache result for E2E projections and flag this in the proposal's feasibility math.
 
 ## Teardown
 

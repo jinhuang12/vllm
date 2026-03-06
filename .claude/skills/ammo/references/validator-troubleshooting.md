@@ -1,6 +1,6 @@
 # Validator Troubleshooting Guide
 
-Extracted from the Stage 5 Investigation Playbook for use by the ammo-validator agent when validation gates fail.
+Extracted from the Stage 5 Investigation Playbook for use when validation gates fail.
 
 ## Search Anchors
 

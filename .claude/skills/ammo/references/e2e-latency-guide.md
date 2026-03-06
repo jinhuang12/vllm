@@ -30,6 +30,39 @@ reported in `validation_results.md`, always use the sweep script.
 ## Search anchors
 vllm bench latency, CUDA graphs, torch.compile, enforce-eager, input-len, output-len, batch-size sweep, activation.
 
+## Using Stage 1 Baselines (Validators)
+
+**Validators MUST use Stage 1 baseline numbers for E2E comparisons.** Do NOT run a baseline from the worktree.
+
+**Rationale**: Worktrees contain optimized code. Running `vllm bench latency` without the optimization flag from a worktree may still execute the optimized code path (e.g., if `pip install -e .` overwrote the global editable install, or if the optimization has no explicit enable flag). This contaminates the baseline, making both runs use the optimized path and hiding real improvements behind noise.
+
+**Optimized-only run (validator workflow)**:
+
+```bash
+cd .claude/worktrees/ammo-track-{op_id}
+source .venv/bin/activate
+<ENABLE_FLAG>=1 vllm bench latency \
+  --model <MODEL_ID> \
+  --tensor-parallel-size <TP> \
+  --max-model-len <MAX_LEN> \
+  --input-len 64 \
+  --output-len 512 \
+  --batch-size 8 \
+  --num-iters 5 \
+  --output-json {artifact_dir}/tracks/{op_id}/opt_bs8.json
+```
+
+Then compare against the Stage 1 baseline:
+
+```python
+import json
+baseline = json.load(open("{artifact_dir}/runs/baseline_bs8.json"))
+optimized = json.load(open("{artifact_dir}/tracks/{op_id}/opt_bs8.json"))
+speedup = baseline["avg_latency"] / optimized["avg_latency"]
+```
+
+Record in `validation_results.md`: "Baseline source: Stage 1 (not re-run)"
+
 ## Quickstart
 
 ### Baseline run
@@ -82,7 +115,7 @@ If you claim a prefill win, run a second benchmark with a large input length (an
 Use the **same bucket set** you profiled in Stage 1 and plan to enable in Stage 6.
 
 ```bash
-for BS in 1 4 8 16 32 64; do
+for BS in 8 32; do
   echo "=== batch_size=$BS ==="
 
   vllm bench latency \

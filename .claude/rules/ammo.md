@@ -54,4 +54,4 @@ After B13 with KILL decision:
 - **Researcher agent**: `.claude/agents/ammo-researcher.md`
 - **Implementer agent**: `.claude/agents/ammo-implementer.md`
 - **Champion agent**: `.claude/agents/ammo-champion.md`
-- **Validator agent**: `.claude/agents/ammo-validator.md`
+- **DA audit checklist**: `.claude/skills/ammo/references/da-audit-checklist.md`

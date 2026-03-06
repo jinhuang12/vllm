@@ -52,17 +52,14 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
  │  ┌─────────────────────┐         ┌─────────────────────┐                  │
  │  │ ammo-implementer    │         │ ammo-implementer    │                  │
  │  │ - Write kernel code │         │ - Write kernel code │                  │
- │  │ - Write correctness │         │ - Write correctness │                  │
- │  │   tests             │         │   tests             │                  │
- │  └─────────┬───────────┘         └─────────┬───────────┘                  │
- │       GATE: compiles?                 GATE: compiles?                     │
- │            │                               │                              │
- │  ┌─────────v───────────┐         ┌─────────v───────────┐                  │
- │  │ ammo-validator      │         │ ammo-validator      │                  │
  │  │ - Correctness tests │         │ - Correctness tests │                  │
  │  │ - Kernel benchmarks │         │ - Kernel benchmarks │   GPU isolated   │
  │  │ - E2E benchmarks    │         │ - E2E benchmarks    │   E2E via flock  │
  │  └─────────┬───────────┘         └─────────┬───────────┘                  │
+ │     Stop hook (DA):                Stop hook (DA):                        │
+ │     Amdahl's check,               Amdahl's check,                        │
+ │     baseline, parity              baseline, parity                        │
+ │       GATE: compiles?                 GATE: compiles?                     │
  │            │                               │                              │
  │            v                               v                              │
  │  tracks/OP-001/                  tracks/OP-002/                           │
@@ -100,6 +97,7 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 │   ├── e2e-latency-guide.md              # vllm bench latency methodology
 │   ├── validation-defaults.md            # Correctness tolerances, gate thresholds
 │   ├── validator-troubleshooting.md      # Investigation playbook (max 3 hypothesis cycles)
+│   ├── da-audit-checklist.md             # Devil's advocate audit investigation template
 │   ├── nsys-profiling-guide.md           # nsys/ncu capture and CSV export
 │   ├── fusion-feasibility-heuristics.md  # ROI math for fusion candidates
 │   ├── gpu-configs.md                    # Hardware specs (SMEM, registers, TMA availability)
@@ -116,8 +114,7 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 .claude/agents/
 ├── ammo-researcher.md      # Profiling + bottleneck mining (grounded data only, NO estimates)
 ├── ammo-champion.md        # Debate: proposes candidates, runs micro-experiments, argues with data
-├── ammo-implementer.md     # Writes kernel code + correctness tests in isolated worktree
-└── ammo-validator.md       # Skeptical verification: correctness, kernel bench, E2E bench
+└── ammo-implementer.md     # Implements kernel + runs full validation (correctness, kernel bench, E2E) in isolated worktree
 ```
 
 ## Specialized Agents
@@ -126,10 +123,9 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 |-------|------|----------------|
 | **ammo-researcher** | Profiles baseline, mines bottlenecks | Cannot make feasibility estimates or E2E projections |
 | **ammo-champion** | Proposes optimizations, argues in debate | Must back claims with micro-experiments |
-| **ammo-implementer** | Writes kernel code + tests | Works in isolated git worktree |
-| **ammo-validator** | Runs correctness + benchmarks | Applies kill criteria with strict interpretation |
+| **ammo-implementer** | Implements kernel + runs full validation (correctness, kernel bench, E2E) | Works in isolated worktree; frontmatter Stop hook (DA) enforces validation + Amdahl's sanity |
 
-The **lead** (main Claude session) orchestrates all stages, manages `state.json`, owns all gates, and never writes kernel code directly.
+The **lead** (main Claude session) orchestrates all stages, manages `state.json`, owns all gates, spawns DA audit agents after each implementer completes, and never writes kernel code directly.
 
 ## Non-Negotiables
 
@@ -139,6 +135,8 @@ The **lead** (main Claude session) orchestrates all stages, manages `state.json`
 4. **GPU sequencing** - E2E benchmarks sequential via flock
 5. **Full-model E2E** - Download weights, never skip
 6. **E2E delta math** - `improvement = f x kernel_speedup` (small `f` = small E2E, not a bug)
+
+> **Note**: The example below predates the **Custom Kernel Mandate** (Non-Negotiables #7). Under current rules, OP-001 (Triton config autotuning — config-only, zero code changes) would be rejected at the Phase 0 eligibility gate. Only OP-002 (new fused CUDA kernel) would advance to debate rounds. The example is retained for workflow illustration.
 
 ## Example Session: Qwen3.5-35B-A3B-FP8 on L40S (TP=2)
 
@@ -164,7 +162,7 @@ Three champions debated. After 1 round (shortened — C2 and C3 converged on the
 
 | Candidate | Champion | Target | Score | E2E Estimate |
 |-----------|----------|--------|-------|-------------|
-| **OP-001**: Triton config autotuning | C1 | Dense FP8 matmul (f=0.231) + MoE GEMM (f=0.250) | **8.15** | 4-8% |
+| ~~**OP-001**: Triton config autotuning~~ | C1 | ~~Dense FP8 matmul (f=0.231) + MoE GEMM (f=0.250)~~ | ~~8.15~~ | ~~4-8%~~ | *(Would be rejected at Phase 0 — config-only, no kernel code)* |
 | **OP-002**: SiLU + block-FP8 quant fusion | C2+C3 | Activation + quant chain (f=0.051) | **7.20** | 1.5-3% |
 
 Key debate moments:
@@ -176,12 +174,12 @@ Key debate moments:
 
 Two worktrees ran in parallel:
 
-**Track OP-001** (config autotuning):
+**Track OP-001** (config autotuning) — ~~would be rejected under Custom Kernel Mandate~~:
 - Generated 7 Triton JSON configs for L40S-specific shapes
-- Zero code changes — config files only
+- Zero code changes — config files only *(now disqualifying)*
 - Kernel speedup: 1.03-3.25x across shapes
 - E2E: +1.9-5.2% (BS=4-64), -0.7% BS=1 (within noise)
-- Verdict: **CONDITIONAL PASS**
+- Verdict: **CONDITIONAL PASS** *(would not reach this stage under current rules)*
 
 **Track OP-002** (SiLU + FP8 quant fusion):
 - New fused CUDA kernel across 5 source files
@@ -259,8 +257,8 @@ The skill was rewritten from the ground up. Here is what changed:
 
 | | Old | New |
 |---|---|---|
-| **Agents** | Generic `general-purpose` Task subagents | 4 specialized types: `ammo-researcher`, `ammo-champion`, `ammo-implementer`, `ammo-validator` |
-| **Roles** | Subagent does entire phase | Each agent has strict role boundaries (researcher can't estimate, implementer can't validate) |
+| **Agents** | Generic `general-purpose` Task subagents | 3 specialized types: `ammo-researcher`, `ammo-champion`, `ammo-implementer` + orchestrator-spawned DA audit |
+| **Roles** | Subagent does entire phase | Each agent has strict role boundaries (researcher can't estimate, implementer implements + validates, DA audits methodology) |
 | **Context** | All context passed via task prompts | Agents have dedicated `.claude/agents/` definitions with built-in guardrails |
 
 ### Decision Making: LLM Council -> Adversarial Debate
@@ -305,5 +303,101 @@ The skill was rewritten from the ground up. Here is what changed:
 - **Parallel execution**: `orchestration/parallel-tracks.md`, `orchestration/integration-logic.md`
 - **New references**: `e2e-latency-guide.md`, `validator-troubleshooting.md`
 - **New scripts**: `verify_validation_gates.py` (per-track), `generate_validation_report.py`
-- **Agent definitions**: 4 specialized agents in `.claude/agents/ammo-*.md`
+- **Agent definitions**: 3 specialized agents in `.claude/agents/ammo-*.md` (implementer now includes validation; DA audit spawned by orchestrator)
 - **Lead rules**: `.claude/rules/ammo.md` (prohibits lead from writing kernel code)
+
+---
+
+## Known Bug: SubagentStop Hook Matcher Bypass (Claude Code)
+
+**Severity**: Critical — causes infinite hook cascade, process freeze, 100%+ CPU
+**Affected versions**: 2.1.63, 2.1.68, 2.1.69 (all tested; likely all versions)
+**Status**: Unfixed upstream — file at https://github.com/anthropics/claude-code/issues
+**Discovered**: 2026-03-05 during AMMO session `bd4b9a66`
+
+### Summary
+
+The `SubagentStop` hook `matcher` field in `settings.local.json` is **never evaluated**. All `SubagentStop` hooks fire on every subagent stop, regardless of the matcher value. When the hook itself spawns a subagent (e.g., `type: "agent"`) and that subagent fails, its stop re-triggers the same hook, creating an infinite cascade.
+
+### Root Cause
+
+In the Claude Code hook matching function (extracted from binary via `strings`):
+
+```javascript
+// The query for SubagentStop is set from agent_type
+case "SubagentStop": I = L.agent_type; break;
+
+// Filtering logic:
+let K = (I
+  ? f.filter((J) => !J.matcher || matchFn(I, J.matcher))  // query truthy → filter by matcher
+  : f                                                        // query falsy → return ALL hooks
+).flatMap(...)
+```
+
+`L.agent_type` is **always an empty string** `""` for `SubagentStop` events (even though `SubagentStart` correctly populates it). Since `""` is falsy in JavaScript, the ternary skips the `.filter()` branch and returns all hooks unfiltered. The matcher `"ammo-implementer"` is never checked.
+
+### Cascade Mechanism
+
+1. `ammo-implementer` subagent stops → `SubagentStop` fires
+2. Hook spawns agent to verify validation → agent calls API with invalid Bedrock model ID → 400 error
+3. Hook agent stops → triggers `SubagentStop` again (matcher bypassed)
+4. New hook agent spawned → same error → stops → triggers hook → **infinite loop**
+5. Each iteration accumulates V8 heap objects → RSS grows to 5+ GB → GC thrashing → 100%+ CPU → terminal freezes
+
+In the observed incident: **14,319 hook agents** were spawned over 2 hours before the process was killed.
+
+### Workaround
+
+Since the matcher doesn't work, add a guard **inside the hook prompt** to break the cycle:
+
+```json
+{
+  "SubagentStop": [{
+    "matcher": "ammo-implementer",
+    "hooks": [{
+      "type": "agent",
+      "prompt": "FIRST: Check the agent_id in $ARGUMENTS. If it starts with 'hook-agent-', return {\"ok\": true} immediately — do NOT proceed. Only verify validation for real implementer agents.\n\n... (rest of prompt)",
+      "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "timeout": 600
+    }]
+  }]
+}
+```
+
+Also ensure the `model` field uses a valid Bedrock model ARN (not `claude-sonnet-4-6`) to prevent the 400 error that amplifies the cascade.
+
+### Detection
+
+Signs of an active cascade:
+- Claude Code terminal frozen, high CPU (`ps aux | grep claude` shows 100%+ CPU)
+- Debug log growing rapidly: `tail -f ~/.claude/debug/<session-id>.txt` shows repeating `SubagentStop` + `hook-agent-*` entries
+- RSS oscillating wildly (GC thrashing): `watch -n1 'grep VmRSS /proc/<pid>/status'`
+
+Recovery: `kill -9 <pid>` (SIGTERM may not work due to blocked event loop)
+
+### Adversarial Verification
+
+An independent adversarial review (120 tool calls across the Claude Code binary and debug logs) confirmed all findings:
+
+**Why `agent_type` is empty — asymmetric design:**
+- `SubagentStart` has a **dedicated function** (`nmA`) that explicitly passes the agent name as `agent_type`:
+  ```javascript
+  async function* nmA(H, $, A, L) {
+      let D = {..., hook_event_name: "SubagentStart", agent_id: H, agent_type: $};
+      yield* rx({hookInput: D, matchQuery: $, ...});
+  }
+  ```
+- `SubagentStop` uses a **generic stop-hook function** (`$QA`) that reads `agentType` from the execution context — but the context's `agentType` is `undefined` by the time stop hooks fire, so `M ?? ""` coalesces to `""` (falsy), bypassing the filter.
+
+**Empirical evidence (exhaustive):**
+- **28,638 / 28,638** `SubagentStop` events in the incident debug log had empty `agent_type` — zero exceptions
+- Every single one matched `"Matched 1 unique hooks for query 'no match query'"` despite the `"matcher": "ammo-implementer"` filter
+- `SubagentStart` in the same session correctly showed `query: ammo-researcher`
+
+**Built-in vs custom agents:**
+- Built-in agent types (e.g., `claude-code-guide`) DO populate `agent_type` on stop — observed in a separate healthy session where `SubagentStop with query: claude-code-guide` appeared
+- Custom agents defined in `.claude/agents/` (e.g., `ammo-implementer`) do NOT — `agentType` is lost during context propagation from the agent definition to the stop-hook execution path
+
+**Matcher function (`QPM`) is never reached:**
+- The ternary `(I ? f.filter(...) : f)` short-circuits when `I` is falsy
+- Even if `QPM` were called with `QPM("", "ammo-implementer")`, it would correctly return `false` — the bug is upstream of the matcher, not in it

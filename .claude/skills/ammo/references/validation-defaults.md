@@ -54,6 +54,35 @@ for e in range(E):
 
 ---
 
+## E2E Baseline Reuse Requirement (NON-NEGOTIABLE)
+
+**BLOCKING**: Validators MUST use Stage 1 baseline numbers for all E2E latency comparisons. NEVER re-run a baseline from the worktree.
+
+### Source of Truth
+
+| Data | Location | Captured by |
+|------|----------|-------------|
+| Per-BS E2E latency | `{artifact_dir}/runs/baseline_bs{N}.json` | Stage 1 profiler on clean main |
+| Summary table | `{artifact_dir}/constraints.md` — "Baseline E2E latency" | Stage 1 profiler |
+| Kernel breakdown | `{artifact_dir}/constraints.md` — "Baseline Truth Snapshot" | Stage 1 profiler |
+
+### Rationale
+
+Worktrees contain optimized code. Running `vllm bench latency` without the optimization flag from a worktree can execute the optimized code path (e.g., if `pip install -e .` overwrote the global editable install). This contaminates the baseline — both runs use the optimized path, hiding real improvements behind noise. This bug was observed in practice: a 5.5% real improvement was masked as 0.075% because both baseline and optimized ran FP8-optimized code.
+
+### Procedure
+
+1. Read Stage 1 baseline from `{artifact_dir}/runs/baseline_bs{N}.json`
+2. Run ONLY the optimized benchmark from the worktree (with enable flag set)
+3. Compare optimized `avg_latency` against Stage 1 `avg_latency`
+4. In `validation_results.md`, cite: "Baseline source: Stage 1 (not re-run)"
+
+### Sweep Script Guidance
+
+If using `scripts/run_vllm_bench_latency_sweep.py`, configure it to run optimized-only. Do NOT use the sweep script's baseline output for pass/fail decisions — it runs from the worktree and may be contaminated.
+
+---
+
 ## Production Parity Requirement (NON-NEGOTIABLE)
 
 **BLOCKING**: All measurements MUST use production-equivalent settings.
