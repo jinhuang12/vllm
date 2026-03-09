@@ -153,6 +153,76 @@ def _maybe_list_str(obj: Dict[str, Any], key: str) -> List[str]:
     return val
 
 
+def _expand_workload_to_buckets(workload: Dict[str, Any]) -> List[Dict[str, int]]:
+    """Normalize workload spec into a list of {input_len, output_len, batch_size} dicts.
+
+    Supports two formats:
+    1. New ``workload_matrix`` (list of dicts) — used when present, flat fields ignored.
+    2. Legacy flat ``{input_len, output_len, batch_sizes}`` — expanded into matrix internally.
+    """
+    matrix = workload.get("workload_matrix")
+    if matrix is not None:
+        if not isinstance(matrix, list) or len(matrix) == 0:
+            raise SystemExit("workload.workload_matrix must be a non-empty list")
+        required_keys = {"input_len", "output_len", "batch_size"}
+        buckets: List[Dict[str, int]] = []
+        seen: set = set()
+        for i, entry in enumerate(matrix):
+            if not isinstance(entry, dict):
+                raise SystemExit(f"workload.workload_matrix[{i}] must be a dict, got {type(entry).__name__}")
+            missing = required_keys - set(entry.keys())
+            if missing:
+                raise SystemExit(f"workload.workload_matrix[{i}] missing keys: {missing}")
+            bucket = {
+                "input_len": int(entry["input_len"]),
+                "output_len": int(entry["output_len"]),
+                "batch_size": int(entry["batch_size"]),
+            }
+            key = (bucket["input_len"], bucket["output_len"], bucket["batch_size"])
+            if key in seen:
+                raise SystemExit(
+                    f"Duplicate bucket in workload.workload_matrix: "
+                    f"input_len={bucket['input_len']}, output_len={bucket['output_len']}, batch_size={bucket['batch_size']}"
+                )
+            seen.add(key)
+            buckets.append(bucket)
+        return buckets
+    else:
+        # Legacy flat format.
+        input_len = workload.get("input_len")
+        output_len = workload.get("output_len")
+        batch_sizes = workload.get("batch_sizes")
+        if input_len is None or output_len is None or batch_sizes is None:
+            raise SystemExit("workload must have input_len, output_len, and batch_sizes (or workload_matrix)")
+        return [
+            {"input_len": int(input_len), "output_len": int(output_len), "batch_size": int(bs)}
+            for bs in batch_sizes
+        ]
+
+
+def _bucket_file_tag(bucket: Dict[str, int], all_buckets: List[Dict[str, int]]) -> str:
+    """Return a file-name tag for *bucket*.
+
+    Returns ``bs{BS}`` when all buckets share the same (input_len, output_len)
+    (homogeneous), otherwise ``il{IL}_ol{OL}_bs{BS}`` (heterogeneous).
+    """
+    il_ol_set = {(b["input_len"], b["output_len"]) for b in all_buckets}
+    if len(il_ol_set) <= 1:
+        return f"bs{bucket['batch_size']}"
+    return f"il{bucket['input_len']}_ol{bucket['output_len']}_bs{bucket['batch_size']}"
+
+
+def _validate_buckets_model_len(buckets: List[Dict[str, int]], max_model_len: int) -> None:
+    """Raise SystemExit if any bucket exceeds max_model_len."""
+    for b in buckets:
+        total = b["input_len"] + b["output_len"]
+        if total > max_model_len:
+            raise SystemExit(
+                f"Bucket (input_len={b['input_len']}, output_len={b['output_len']}, batch_size={b['batch_size']}) "
+                f"requires {total} tokens but max_model_len={max_model_len}"
+            )
+
+
 def _bench_exe_tokens(vllm_cmd: Any) -> List[str]:
     if isinstance(vllm_cmd, list):
         if not all(isinstance(x, str) for x in vllm_cmd):
@@ -617,20 +687,21 @@ def _run_inproc_latency_sweep_child(
     model_id: str,
     tp: int,
     max_model_len: int,
-    input_len: int,
-    output_len: int,
-    batch_sizes: List[int],
+    buckets: List[Dict[str, int]],
     num_iters: int,
     extra_args: List[str],
     out_root: Path,
     timeout_s_per_bucket: int,
 ) -> int:
-    """Child-mode runner: load model once, benchmark all batch sizes.
+    """Child-mode runner: load model once, benchmark all buckets.
 
-    Writes per-bucket artifacts to the same locations the parent expects:
-      logs/{label}_bs{BS}.log
-      json/{label}_bs{BS}.json          (raw vllm bench latency format)
-      json/{label}_bs{BS}.runner.json   (runner status + timing + errors)
+    Each bucket is a dict with ``input_len``, ``output_len``, ``batch_size``.
+    SamplingParams are reconstructed per-bucket (output_len may vary).
+
+    Writes per-bucket artifacts using ``_bucket_file_tag`` for naming:
+      logs/{label}_{tag}.log
+      json/{label}_{tag}.json          (raw vllm bench latency format)
+      json/{label}_{tag}.runner.json   (runner status + timing + errors)
     """
     logs_dir = out_root / "logs"
     json_dir = out_root / "json"
@@ -685,21 +756,22 @@ def _run_inproc_latency_sweep_child(
             child_log.write(traceback.format_exc() + "\n")
         return 2
 
-    # Parse CLI-equivalent args once (using the first batch size), then override per-bucket.
+    # Parse CLI-equivalent args once (using the first bucket), then override per-bucket.
     # This ensures we honor bench.extra_args using vLLM's own argparse schema.
     # Use vLLM's FlexibleArgumentParser so we support dotted "json-style" flags
     # like `-cc.pass_config.enable_sp=false` (CompilationConfig), etc.
+    seed = buckets[0] if buckets else {"input_len": 64, "output_len": 512, "batch_size": 1}
     parser = FlexibleArgumentParser(add_help=False, add_json_tip=False)
     vllm_latency.add_cli_args(parser)
-    seed_bs = batch_sizes[0] if batch_sizes else 1
-    seed_out = json_dir / f"{label}_bs{seed_bs}.json"
+    seed_tag = _bucket_file_tag(seed, buckets)
+    seed_out = json_dir / f"{label}_{seed_tag}.json"
     seed_argv = _build_cli_equivalent_args_for_inproc(
         model_id=model_id,
         tp=tp,
         max_model_len=max_model_len,
-        input_len=input_len,
-        output_len=output_len,
-        batch_size=seed_bs,
+        input_len=seed["input_len"],
+        output_len=seed["output_len"],
+        batch_size=seed["batch_size"],
         num_iters=num_iters,
         output_json=seed_out,
         extra_args=extra_args,
@@ -717,33 +789,39 @@ def _run_inproc_latency_sweep_child(
     llm = LLM(**_dataclasses.asdict(engine_args))
     _update_status("model_loaded")
 
-    # Same invariant as vllm.benchmarks.latency.main
-    if llm.llm_engine.model_config.max_model_len < (input_len + output_len):
-        _write_text(
-            out_root / f"child_{label}_error.log",
-            "max_model_len is smaller than input_len + output_len; adjust target.json.\n",
+    for bucket in buckets:
+        b_input_len = bucket["input_len"]
+        b_output_len = bucket["output_len"]
+        bs = bucket["batch_size"]
+        tag = _bucket_file_tag(bucket, buckets)
+
+        # Validate per-bucket model len constraint.
+        if llm.llm_engine.model_config.max_model_len < (b_input_len + b_output_len):
+            _write_text(
+                out_root / f"child_{label}_error.log",
+                f"max_model_len is smaller than input_len + output_len for bucket {tag}; adjust target.json.\n",
+            )
+            _update_status("error", extra={"error": f"max_model_len < input_len + output_len for bucket {tag}"})
+            return 2
+
+        # Reconstruct SamplingParams per-bucket (output_len may vary).
+        sampling_params = SamplingParams(
+            n=int(getattr(args, "n", 1)),
+            temperature=1.0,
+            top_p=1.0,
+            ignore_eos=True,
+            max_tokens=b_output_len,
+            detokenize=not bool(getattr(args, "disable_detokenize", False)),
         )
-        _update_status("error", extra={"error": "max_model_len < input_len + output_len"})
-        return 2
 
-    sampling_params = SamplingParams(
-        n=int(getattr(args, "n", 1)),
-        temperature=1.0,
-        top_p=1.0,
-        ignore_eos=True,
-        max_tokens=output_len,
-        detokenize=not bool(getattr(args, "disable_detokenize", False)),
-    )
-
-    for bs in batch_sizes:
-        raw_json = json_dir / f"{label}_bs{bs}.json"
-        runner_json = json_dir / f"{label}_bs{bs}.runner.json"
-        log_path = logs_dir / f"{label}_bs{bs}.log"
+        raw_json = json_dir / f"{label}_{tag}.json"
+        runner_json = json_dir / f"{label}_{tag}.runner.json"
+        log_path = logs_dir / f"{label}_{tag}.log"
 
         # Override per-bucket args that should affect only prompt construction / output paths.
         setattr(args, "batch_size", int(bs))
-        setattr(args, "input_len", int(input_len))
-        setattr(args, "output_len", int(output_len))
+        setattr(args, "input_len", int(b_input_len))
+        setattr(args, "output_len", int(b_output_len))
         setattr(args, "num_iters", int(num_iters))
         setattr(args, "output_json", str(raw_json))
 
@@ -752,6 +830,8 @@ def _run_inproc_latency_sweep_child(
             "ok": False,
             "label": label,
             "batch_size": bs,
+            "input_len": b_input_len,
+            "output_len": b_output_len,
             "start_time": start.isoformat(),
         }
 
@@ -768,7 +848,7 @@ def _run_inproc_latency_sweep_child(
 
             try:
                 _update_status("bucket_start", batch_size=bs)
-                _log(f"=== inproc vllm bench latency sweep ({label}) bs={bs} ===")
+                _log(f"=== inproc vllm bench latency sweep ({label}) {tag} ===")
                 _log(
                     _format_cmd_for_md(
                         ["vllm", "bench", "latency"]
@@ -776,8 +856,8 @@ def _run_inproc_latency_sweep_child(
                             model_id=model_id,
                             tp=tp,
                             max_model_len=max_model_len,
-                            input_len=input_len,
-                            output_len=output_len,
+                            input_len=b_input_len,
+                            output_len=b_output_len,
                             batch_size=bs,
                             num_iters=num_iters,
                             output_json=raw_json,
@@ -787,7 +867,7 @@ def _run_inproc_latency_sweep_child(
                     )
                 )
 
-                dummy_prompt_token_ids = np.random.randint(10000, size=(bs, input_len))
+                dummy_prompt_token_ids = np.random.randint(10000, size=(bs, b_input_len))
                 dummy_prompts: list[PromptType] = [
                     {"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()
                 ]
@@ -800,7 +880,7 @@ def _run_inproc_latency_sweep_child(
                             dummy_prompts,
                             BeamSearchParams(
                                 beam_width=int(getattr(args, "n", 1)),
-                                max_tokens=output_len,
+                                max_tokens=b_output_len,
                                 ignore_eos=True,
                             ),
                         )
@@ -888,8 +968,22 @@ def _run_inproc_latency_sweep_child(
 
 
 def _render_md_table(rows: List[Dict[str, Any]], baseline_label: str, opt_label: str) -> str:
-    header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
-    sep = "|---:|---:|---:|---:|---:|---|"
+    # Determine if rows are heterogeneous (mixed IL/OL values).
+    il_ol_set: set = set()
+    for r in rows:
+        il = r.get("input_len")
+        ol = r.get("output_len")
+        if il is not None and ol is not None:
+            il_ol_set.add((il, ol))
+    heterogeneous = len(il_ol_set) > 1
+
+    if heterogeneous:
+        header = f"| Input Len | Output Len | Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
+        sep = "|---:|---:|---:|---:|---:|---:|---:|---|"
+    else:
+        header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
+        sep = "|---:|---:|---:|---:|---:|---|"
+
     lines = [header, sep]
     for r in rows:
         bs = r["batch_size"]
@@ -908,9 +1002,16 @@ def _render_md_table(rows: List[Dict[str, Any]], baseline_label: str, opt_label:
                 return f"{x:.6g}"
             return str(x)
 
-        lines.append(
-            f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
-        )
+        if heterogeneous:
+            il = r.get("input_len", "")
+            ol = r.get("output_len", "")
+            lines.append(
+                f"| {il} | {ol} | {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
+            )
+        else:
+            lines.append(
+                f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -967,10 +1068,22 @@ def main() -> None:
     if not isinstance(workload, dict):
         raise SystemExit("root.workload must be an object")
 
-    input_len = _require_int(workload, "input_len", "workload")
-    output_len = _require_int(workload, "output_len", "workload")
-    batch_sizes = _require_list_int(workload, "batch_sizes", "workload")
+    # Expand workload into buckets (supports both legacy flat and new matrix format).
+    # Legacy flat fields are still required when workload_matrix is absent.
+    has_matrix = "workload_matrix" in workload
+    if not has_matrix:
+        # Validate legacy required fields.
+        _require_int(workload, "input_len", "workload")
+        _require_int(workload, "output_len", "workload")
+        _require_list_int(workload, "batch_sizes", "workload")
+
+    buckets = _expand_workload_to_buckets(workload)
     num_iters = _require_int(workload, "num_iters", "workload")
+
+    # Legacy convenience vars (for backward-compat in console output and workload JSON).
+    input_len = workload.get("input_len")
+    output_len = workload.get("output_len")
+    batch_sizes = workload.get("batch_sizes")
 
     bench = _require(spec, "bench", "root")
     if not isinstance(bench, dict):
@@ -1063,13 +1176,21 @@ def main() -> None:
         forbid_patterns=opt_forb,
     )
 
+    # Validate all buckets fit within max_model_len at plan time.
+    _validate_buckets_model_len(buckets, max_model_len)
+
     print("=== Target ===")
     print(f"artifact_dir: {artifact_dir}")
     print(f"out_dir: {out_root}")
     print(f"model_id: {model_id}")
     print(f"tp: {tp}, ep: {ep}, max_model_len: {max_model_len}")
-    print(f"workload: input_len={input_len}, output_len={output_len}, num_iters={num_iters}")
-    print(f"batch_sizes: {batch_sizes}")
+    if has_matrix:
+        print(f"workload: {len(buckets)} buckets (workload_matrix), num_iters={num_iters}")
+        for i, b in enumerate(buckets):
+            print(f"  [{i}] input_len={b['input_len']}, output_len={b['output_len']}, batch_size={b['batch_size']}")
+    else:
+        print(f"workload: input_len={input_len}, output_len={output_len}, num_iters={num_iters}")
+        print(f"batch_sizes: {batch_sizes}")
     print(f"baseline_label: {baseline_label}, opt_label: {opt_label}")
     print(f"execution_mode: {args.execution_mode}")
     print(f"gpu_lock: {args.gpu_lock}")
@@ -1097,6 +1218,7 @@ def main() -> None:
             "output_len": output_len,
             "num_iters": num_iters,
             "batch_sizes": batch_sizes,
+            "buckets": buckets,
         },
         "bench": {
             "vllm_exe": vllm_exe,
@@ -1121,22 +1243,27 @@ def main() -> None:
 
     # Record the per-bucket plan deterministically (for stable paths + repro commands).
     planned: List[Dict[str, Any]] = []
-    for bs in batch_sizes:
-        baseline_json = json_dir / f"{baseline_label}_bs{bs}.json"
-        opt_json = json_dir / f"{opt_label}_bs{bs}.json"
-        baseline_log = logs_dir / f"{baseline_label}_bs{bs}.log"
-        opt_log = logs_dir / f"{opt_label}_bs{bs}.log"
+    for bucket in buckets:
+        b_input_len = bucket["input_len"]
+        b_output_len = bucket["output_len"]
+        bs = bucket["batch_size"]
+        tag = _bucket_file_tag(bucket, buckets)
+
+        baseline_json_p = json_dir / f"{baseline_label}_{tag}.json"
+        opt_json_p = json_dir / f"{opt_label}_{tag}.json"
+        baseline_log_p = logs_dir / f"{baseline_label}_{tag}.log"
+        opt_log_p = logs_dir / f"{opt_label}_{tag}.log"
 
         baseline_cmd = _build_vllm_bench_cmd(
             vllm_exe=vllm_exe,
             model_id=model_id,
             tp=tp,
             max_model_len=max_model_len,
-            input_len=input_len,
-            output_len=output_len,
+            input_len=b_input_len,
+            output_len=b_output_len,
             batch_size=bs,
             num_iters=num_iters,
-            output_json=baseline_json,
+            output_json=baseline_json_p,
             extra_args=baseline_args,
         )
         opt_cmd = _build_vllm_bench_cmd(
@@ -1144,43 +1271,48 @@ def main() -> None:
             model_id=model_id,
             tp=tp,
             max_model_len=max_model_len,
-            input_len=input_len,
-            output_len=output_len,
+            input_len=b_input_len,
+            output_len=b_output_len,
             batch_size=bs,
             num_iters=num_iters,
-            output_json=opt_json,
+            output_json=opt_json_p,
             extra_args=opt_args,
         )
 
-        print(f"\n=== batch_size={bs} ===")
+        print(f"\n=== {tag} (il={b_input_len}, ol={b_output_len}, bs={bs}) ===")
         print(f"Baseline cmd: {_format_cmd_for_md(baseline_cmd, baseline_env)}")
         print(f"Opt cmd: {_format_cmd_for_md(opt_cmd, {**baseline_env, **opt_env})}")
 
         planned.append({
             "batch_size": bs,
+            "input_len": b_input_len,
+            "output_len": b_output_len,
+            "tag": tag,
             "baseline_cmd": baseline_cmd,
             "opt_cmd": opt_cmd,
-            "baseline_log": baseline_log,
-            "opt_log": opt_log,
-            "baseline_json": baseline_json,
-            "opt_json": opt_json,
+            "baseline_log": baseline_log_p,
+            "opt_log": opt_log_p,
+            "baseline_json": baseline_json_p,
+            "opt_json": opt_json_p,
         })
 
         # Populate a minimal row deterministically (stable paths + repro commands).
         all_runs["results"].append({
             "batch_size": bs,
+            "input_len": b_input_len,
+            "output_len": b_output_len,
             baseline_label: {
                 "cmd": baseline_cmd,
                 "env_overrides": baseline_env,
-                "log": str(baseline_log.relative_to(out_root)),
-                "output_json": str(baseline_json.relative_to(out_root)),
+                "log": str(baseline_log_p.relative_to(out_root)),
+                "output_json": str(baseline_json_p.relative_to(out_root)),
                 "fastpath_evidence": {"status": "unknown"},
             },
             opt_label: {
                 "cmd": opt_cmd,
                 "env_overrides": {**baseline_env, **opt_env},
-                "log": str(opt_log.relative_to(out_root)),
-                "output_json": str(opt_json.relative_to(out_root)),
+                "log": str(opt_log_p.relative_to(out_root)),
+                "output_json": str(opt_json_p.relative_to(out_root)),
                 "fastpath_evidence": {"status": "unknown"},
             },
         })
@@ -1222,9 +1354,7 @@ def main() -> None:
             model_id=model_id,
             tp=tp,
             max_model_len=max_model_len,
-            input_len=input_len,
-            output_len=output_len,
-            batch_sizes=batch_sizes,
+            buckets=buckets,
             num_iters=num_iters,
             extra_args=label_args,
             out_root=out_root,
@@ -1243,7 +1373,7 @@ def main() -> None:
 
     if args.execution_mode == "inproc_sweep":
         script_path = Path(__file__).resolve()
-        child_timeout = int(args.timeout_s) * max(1, len(batch_sizes)) + 1800
+        child_timeout = int(args.timeout_s) * max(1, len(buckets)) + 1800
 
         for run in (baseline_run, opt_run):
             child_cmd = [
@@ -1288,13 +1418,16 @@ def main() -> None:
         new_rows: List[Dict[str, Any]] = []
         for p, row in zip(planned, all_runs["results"]):
             bs = int(p["batch_size"])
+            b_il = int(p["input_len"])
+            b_ol = int(p["output_len"])
+            tag = p["tag"]
             baseline_log = Path(p["baseline_log"])
             opt_log = Path(p["opt_log"])
             baseline_json = Path(p["baseline_json"])
             opt_json = Path(p["opt_json"])
 
-            baseline_runner_json = json_dir / f"{baseline_label}_bs{bs}.runner.json"
-            opt_runner_json = json_dir / f"{opt_label}_bs{bs}.runner.json"
+            baseline_runner_json = json_dir / f"{baseline_label}_{tag}.runner.json"
+            opt_runner_json = json_dir / f"{opt_label}_{tag}.runner.json"
 
             baseline_text = ""
             opt_text = ""
@@ -1356,7 +1489,13 @@ def main() -> None:
                 },
             }
 
-            new_row = {"batch_size": bs, baseline_label: baseline_entry, opt_label: opt_entry}
+            new_row: Dict[str, Any] = {
+                "batch_size": bs,
+                "input_len": b_il,
+                "output_len": b_ol,
+                baseline_label: baseline_entry,
+                opt_label: opt_entry,
+            }
 
             b_avg = baseline_entry.get("avg_s")
             o_avg = opt_entry.get("avg_s")
@@ -1370,7 +1509,7 @@ def main() -> None:
 
             if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
                 raise SystemExit(
-                    f"Fast-path evidence FAILED for opt at BS={bs}. "
+                    f"Fast-path evidence FAILED for opt at {tag}. "
                     f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
                     f"See {opt_log}"
                 )
@@ -1461,8 +1600,14 @@ def main() -> None:
                 },
             }
 
+            b_il = int(p["input_len"])
+            b_ol = int(p["output_len"])
+            tag = p["tag"]
+
             row: Dict[str, Any] = {
                 "batch_size": bs,
+                "input_len": b_il,
+                "output_len": b_ol,
                 baseline_label: baseline_entry,
                 opt_label: opt_entry,
             }
@@ -1480,7 +1625,7 @@ def main() -> None:
 
             if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
                 raise SystemExit(
-                    f"Fast-path evidence FAILED for opt at BS={bs}. "
+                    f"Fast-path evidence FAILED for opt at {tag}. "
                     f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
                     f"See {opt_log}"
                 )
@@ -1497,7 +1642,12 @@ def main() -> None:
     md_lines.append("## Workload")
     md_lines.append("")
     md_lines.append(f"- model_id: {model_id}")
-    md_lines.append(f"- input_len: {input_len}, output_len: {output_len}")
+    if has_matrix:
+        md_lines.append(f"- buckets: {len(buckets)} (workload_matrix)")
+        for i, b in enumerate(buckets):
+            md_lines.append(f"  - [{i}] input_len={b['input_len']}, output_len={b['output_len']}, batch_size={b['batch_size']}")
+    else:
+        md_lines.append(f"- input_len: {input_len}, output_len: {output_len}")
     md_lines.append(f"- tp: {tp}, max_model_len: {max_model_len}")
     md_lines.append(f"- num_iters: {num_iters}")
     md_lines.append("")

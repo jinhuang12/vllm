@@ -68,15 +68,29 @@ def _render_e2e_section(e2e: Dict[str, Any]) -> str:
     lines.append(f"- num_iters: {wl.get('num_iters')}")
     lines.append("")
 
-    # Table
-    header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
-    sep = "|---:|---:|---:|---:|---:|---|"
-    lines.append(header)
-    lines.append(sep)
-
+    # Table — detect heterogeneous rows (different IL/OL per row).
     results = e2e.get("results", [])
     if not isinstance(results, list):
         results = []
+
+    il_ol_set: set = set()
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        il = row.get("input_len")
+        ol = row.get("output_len")
+        if il is not None and ol is not None:
+            il_ol_set.add((il, ol))
+    heterogeneous = len(il_ol_set) > 1
+
+    if heterogeneous:
+        header = f"| Input Len | Output Len | Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
+        sep = "|---:|---:|---:|---:|---:|---:|---:|---|"
+    else:
+        header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
+        sep = "|---:|---:|---:|---:|---:|---|"
+    lines.append(header)
+    lines.append(sep)
 
     for row in results:
         if not isinstance(row, dict):
@@ -98,7 +112,12 @@ def _render_e2e_section(e2e: Dict[str, Any]) -> str:
                 return f"{x:.6g}"
             return str(x)
 
-        lines.append(f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |")
+        if heterogeneous:
+            il = row.get("input_len", "")
+            ol = row.get("output_len", "")
+            lines.append(f"| {il} | {ol} | {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |")
+        else:
+            lines.append(f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |")
 
     lines.append("")
 
