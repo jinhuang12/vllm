@@ -1,29 +1,59 @@
 ---
 name: ammo
-description: Profile and optimize vLLM GPU kernels for specific deployments using a stage-gated workflow with production-parity benchmarking, adversarial candidate debate, isolated worktree tracks, and strict correctness plus E2E latency gates.
+description: End-to-end vLLM kernel optimization for a specific deployment envelope, from baseline capture through debate, isolated implementation, and validation. Use when Codex must optimize and validate a real vLLM inference path for a concrete model, hardware, dtype, and TP/EP target. Do not use for profiling-only work, postmortem review, or general opportunity mining.
 ---
 
-# AMMO — Automated Model Micro-Optimizer
+# AMMO
 
-Optimize vLLM inference kernels and ship only changes that beat a production-parity Stage 1 baseline without correctness regressions.
+Optimize vLLM inference kernels and ship only candidates that beat a production-parity Stage 1 baseline without correctness regressions.
 
 Run scripts from this skill directory, for example `.codex/skills/ammo/scripts/...`.
 
-## Invocation
+## Required Inputs
 
-User provides `model_id`, `hardware`, `dtype`, `tp`, and optionally `ep` plus `component` (`auto` allowed).
+User or repo context must provide:
 
-Scaffold a target artifact directory:
+- `model_id`
+- `hardware`
+- `dtype`
+- `tp`
+- optional `ep`
+- optional `component` (`auto` allowed)
+- target batch sizes or a clear default envelope
+
+If one of the blocking inputs is missing and cannot be discovered locally, stop and ask for it before starting Stage 1.
+
+## Do Not Use AMMO For
+
+- profiling-only or bottleneck-mining-only tasks
+- review-only or postmortem-only tasks
+- vague “make this faster” requests with no concrete deployment envelope
+
+For profiling/mining without implementation/validation, use a narrower skill instead of AMMO.
+
+## Stage 0 Preflight
+
+Before Stage 1, the lead must scaffold the artifact directory and run preflight.
 
 ```bash
 python .codex/skills/ammo/scripts/new_target.py \
   --artifact-dir kernel_opt_artifacts/{component}_{model}_{hardware}_{dtype}_tp{tp} \
   --model-id <MODEL_ID> --hardware <HW> --dtype <DTYPE> --tp <TP>
+
+python .codex/skills/ammo/scripts/preflight_check.py \
+  kernel_opt_artifacts/{component}_{model}_{hardware}_{dtype}_tp{tp}
 ```
 
-## Orchestration Modes
+Preflight is blocking. Do not proceed until:
 
-### Preferred Mode: Custom AMMO Roles
+- repo `.venv` is active for Python commands
+- `import vllm` works
+- visible GPUs match the requested hardware target
+- required target inputs are present in `target.json`
+
+`nsys` availability may be recorded as a warning only when the run can still continue with an explicitly reduced profiling plan.
+
+## Orchestration
 
 Use Codex multi-agent roles configured in `.codex/config.toml`:
 
@@ -31,58 +61,65 @@ Use Codex multi-agent roles configured in `.codex/config.toml`:
 - `ammo-champion`
 - `ammo-implementer`
 
-### Built-In Fallback
+Use `spawn_agent`, `send_input`, `wait`, and `close_agent` for role coordination.
 
-| AMMO role | Built-in fallback |
-|---|---|
-| `ammo-researcher` | `explorer` |
-| `ammo-champion` | `explorer` |
-| `ammo-implementer` | `worker` |
+The lead owns every blocking gate and every stage transition.
 
-### Single-Agent Fallback
+## 7-Stage Workflow
 
-Run the same stage and gate semantics sequentially in the main thread. Do not relax gates or non-negotiables.
-
-## 6-Stage Workflow
-
-| Stage | Owners | Primary Output |
+| Stage | Owners | Required Output |
 |---|---|---|
+| Stage 0: Preflight | lead | `runs/preflight_report.json` |
 | Stage 1: Baseline capture | lead + researcher | `constraints.md` |
 | Stage 2: Bottleneck mining | lead + researcher | `bottleneck_analysis.md` |
-| Stage 3: Candidate debate | lead + 2-4 champions | `debate/summary.md` |
-| Stages 4-5: Worktree tracks | lead + implementers per winner | `tracks/{op_id}/validation_results.md` |
-| Stage 6: Integration validation | lead | ship or exhausted decision |
+| Stage 3: Candidate debate | lead + 3 champions | `debate/summary.md` plus proposal JSON/MD |
+| Stages 4-5: Worktree tracks | lead + implementers | `tracks/{op_id}/evidence.json` and `tracks/{op_id}/validation_results.md` |
+| Stage 5 gate | lead | `runs/validation_gate_report.json` |
+| Stage 6: Integration decision | lead | `state.json.integration` and `integration.md` |
 
-## Codex Tool Map
+## Debate Rules
 
-- create agents with `spawn_agent`
-- route phase instructions with `send_input`
-- collect completions with `wait`
-- close finished agents with `close_agent`
+- Stage 3 always uses 3 champion agents.
+- Do not fall back to a single-agent debate.
+- If a champion misses a required artifact deadline:
+  - re-prompt once
+  - respawn the same role once if still incomplete
+  - if the debate still cannot produce 3 complete lanes, mark the run `BLOCKED`
 
-Codex does not provide Claude-style lifecycle hooks. AMMO replaces those with explicit scripts, state tracking, and lead-owned gate execution.
+Every champion writes both:
 
-## Task Graph
+- `{artifact_dir}/debate/proposals/{champion_id}_proposal.json`
+- `{artifact_dir}/debate/proposals/{champion_id}_proposal.md`
 
-```text
-T1  Scaffold artifact directory                                 [lead]
-T2  Baseline capture + constraints.md                           [researcher] <- T1
-T3  GATE: verify_phase1_baseline.py                             [lead]       <- T2
-T4  Bottleneck mining                                           [researcher] <- T3
-T5  GATE: Stage 2 review                                        [lead]       <- T4
-T6  Champion proposals + debate rounds                          [lead+champions] <- T5
-T7  GATE: Debate winner selection                               [lead]       <- T6
-T8  Create worktree per winner                                  [lead]       <- T7
-T9  Implement + validate per winner in worktree                 [implementer] <- T8
-T10 GATE: import/build check per track                          [lead]       <- T9
-T11 GATE: verify_validation_gates.py                            [lead]       <- all T10
-T12 Integration validation                                      [lead]       <- T11
-T13 Final decision (SHIP or EXHAUSTED)                          [lead]       <- T12
-```
+Winner eligibility is strict:
 
-## Stage-Gate Discipline
+- proxy-only microbench math is not enough to win
+- proposals must include integrated-path proof on the real vLLM dispatch or layer path for the exact target shape
+- proxy-derived E2E claims must be labeled as bounds, not decisive winner evidence
 
-The lead runs a gate check before every stage transition. Subagents create artifacts; they do not decide stage progression.
+Do not advance a winner into implementation unless it has integrated-path proof.
+
+## Track Validation Rules
+
+Each winning candidate gets:
+
+- an isolated worktree
+- one `ammo-implementer`
+- one authoritative evidence file: `{artifact_dir}/tracks/{op_id}/evidence.json`
+- one generated human summary: `{artifact_dir}/tracks/{op_id}/validation_results.md`
+
+The implementer owns implementation and validation end to end.
+
+Official optimized E2E runs must include:
+
+- Stage 1 baseline reuse
+- production-parity settings
+- admissibility status
+- explicit fast-path hit evidence
+
+“Prepared” or enablement logs are not enough. Official optimized runs require direct proof such as structured hit counters or equivalent runtime evidence with `hits >= 1`.
+
+## Stage Gates
 
 Minimum gate commands:
 
@@ -96,17 +133,24 @@ python .codex/skills/ammo/scripts/verify_validation_gates.py \
   --json-output {artifact_dir}/runs/validation_gate_report.json
 ```
 
-For gates without a dedicated script, the lead must write an explicit checklist report under `{artifact_dir}/runs/`.
+Do not advance on `WARN`.
+
+Validation gate semantics:
+
+- `overall_status` describes evidence completeness and consistency
+- `track_outcomes` describe candidate pass/regress/fail outcomes
+- Stage 6 may proceed only when evidence gates pass, even if no candidate passed Stage 5
 
 ## Non-Negotiables
 
-1. Production parity for all performance evidence: CUDA graphs plus `torch.compile`
+1. Production parity for all performance evidence: CUDA graphs plus production-equivalent compile settings
 2. vLLM production kernels as the correctness and performance baseline
 3. Numerical correctness via `torch.allclose()` or equivalent
 4. Stage 1 baseline reuse for all Stage 5 and Stage 6 E2E comparisons
 5. E2E GPU sequencing through the lock-based sweep workflow
 6. Full-model E2E validation before `SHIP`
 7. Custom-kernel-only debate candidates
+8. Structured evidence is authoritative; Markdown is summary only
 
 ## Worktree Management
 
@@ -122,11 +166,9 @@ Clean them up explicitly:
 bash .codex/skills/ammo/scripts/remove_worktree_cleanup.sh .codex/worktrees/ammo-track-{op_id}
 ```
 
-These scripts replace the Claude `WorktreeCreate` and `WorktreeRemove` hooks.
-
 ## State Management
 
-`state.json` tracks stage, debate progress, track metadata, and the integration decision.
+`state.json` tracks stage, debate health, track metadata, and the integration decision.
 
 Recommended per-track record:
 
@@ -137,11 +179,11 @@ Recommended per-track record:
       "status": "PASSED",
       "branch": "ammo/op001",
       "worktree_path": ".codex/worktrees/ammo-track-op001",
+      "validation_results_path": "tracks/op001/validation_results.md",
+      "evidence_path": "tracks/op001/evidence.json",
       "correctness": true,
-      "kernel_speedup": 1.35,
-      "e2e_speedup": 1.08,
-      "validation_results_path": "kernel_opt_artifacts/.../tracks/op001/validation_results.md",
-      "files_changed": ["csrc/...", "tests/..."]
+      "kernel_speedup": 1.12,
+      "e2e_speedup": 1.04
     }
   }
 }
@@ -150,39 +192,32 @@ Recommended per-track record:
 ## Helper Scripts
 
 - `scripts/new_target.py` — scaffold artifact directory plus `state.json`
+- `scripts/preflight_check.py` — Stage 0 preflight gate
 - `scripts/collect_env.py` — capture environment snapshot
 - `scripts/verify_phase1_baseline.py` — Stage 1 gate
-- `scripts/verify_validation_gates.py` — Stage 5 gate
-- `scripts/run_vllm_bench_latency_sweep.py` — E2E runner with GPU lock
-- `scripts/generate_validation_report.py` — structured validation reporting
-- `scripts/create_worktree_with_build.sh` — Codex replacement for Claude worktree creation hook
-- `scripts/remove_worktree_cleanup.sh` — Codex replacement for Claude worktree cleanup hook
+- `scripts/run_vllm_bench_latency_sweep.py` — E2E runner with GPU lock and run metadata
+- `scripts/generate_validation_report.py` — render `validation_results.md` from `evidence.json`
+- `scripts/verify_validation_gates.py` — Stage 5 structured gate
+- `scripts/create_worktree_with_build.sh` — create worktree and thin `.venv`
+- `scripts/remove_worktree_cleanup.sh` — clean up worktree
 
 ## References
 
-| Topic | File |
-|---|---|
-| Nsight profiling | `references/nsys-profiling-guide.md` |
-| Validation defaults | `references/validation-defaults.md` |
-| CUDA graph safety | `references/cudagraph-safety.md` |
-| E2E latency method | `references/e2e-latency-guide.md` |
-| E2E delta math | `references/e2e-delta-math.md` |
-| GPU hardware specs | `references/gpu-configs.md` |
-| Optimization techniques | `references/optimization-techniques.md` |
-| Fusion feasibility | `references/fusion-feasibility-heuristics.md` |
-| Code templates | `references/code-templates.md` |
-| Debate scoring | `references/debate-scoring-rubric.md` |
-| Validation troubleshooting | `references/validation-troubleshooting.md` |
-| DA audit checklist | `references/da-audit-checklist.md` |
-| Claude to Codex mapping | `references/claude-codex-equivalents.md` |
+Read as needed:
 
-## Orchestration Docs
-
-| Topic | File |
-|---|---|
-| Debate protocol | `orchestration/debate-protocol.md` |
-| Parallel tracks | `orchestration/parallel-tracks.md` |
-| Integration logic | `orchestration/integration-logic.md` |
+- `references/nsys-profiling-guide.md`
+- `references/validation-defaults.md`
+- `references/cudagraph-safety.md`
+- `references/e2e-latency-guide.md`
+- `references/e2e-delta-math.md`
+- `references/gpu-configs.md`
+- `references/optimization-techniques.md`
+- `references/fusion-feasibility-heuristics.md`
+- `references/code-templates.md`
+- `references/debate-scoring-rubric.md`
+- `references/validation-troubleshooting.md`
+- `references/da-audit-checklist.md`
+- `references/claude-codex-equivalents.md`
 
 ## Resume Protocol
 
@@ -190,6 +225,7 @@ After interruption or compaction:
 
 1. read this file
 2. read `{artifact_dir}/state.json`
-3. reconstruct active worktrees from `parallel_tracks`
-4. resume from the earliest incomplete gate
-5. do not rely on memory when artifact files disagree
+3. read the latest gate reports in `{artifact_dir}/runs/`
+4. reconstruct active worktrees from `parallel_tracks`
+5. resume from the earliest incomplete gate
+6. do not rely on memory when artifact files disagree

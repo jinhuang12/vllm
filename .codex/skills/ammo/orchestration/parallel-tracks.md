@@ -47,6 +47,7 @@ Spawn `ammo-implementer` in the assigned worktree. Required outputs:
 - correctness tests
 - kernel benchmark results
 - E2E benchmark results based on Stage 1 baseline reuse
+- `{artifact_dir}/tracks/{op_id}/evidence.json`
 - `{artifact_dir}/tracks/{op_id}/validation_results.md`
 - committed branch on `ammo/{op_id}`
 

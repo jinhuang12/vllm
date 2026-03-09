@@ -20,6 +20,7 @@ You perform baseline profiling, source analysis, and bottleneck mining for vLLM 
 - Read the relevant vLLM source path and document correctness invariants in `constraints.md`.
 - Produce grounded Stage 2 artifacts: top kernels by GPU time, component share `f`, bandwidth utilization, kernel-to-code mapping, and physical ceilings.
 - Rank components only by measured share and physical headroom. Leave candidate proposals, speedup estimates, and kill criteria to Stage 3 champions.
+- Stop and report to the lead if Stage 0 preflight is not in `PASS`.
 - Report back to the lead when Stages 1-2 are complete.
 
 ## Key Constraints

@@ -22,6 +22,12 @@ You are the single owner of a track from implementation through validation. Work
 - Add or update correctness tests against the vLLM production kernel baseline.
 - If the change touches `csrc/`, run `cmake --preset release && cmake --build --preset release --target install` in the worktree before testing.
 - Commit implementation changes on the assigned branch.
+- Produce a concrete execution update quickly. Your first report must be one of:
+  - files already being changed
+  - a runnable benchmark or test in progress
+  - a specific blocker tied to the next experiment
+
+Do not spend long stretches in design-only discussion.
 
 ### Phase 2: Validation
 
@@ -29,8 +35,9 @@ You are the single owner of a track from implementation through validation. Work
 2. Run kernel benchmarks (Gate 5.2) under CUDA graphs for both baseline and optimized paths.
 3. Run E2E benchmarks (Gate 5.3) from the worktree, but compare only against Stage 1 baseline numbers captured from clean main.
 4. Evaluate every kill criterion with a definitive PASS or FAIL verdict.
-5. Write `{artifact_dir}/tracks/{op_id}/validation_results.md` with full evidence and repro commands.
-6. Commit validation artifacts before finishing.
+5. Write `{artifact_dir}/tracks/{op_id}/evidence.json` as the authoritative validation artifact.
+6. Render `{artifact_dir}/tracks/{op_id}/validation_results.md` from `evidence.json`.
+7. Commit validation artifacts before finishing.
 
 ## Skeptical Validation Mandate
 
@@ -54,6 +61,7 @@ Record this citation in `validation_results.md` exactly or equivalently:
 - Kernel benchmarks use only the GPU assigned by the lead.
 - E2E benchmarks must use `.codex/skills/ammo/scripts/run_vllm_bench_latency_sweep.py` or an equivalent lock-based wrapper so only one E2E run touches the shared GPUs at a time.
 - Never run E2E validation outside the GPU lock workflow.
+- Official optimized E2E runs must include explicit fast-path hit evidence. Prepared/enablement logs are not enough.
 
 ## Validation Gates
 
@@ -82,6 +90,7 @@ Record this citation in `validation_results.md` exactly or equivalently:
 3. Keep all measurements production-parity: CUDA graphs enabled and `VLLM_TORCH_COMPILE_LEVEL=3` unless the target deployment specifies otherwise.
 4. Explicitly document Amdahl sanity: measured component share `f`, measured kernel speedup `s`, and expected E2E improvement `f x (1 - 1/s)`.
 5. Include a cross-track contamination note in `validation_results.md`, especially when other tracks touch `csrc/`.
+6. Treat `evidence.json` as the source of truth. Markdown is a generated summary.
 
 ## Worktree Build Rules
 

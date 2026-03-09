@@ -219,6 +219,64 @@ def _check_patterns(text: str, require: List[str], forbid: List[str]) -> Dict[st
     }
 
 
+def _load_optional_json(path_value: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not path_value:
+        return None
+    path = Path(path_value).expanduser().resolve()
+    if not path.exists():
+        raise SystemExit(f"Configured JSON file does not exist: {path}")
+    return _read_json(path)
+
+
+def _classify_admissibility(*, ok: bool, text: str) -> Dict[str, Any]:
+    issues: List[str] = []
+    lowered = text.lower()
+    if "unknown vllm environment variable" in lowered:
+        issues.append("unknown_vllm_environment_variable")
+    if "valueerror: free memory" in lowered:
+        issues.append("gpu_memory_guard_failure")
+    if "traceback" in lowered and not ok:
+        issues.append("runtime_traceback")
+    return {
+        "status": "PASS" if ok and not issues else "FAIL",
+        "issues": issues,
+    }
+
+
+def _extract_runtime_fastpath_proof(
+    *,
+    runtime_payload: Optional[Dict[str, Any]],
+    runtime_cfg: Dict[str, Any],
+    run_purpose: str,
+) -> Dict[str, Any]:
+    hits_key = str(runtime_cfg.get("hits_key", "fastpath_hits"))
+    min_hits = int(runtime_cfg.get("min_hits", 1))
+    required_for_opt = bool(runtime_cfg.get("required_for_opt", False))
+    if runtime_payload is None:
+        return {
+            "status": "FAIL" if required_for_opt and run_purpose == "official" else "unknown",
+            "source": "missing_json",
+            "hits": 0,
+        }
+
+    hits = runtime_payload.get(hits_key, 0)
+    if not isinstance(hits, int):
+        try:
+            hits = int(hits)
+        except (TypeError, ValueError):
+            hits = 0
+    status = "PASS" if hits >= min_hits else "FAIL"
+    source_json = runtime_cfg.get("json_path") or runtime_payload.get("_source_json")
+    return {
+        "status": status,
+        "source": "explicit_json",
+        "hits": hits,
+        "hits_key": hits_key,
+        "min_hits": min_hits,
+        "source_json": source_json,
+    }
+
+
 def _run_cmd(cmd: List[str], env: Dict[str, str], *, cwd: Optional[Path], timeout_s: int) -> Dict[str, Any]:
     start = datetime.now(timezone.utc)
     try:
@@ -548,7 +606,7 @@ def _build_vllm_bench_cmd(
     output_json: Path,
     extra_args: List[str],
 ) -> List[str]:
-    # Command template based on validation/E2E_LATENCY_GUIDE.md
+    # Command template based on references/e2e-latency-guide.md
     cmd = (
         vllm_exe
         + [
@@ -922,6 +980,9 @@ def main() -> None:
     p.add_argument("--timeout-s", type=int, default=1800, help="Timeout per bucket (seconds)")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing output dir instead of archiving it")
     p.add_argument("--require-fastpath", action="store_true", help="Fail if opt fast-path evidence patterns do not pass")
+    p.add_argument("--run-purpose", type=str, default="official", choices=["official", "anti_contamination", "diagnostic"], help="How this sweep should be classified in downstream evidence.")
+    p.add_argument("--candidate-id", type=str, default=None, help="Optional AMMO candidate id for downstream evidence.")
+    p.add_argument("--fastpath-proof-json", type=str, default=None, help="Optional JSON file with explicit fast-path hit evidence for the optimized run.")
     p.add_argument(
         "--execution-mode",
         type=str,
@@ -1007,6 +1068,11 @@ def main() -> None:
     fpe = bench.get("fastpath_evidence", {})
     if not isinstance(fpe, dict):
         fpe = {}
+    runtime_proof_cfg = bench.get("runtime_proof", {})
+    if not isinstance(runtime_proof_cfg, dict):
+        runtime_proof_cfg = {}
+    if args.fastpath_proof_json:
+        runtime_proof_cfg = {**runtime_proof_cfg, "json_path": args.fastpath_proof_json}
 
     def _read_evidence(label: str) -> Tuple[List[str], List[str]]:
         cfg = fpe.get(label, {})
@@ -1073,6 +1139,8 @@ def main() -> None:
     print(f"baseline_label: {baseline_label}, opt_label: {opt_label}")
     print(f"execution_mode: {args.execution_mode}")
     print(f"gpu_lock: {args.gpu_lock}")
+    print(f"run_purpose: {args.run_purpose}")
+    print(f"candidate_id: {args.candidate_id}")
 
     if ep != 1:
         print(
@@ -1083,6 +1151,7 @@ def main() -> None:
         )
 
     all_runs: Dict[str, Any] = {
+        "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target_json": str(target_path),
         "out_dir": str(out_root),
@@ -1108,7 +1177,11 @@ def main() -> None:
             "baseline_label": baseline_label,
             "opt_label": opt_label,
             "fastpath_evidence": fpe,
+            "runtime_proof": runtime_proof_cfg,
         },
+        "candidate_id": args.candidate_id or bench.get("run_metadata", {}).get("candidate_id"),
+        "run_purpose": args.run_purpose,
+        "runtime_fastpath_proof": None,
         "results": [],
     }
 
@@ -1240,6 +1313,21 @@ def main() -> None:
 
     baseline_patterns_configured = bool(baseline_run.require_patterns or baseline_run.forbid_patterns)
     opt_patterns_configured = bool(opt_run.require_patterns or opt_run.forbid_patterns)
+    runtime_payload = _load_optional_json(runtime_proof_cfg.get("json_path")) if runtime_proof_cfg.get("json_path") else None
+    if runtime_payload is not None:
+        runtime_payload = dict(runtime_payload)
+        runtime_payload["_source_json"] = str(Path(str(runtime_proof_cfg.get("json_path"))).expanduser().resolve())
+    all_runs["runtime_fastpath_proof"] = _extract_runtime_fastpath_proof(
+        runtime_payload=runtime_payload,
+        runtime_cfg=runtime_proof_cfg,
+        run_purpose=args.run_purpose,
+    )
+    if args.run_purpose == "official" and bool(runtime_proof_cfg.get("required_for_opt", False)):
+        if all_runs["runtime_fastpath_proof"].get("status") != "PASS":
+            raise SystemExit(
+                "Official optimized runs require explicit fast-path proof with hits >= min_hits. "
+                f"Observed proof: {all_runs['runtime_fastpath_proof']}"
+            )
 
     if args.execution_mode == "inproc_sweep":
         script_path = Path(__file__).resolve()
@@ -1326,6 +1414,12 @@ def main() -> None:
                     **baseline_evidence,
                     "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
                 },
+                "runtime_fastpath_proof": {
+                    "status": "unknown",
+                    "source": "not_applicable",
+                    "hits": 0,
+                },
+                "admissibility": _classify_admissibility(ok=bool(baseline_status.get("ok")), text=baseline_text),
                 "log": str(baseline_log.relative_to(out_root)),
                 "output_json": str(baseline_json.relative_to(out_root)),
                 "runner_json": str(baseline_runner_json.relative_to(out_root)),
@@ -1346,6 +1440,8 @@ def main() -> None:
                     **opt_evidence,
                     "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
                 },
+                "runtime_fastpath_proof": all_runs["runtime_fastpath_proof"],
+                "admissibility": _classify_admissibility(ok=bool(opt_status.get("ok")), text=opt_text),
                 "log": str(opt_log.relative_to(out_root)),
                 "output_json": str(opt_json.relative_to(out_root)),
                 "runner_json": str(opt_runner_json.relative_to(out_root)),
@@ -1432,6 +1528,12 @@ def main() -> None:
                     **baseline_evidence,
                     "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
                 },
+                "runtime_fastpath_proof": {
+                    "status": "unknown",
+                    "source": "not_applicable",
+                    "hits": 0,
+                },
+                "admissibility": _classify_admissibility(ok=bool(baseline_res.get("ok")), text=baseline_text),
                 "log": str(baseline_log.relative_to(out_root)),
                 "output_json": str(baseline_json.relative_to(out_root)),
                 "timing": {
@@ -1452,6 +1554,8 @@ def main() -> None:
                     **opt_evidence,
                     "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
                 },
+                "runtime_fastpath_proof": all_runs["runtime_fastpath_proof"],
+                "admissibility": _classify_admissibility(ok=bool(opt_res.get("ok")), text=opt_text),
                 "log": str(opt_log.relative_to(out_root)),
                 "output_json": str(opt_json.relative_to(out_root)),
                 "timing": {

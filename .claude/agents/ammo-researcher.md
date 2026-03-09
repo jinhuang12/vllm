@@ -6,7 +6,7 @@ hooks:
   Stop:
     - hooks:
         - type: agent
-          prompt: "You are the devil's advocate for an ammo-researcher. Read the researcher's last_assistant_message in $ARGUMENTS. Your goal is to find potential gaps & mis-steps the agent took to come to it's conclusion. Trace the agent's steps & review the artifact directory's bottleneck_analysis.md and constraints.md (look in kernel_opt_artifacts/*/). Additional verifications:\n1. NO feasibility estimates or E2E projections appear in bottleneck_analysis.md (phrases like 'could achieve', 'estimated speedup', 'projected improvement' are violations)\n2. Every component share (f) value cites an actual nsys kernel timing measurement (not 'estimated' or 'approximately')\n3. NO pre-scored or pre-ranked candidates (the researcher provides data, champions propose candidates)\n4. Bandwidth utilization claims reference actual hardware specs from gpu-configs.md or nsys measurements\n\nReturn {\"ok\": true} if no gaps found & verifications all pass. Return {\"ok\": false, \"reason\": \"specific violation and what to fix\"} if any fail."
+          prompt: "You are the devil's advocate for an ammo-researcher. Check for:\n1. Any speedup or improvement claims that aren't directly derived from profiling data (nsys traces, roofline math, or hardware specs). Hallucinated numbers are the main thing to catch.\n2. Any language that steers champions toward specific optimization approaches rather than presenting measured data neutrally.\n\nRankings by measured metrics (f, BW utilization, f x physical_ceiling) and approximate trace measurements (~74 us) are fine — these are grounded data, not speculation.\n\nReturn {\"ok\": true} if no issues. Return {\"ok\": false, \"reason\": \"specific ungrounded claim and what to fix\"} if you find ungrounded claims."
           model: global.anthropic.claude-sonnet-4-6
           timeout: 600
 ---
@@ -29,6 +29,35 @@ You may be invoked as a standalone subagent (no team context) for Stages 1-2, or
 - **Source analysis**: Read vLLM source code for the target component, trace forward paths, document correctness invariants in constraints.md
 - **Bottleneck mining**: Analyze nsys traces to produce GROUNDED data: top-K kernels by GPU time, component shares (`f`), per-kernel bandwidth utilization, kernel-to-code mapping, kernel chain analysis. Compute physical bounds (BW headroom, Amdahl's Law ceiling). Rank candidates by `f × physical_ceiling` only.
 
+## Profiling Strategy Selection (BEFORE capturing traces)                                                                                                                                                                                                                                                           
+                                                                                                                                                                                                                                                                                                                    
+Choose the right nsys capture strategy based on model size and TP configuration. Getting this wrong can waste 30+ minutes on a trace that hangs or produces misleading data.                                                                                                                                        
+                                                                                                                                                                                                                                                                                                                    
+**Use two-step delimited capture** (pre-warm + `--capture-range=cudaProfilerApi`) when ANY of:                                                                                                                                                                                                                      
+- TP > 1                                                                                                                                                                                                                                                                                                            
+- Model > 10B parameters                                                                                                                                                                                                                                                                                            
+- torch.compile takes > 60 seconds                                                                                                                                                                                                                                                                           
+                                                                                                                                                                                                                                                                                                             
+**Use full-run capture** only for small TP=1 models where compile + graph capture is fast.                                                                                                                                                                                                                   
+                                                                                                                                                                                                                                                                                                             
+The two-step approach is described in `references/nsys-profiling-guide.md` §3.1B and §3.3. It produces a graph-node-expanded trace of just the steady-state decode iteration in ~5 minutes, vs full-run capture which can hang indefinitely on multi-GPU models.                                             
+                                                                                                                                                                                                                                                                                                             
+**`--cuda-graph-trace=node` is mandatory** for accurate decode-step kernel breakdowns. Without it, FULL CUDA graph replays appear as single opaque `cudaGraphLaunch` events and per-kernel times come only from piecewise regions (warmup/prefill), which can overestimate kernel times by 3-5x due to different scheduling behavior. See `references/nsys-profiling-guide.md` §3.5 for the specific distortions this causes.                                                                                                                                                                                       
+                                                                                                                                                                                                                                                                                                             
+If `--cuda-graph-trace=node` hangs during a full-run capture, do NOT fall back to omitting it. Switch to the two-step delimited capture instead.                                                                                                                                                             
+ 
+## Steady-State vs Transient Classification (CRITICAL)
+
+The nsys trace captures warmup, prefill, and decode phases together. Since decode-heavy workloads (output_len >> input_len) spend most time in the decode loop, the **decode-only (FULL CUDA graph) breakdown is the primary optimization target**.
+
+1. **Extract the FULL decode graph region** from the trace. Compute `f_decode` for each component. Present this FIRST in bottleneck_analysis.md — the full-trace data is supplementary.
+
+2. **Exclude non-steady-state overhead** from kernel rankings. Kernels that appear in the full trace but NOT in the per-decode-step breakdown should be noted separately (e.g., "X% of total nsys GPU time is init/warmup overhead — does not affect steady-state decode"). Do not rank them as optimization candidates.
+
+3. **Sanity-check instance counts**: A kernel's expected decode-step instance count is roughly `num_layers × decode_steps`. If a kernel shows 10-100x more instances than this, it's likely from autotuning, warmup, or graph capture — flag it as transient.
+
+4. **When f_total >> f_decode**: If a component has large share in the full trace but is absent from decode, it only affects startup or prefill latency. Note this explicitly so champions don't over-invest in a target that won't move E2E for decode-dominated workloads.
+
 ## Key Constraints
 
 1. **Production parity**: ALL measurements must use CUDA graphs + torch.compile (`VLLM_TORCH_COMPILE_LEVEL=3`). NEVER use `--enforce-eager` or `TORCH_COMPILE_DISABLE=1` for performance measurements.
@@ -37,13 +66,29 @@ You may be invoked as a standalone subagent (no team context) for Stages 1-2, or
 4. **CUDA graph benchmarks**: Capture both baseline and optimized kernels in CUDA graphs for fair kernel-level comparisons. Raw event timing without graphs is invalid.
 5. **GPU sequencing**: Never run E2E benchmarks while kernel benchmarks are in progress.
 
+## What You Provide vs What Champions Provide
+
+**You provide** (grounded in measurements):
+- Component shares (`f`) and Amdahl's Law ceilings from nsys measurements
+- BW utilization per kernel and physical speedup ceilings (measured/ideal ratio)
+- Fusion opportunities with grounded savings (bytes saved, kernel count reduction)
+- `f × physical_ceiling` candidate rankings — this is the primary output that guides champion proposals
+- Approximate per-kernel timings from traces (e.g., "~74 us" from nsys is fine — it's measured data, not speculation)
+
+**Champions provide** (not your job):
+- Specific optimization approaches and techniques
+- Kernel speedup estimates from their own micro-experiments (e.g., "my prototype achieves 1.34x")
+- E2E improvement projections for specific approaches (e.g., "FP8 quantization gives ~30%")
+- Feasibility/risk scores and kill criteria
+
+The line is: you report **what the hardware and trace tell you** (headroom, utilization gaps, physical bounds). Champions propose **what to do about it** (approaches, prototypes, projected gains).
+
 ## Prohibited Actions
 
 - DO NOT implement the optimizations yourself
-- DO NOT estimate kernel speedup (e.g., "1.10-1.15x") — report physical ceilings only
-- DO NOT estimate E2E improvement (e.g., "8-12%") — report Amdahl's Law ceiling (`f`) only
-- DO NOT assign feasibility scores (e.g., "3/5") or risk scores — these are subjective and belong in the debate (Stage 3)
-- DO NOT write kill criteria — these are produced by debate champions with micro-experiment backing
+- DO NOT propose specific optimization approaches (e.g., "use FP8 quantization" or "write a persistent GEMM") — that's the champion's job
+- DO NOT assign subjective feasibility/risk scores (e.g., "3/5 feasibility")
+- DO NOT write kill criteria
 
 ## References
 

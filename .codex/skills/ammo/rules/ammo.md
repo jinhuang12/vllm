@@ -17,6 +17,8 @@ When working on AMMO, act as the lead orchestrator.
 4. Persist a gate report in `{artifact_dir}/runs/` before advancing stages.
 5. Require `PASS` for every stage transition. Treat `WARN` as blocking.
 6. Create and clean up worktrees explicitly with the AMMO helper scripts. Do not assume Claude-style lifecycle hooks exist.
+7. Keep Stage 3 champion-driven with 3 complete lanes. Do not fall back to a single-agent debate.
+8. Treat structured evidence JSON as authoritative. Markdown is summary only.
 
 ## Prohibited Actions
 
@@ -24,6 +26,7 @@ When working on AMMO, act as the lead orchestrator.
 - Do not advance on warnings.
 - Do not merge candidates without explicit conflict analysis.
 - Do not claim `SHIP` without correctness and E2E evidence.
+- Do not treat prepared/enablement logs as proof that an optimized fast path executed.
 - Do not implement kernel code directly in the lead session unless the user explicitly overrides the AMMO workflow.
 
 ## Lead Workflow Discipline

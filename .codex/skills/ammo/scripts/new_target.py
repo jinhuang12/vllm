@@ -2,9 +2,9 @@
 """ammo v2: scaffold a new target artifact directory.
 
 Creates:
-  - constraints.md, optimization_plan.md, implementation_notes.md,
-    validation_results.md, integration.md
-  - state.json (simplified v2 schema)
+  - constraints.md, optimization_plan.md, implementation_notes.md
+  - validation_results.md and integration.md summary stubs
+  - state.json (schema-backed v2 workflow state)
   - target.json (input for run_vllm_bench_latency_sweep.py)
 
 Safety: refuses to overwrite existing files unless --force is provided.
@@ -132,40 +132,33 @@ Record:
 
 
 def _validation_results_md() -> str:
-    return """# Validation Results (Stage 5)
+    return """# Validation Summary (Stage 5)
 
-> Default gates + reporting checklist: `references/validation-defaults.md`.
+This file is a human-readable summary only.
 
-## Correctness
+Authoritative Stage 5 evidence belongs in:
 
-- Status:
-- Tolerance (atol/rtol):
-- Max abs diff:
+- `tracks/{op_id}/evidence.json`
+- `tracks/{op_id}/validation_results.md`
+- `runs/validation_gate_report.json`
 
-## Kernel perf (CUDA graphs)
+Use `scripts/generate_validation_report.py --artifact-dir <dir> --track <op_id>`
+to render the Markdown summary from structured evidence.
 
-- Bucket set:
-- Baseline vs optimized (µs):
-
-## E2E latency (vllm bench latency)
-
-- Workload:
-- Baseline vs optimized (s):
-
-## Decision
-
-- Ship / Restrict envelope / Pivot route / Stop
-
+If there are no track artifacts yet, Stage 5 is incomplete.
 """
-
 
 def _integration_md() -> str:
     return """# Integration
 
-Record:
-- fast-path enablement envelope (model id, dtype, TP/EP, dims, buckets)
-- fallback behavior
-- how to reproduce validation
+This file is a human-readable Stage 6 summary.
+
+Authoritative integration state belongs in:
+
+- `state.json.integration`
+- `runs/validation_gate_report.json`
+
+Record here only the final decision, included candidates, and reproduction notes.
 
 """
 
@@ -177,6 +170,7 @@ def _state_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
     target_name = f"{model_short}-{hw_short}"
 
     return {
+        "schema_version": 2,
         "target": {
             "model_id": fields.model_id,
             "hardware": fields.hardware,
@@ -214,6 +208,8 @@ def _state_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
             "max_rounds": 4,
             "selected_winners": [],
             "selection_rationale": None,
+            "agent_health": {},
+            "retry_history": [],
         },
         "parallel_tracks": {},
         "integration": {
@@ -233,6 +229,7 @@ def _target_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
         "artifact_dir": str(artifact_dir),
         "target": {
             "model_id": fields.model_id,
+            "hardware": fields.hardware,
             "dtype": fields.dtype,
             "tp": fields.tp,
             "ep": fields.ep,
@@ -256,6 +253,10 @@ def _target_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
             },
             "baseline_label": "baseline",
             "opt_label": "opt",
+            "run_metadata": {
+                "candidate_id": None,
+                "run_purpose": "official",
+            },
             "fastpath_evidence": {
                 "baseline": {
                     "require_patterns": [],
@@ -266,6 +267,13 @@ def _target_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
                     "forbid_patterns": [],
                 },
                 "note": "Fill require_patterns to assert optimized fast-path executed (recommended).",
+            },
+            "runtime_proof": {
+                "json_path": "",
+                "hits_key": "fastpath_hits",
+                "min_hits": 1,
+                "required_for_opt": True,
+                "note": "Recommended for official optimized runs. Point to a JSON file with explicit fast-path hit evidence.",
             },
         },
         "notes": {
@@ -305,6 +313,8 @@ def main() -> None:
     (artifact_dir / "runs").mkdir(exist_ok=True)
     (artifact_dir / "nsys").mkdir(exist_ok=True)
     (artifact_dir / "blockers").mkdir(exist_ok=True)
+    (artifact_dir / "debate" / "proposals").mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "tracks").mkdir(exist_ok=True)
 
     _write_text(artifact_dir / "constraints.md", _constraints_md(fields), force=args.force)
     _write_text(artifact_dir / "optimization_plan.md", _optimization_plan_md(), force=args.force)
@@ -317,7 +327,7 @@ def main() -> None:
 
     print(f"Initialized artifact directory: {artifact_dir}")
     print("Created: constraints.md, optimization_plan.md, implementation_notes.md, validation_results.md, integration.md, state.json, target.json")
-    print("Next: fill constraints.md (Phase 1) and run collect_env.py")
+    print("Next: run preflight_check.py, then collect_env.py, then fill constraints.md (Stage 1).")
 
 
 if __name__ == "__main__":

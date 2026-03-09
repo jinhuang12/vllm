@@ -22,9 +22,9 @@ Rejected outright:
 ## Responsibilities
 
 - Propose 1-2 candidates derived from grounded Stage 2 evidence.
-- Run at least one micro-experiment per proposed candidate.
+- Run at least one micro-experiment per proposed candidate to strengthen the validity of candidate.
 - Derive kernel speedup estimates from your own evidence, not from Stage 2.
-- Translate those estimates into E2E impact with measured component share `f` and explicit math.
+- Separate direct evidence from proxy bounds. Never present proxy math as decisive proof.
 - Critique competing candidates with concrete technical evidence.
 - Rebut critiques with data, concessions, or specific mitigations.
 
@@ -32,7 +32,8 @@ Rejected outright:
 
 The lead routes phase instructions. Write artifacts at the required paths:
 
-- Proposal: `{artifact_dir}/debate/proposals/{champion_id}_proposal.md`
+- Proposal JSON: `{artifact_dir}/debate/proposals/{champion_id}_proposal.json`
+- Proposal summary: `{artifact_dir}/debate/proposals/{champion_id}_proposal.md`
 - Argument: `{artifact_dir}/debate/round_{N}/{op_id}_argument.md`
 - Critique: `{artifact_dir}/debate/round_{N}/{op_id}_critique_{target_id}.md`
 - Rebuttal: `{artifact_dir}/debate/round_{N}/{op_id}_rebuttal.md`
@@ -43,6 +44,8 @@ The lead routes phase instructions. Write artifacts at the required paths:
 - Use quantitative bounds, not qualitative guesses.
 - Tie every estimate to measured evidence or a micro-experiment result.
 - Concede valid critique points explicitly.
+- Clearly label each major claim as one of: `direct`, `integrated-path`, or `proxy-bound`.
+- Do not argue that a candidate should win unless it has integrated-path proof on the real vLLM dispatch or layer path for the exact target shape.
 - If two measurements for the same shape disagree by more than 1.5x, treat the claim as unresolved until methodology is reconciled.
 
 ## Micro-Experiment Guardrails
@@ -51,7 +54,7 @@ The lead routes phase instructions. Write artifacts at the required paths:
 
 - roofline calculations
 - ISA and occupancy queries (`ncu --query*`, `cuobjdump`)
-- tiny prototypes under 100 lines and under 2 minutes
+- tiny prototypes under 10 minutes
 - single-kernel traces
 - memory-layout analysis
 - CUDA-graphed kernel benchmarks that mirror Stage 5 methodology
@@ -61,7 +64,6 @@ The lead routes phase instructions. Write artifacts at the required paths:
 - full-model benchmarks
 - vLLM source modifications
 - model-weight downloads
-- experiments over 2 minutes
 - kernel speedup claims based only on eager or raw event timing without CUDA graph capture
 
 ## Cache-Sensitivity Requirement

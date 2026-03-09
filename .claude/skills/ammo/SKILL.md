@@ -38,6 +38,9 @@ No persistent team across stages. Agents spawn when needed and terminate when do
 - Lead (you) invokes ammo-researcher as a subagent via Task tool for profiling, source analysis, bottleneck mining.
 - No TeamCreate. No persistent agents. Subagent returns results directly.
 - Lead runs gates (`verify_phase1_baseline.py`, Stage 2 review) between stages.
+      
+**Profiling strategy selection (lead decides BEFORE dispatching researcher)**:                                                                                                                                                                                                                                      
+For TP > 1 or models > 10B params, the lead should instruct the researcher to use two-step delimited nsys capture (pre-warm + `--capture-range=cudaProfilerApi`). Full-run nsys with `--cuda-graph-trace=node` will hang on multi-GPU models because it traces torch.compile and CUDA graph capture across all worker processes. See `references/nsys-profiling-guide.md` §3.1B and §3.3 for the exact commands. The lead may also run the E2E baseline benchmark and nsys pre-warm step itself (in parallel with source analysis by the researcher) to save time.
 
 ### Stage 3: Candidate Proposal + Adversarial Debate
 
@@ -51,7 +54,7 @@ No persistent team across stages. Agents spawn when needed and terminate when do
 
 ### Stages 4-5: Parallel Worktree Tracks
 
-- Per track: spawn ammo-implementer subagent (auto-creates worktree via `isolation: worktree`) -> frontmatter Stop hook (DA) verifies validation complete + Amdahl's sanity -> compilation gate -> state update.
+- Per track: spawn ammo-implementer as a **subagent** with `isolation: worktree` (NOT as a teammate in a team). This ensures the Stop hook (DA) fires on completion. Do NOT use `team_name` when spawning implementers.
 - The implementer handles BOTH implementation AND validation (correctness, kernel benchmarks, E2E). No separate validator agent.
 - GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
 - See `orchestration/parallel-tracks.md`.

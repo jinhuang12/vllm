@@ -5,7 +5,7 @@ Champions independently propose optimization candidates from grounded Stage 2 da
 ## Agent Structure
 
 - Only the lead may spawn champion agents.
-- Spawn 2-4 `ammo-champion` roles or fall back to `explorer` when custom roles are unavailable.
+- Spawn exactly 3 `ammo-champion` roles.
 - Store active agent IDs in `state.json.debate.agent_ids` when helpful.
 - Every champion reads `bottleneck_analysis.md` independently and writes proposal artifacts.
 
@@ -29,8 +29,9 @@ Each champion writes `{artifact_dir}/debate/proposals/{champion_id}_proposal.md`
 | Candidate specification | Kernel/component, technique, and target envelope |
 | Grounded data | Measured timings, component share `f`, BW utilization, constraints |
 | Micro-experiment result | Mandatory empirical evidence |
+| Integrated-path proof | Mandatory real vLLM dispatch/layer evidence |
 | Feasibility math | Kernel speedup derived from the micro-experiment |
-| Expected E2E impact | Explicit derivation from `f` and measured speedup |
+| Expected E2E impact | Explicit direct claim or proxy bound |
 | Kill criteria | Thresholds that define failure |
 | Kernel code scope | Files, language, and approximate code surface |
 
@@ -40,6 +41,7 @@ Reject any proposal that fails the custom kernel mandate.
 
 - Pass: new or substantially modified CUDA, Triton, or CUTLASS kernel work
 - Reject: config-only changes, flag flips, parameter tuning, or missing kernel scope
+- Reject: proxy-only candidates without integrated-path proof
 
 Non-compliant proposals do not advance to Round 1.
 
@@ -82,6 +84,12 @@ Do not send a disputed claim into Stage 4.
 3. Verify every required artifact exists before advancing.
 4. Score candidates with `references/debate-scoring-rubric.md`.
 5. Write winner selection to `{artifact_dir}/debate/summary.md`.
+
+If a champion misses a required artifact deadline:
+
+1. re-prompt once
+2. respawn the same role once if still incomplete
+3. mark the run `BLOCKED` if 3 complete lanes still cannot be produced
 
 ## Micro-Experiment Guardrails
 

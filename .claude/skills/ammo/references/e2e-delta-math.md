@@ -30,3 +30,13 @@ I_target <= f * (1 - s)  =>  (1 - s) >= I_target / f
 If `I_target / f` is implausibly large, switch to:
 - a simpler optimization approach to harvest the most reliable µs wins, or
 - document the limitation and stop.
+
+## Which `f` to use: f_decode vs f_total
+
+For decode-heavy workloads (output_len >> input_len), the E2E latency is dominated by decode steps. Use **f_decode** (component share within the FULL CUDA graph decode phase), not f_total (full trace including warmup and prefill).
+
+**Common trap**: A kernel may show f_total = 0.23 in the full nsys trace but f_decode = 0.0 because it only runs during prefill or autotuning warmup. Optimizing such a kernel yields ~0% E2E improvement in production.
+
+**Rule**: Always verify your target component's f_decode before committing to an optimization. If f_decode ≈ 0 and the workload is decode-heavy, the optimization ceiling is near zero regardless of kernel speedup.
+
+**Transient overhead**: Triton `@triton.autotune` probing, torch.compile graph capture, and JIT compilation appear in traces but are one-time startup costs. They inflate f_total but have f_decode = 0. These are NOT optimization targets for serving workloads.

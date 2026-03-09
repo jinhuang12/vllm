@@ -52,6 +52,14 @@ After Phase 0 submissions, the lead checks each proposal against the **Custom Ke
 
 **Non-compliant proposals MUST NOT advance to Round 1.**
 
+### Diversity Check (Lead)
+
+After the eligibility gate, the lead reviews proposal diversity:
+
+1. **f-value source check**: For each proposal, check whether the champion used `f_decode` (from the per-decode-step breakdown) or `f_total` (from the full trace). If the target kernel isn't in the decode breakdown, note this — the champion may be targeting prefill latency intentionally, or may have used a misleading f-value.
+
+2. **Component diversity**: If all proposals target the same component, the lead should consider whether the debate will produce useful differentiation. If not, the lead may ask one champion to explore the next-highest-`f_decode` component as an alternative. The goal is at least 2 distinct target components among the eventual winners to reduce portfolio risk.
+
 ## Round Structure
 
 Normal minimum: **2 rounds**. With convergence shortcut: **1 round** (see above). Maximum: **4 rounds**. Each round has three sequential phases.
