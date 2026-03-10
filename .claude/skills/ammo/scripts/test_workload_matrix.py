@@ -369,49 +369,113 @@ class TestRenderE2ESection:
 
 
 class TestNsysProfileIntegration:
-    """Tests for nsys profiling integration (file naming, prefix construction)."""
+    """Tests for nsys profiling integration (prefix construction, file rename, error handling)."""
 
-    def test_nsys_file_rename_mapping(self):
-        """Verify that nsys repeat output files map correctly to bucket tags."""
-        from run_vllm_bench_latency_sweep import _bucket_file_tag
+    def _build_nsys_prefix(self, buckets, label="baseline", nsys_dir="/tmp/nsys"):
+        """Replicate the nsys prefix construction logic from main()."""
+        return [
+            "nsys", "profile",
+            "--trace=cuda,nvtx",
+            "--sample=none",
+            "--capture-range=cudaProfilerApi",
+            f"--capture-range-end=repeat:{len(buckets)}",
+            "--cuda-graph-trace=node",
+            "--trace-fork-before-exec=true",
+            "--force-overwrite=true",
+            "-o", f"{nsys_dir}/{label}_profile",
+        ]
 
+    def test_nsys_prefix_repeat_count_matches_buckets(self):
+        """Verify repeat:N in constructed prefix matches bucket count."""
         buckets = [
             {"input_len": 64, "output_len": 512, "batch_size": 1},
             {"input_len": 64, "output_len": 512, "batch_size": 8},
             {"input_len": 64, "output_len": 512, "batch_size": 32},
         ]
-        # nsys repeat mode produces files numbered 1..N
-        for i, bucket in enumerate(buckets, 1):
-            src_name = f"baseline_profile.{i}.nsys-rep"
-            tag = _bucket_file_tag(bucket, buckets)
-            dst_name = f"baseline_{tag}.nsys-rep"
-            assert dst_name == f"baseline_bs{bucket['batch_size']}.nsys-rep", (
-                f"Expected baseline_bs{bucket['batch_size']}.nsys-rep, got {dst_name}"
-            )
+        prefix = self._build_nsys_prefix(buckets)
+        assert "--capture-range-end=repeat:3" in prefix
+        assert "--capture-range=cudaProfilerApi" in prefix
+        assert "--cuda-graph-trace=node" in prefix
 
-    def test_nsys_file_rename_heterogeneous(self):
-        """Verify nsys rename uses long form for heterogeneous buckets."""
+    def test_nsys_prefix_single_bucket(self):
+        """Single bucket should produce repeat:1."""
+        buckets = [{"input_len": 64, "output_len": 512, "batch_size": 1}]
+        prefix = self._build_nsys_prefix(buckets)
+        assert "--capture-range-end=repeat:1" in prefix
+
+    def test_nsys_file_rename_sequence(self, tmp_path):
+        """Verify actual file rename from nsys sequential numbering to bucket tags."""
         from run_vllm_bench_latency_sweep import _bucket_file_tag
 
+        nsys_dir = tmp_path / "nsys"
+        nsys_dir.mkdir()
+        buckets = [
+            {"input_len": 64, "output_len": 512, "batch_size": 1},
+            {"input_len": 64, "output_len": 512, "batch_size": 8},
+        ]
+        # Create fake nsys output files as nsys repeat mode would
+        for i in range(1, len(buckets) + 1):
+            (nsys_dir / f"baseline_profile.{i}.nsys-rep").write_text(f"fake-trace-{i}")
+
+        # Replicate the parent's rename logic
+        for i, bucket in enumerate(buckets, 1):
+            src = nsys_dir / f"baseline_profile.{i}.nsys-rep"
+            tag = _bucket_file_tag(bucket, buckets)
+            dst = nsys_dir / f"baseline_{tag}.nsys-rep"
+            if src.exists():
+                src.rename(dst)
+
+        # Verify renamed files exist with correct names and original content
+        assert (nsys_dir / "baseline_bs1.nsys-rep").read_text() == "fake-trace-1"
+        assert (nsys_dir / "baseline_bs8.nsys-rep").read_text() == "fake-trace-2"
+        assert not (nsys_dir / "baseline_profile.1.nsys-rep").exists()
+        assert not (nsys_dir / "baseline_profile.2.nsys-rep").exists()
+
+    def test_nsys_file_rename_heterogeneous(self, tmp_path):
+        """Verify rename uses long-form tags for heterogeneous buckets."""
+        from run_vllm_bench_latency_sweep import _bucket_file_tag
+
+        nsys_dir = tmp_path / "nsys"
+        nsys_dir.mkdir()
         buckets = [
             {"input_len": 64, "output_len": 512, "batch_size": 1},
             {"input_len": 128, "output_len": 256, "batch_size": 4},
         ]
-        tag0 = _bucket_file_tag(buckets[0], buckets)
-        tag1 = _bucket_file_tag(buckets[1], buckets)
-        assert f"baseline_{tag0}.nsys-rep" == "baseline_il64_ol512_bs1.nsys-rep"
-        assert f"baseline_{tag1}.nsys-rep" == "baseline_il128_ol256_bs4.nsys-rep"
+        for i in range(1, len(buckets) + 1):
+            (nsys_dir / f"opt_profile.{i}.nsys-rep").write_text(f"data-{i}")
 
-    def test_nsys_repeat_count_matches_buckets(self):
-        """Verify repeat:N in nsys prefix matches number of buckets."""
+        for i, bucket in enumerate(buckets, 1):
+            src = nsys_dir / f"opt_profile.{i}.nsys-rep"
+            tag = _bucket_file_tag(bucket, buckets)
+            dst = nsys_dir / f"opt_{tag}.nsys-rep"
+            if src.exists():
+                src.rename(dst)
+
+        assert (nsys_dir / "opt_il64_ol512_bs1.nsys-rep").exists()
+        assert (nsys_dir / "opt_il128_ol256_bs4.nsys-rep").exists()
+
+    def test_nsys_rename_missing_files_no_crash(self, tmp_path):
+        """Rename logic should silently skip missing nsys output files."""
+        from run_vllm_bench_latency_sweep import _bucket_file_tag
+
+        nsys_dir = tmp_path / "nsys"
+        nsys_dir.mkdir()
         buckets = [
             {"input_len": 64, "output_len": 512, "batch_size": 1},
             {"input_len": 64, "output_len": 512, "batch_size": 8},
-            {"input_len": 64, "output_len": 512, "batch_size": 32},
         ]
-        # The nsys prefix should contain --capture-range-end=repeat:{len(buckets)}
-        expected_flag = f"--capture-range-end=repeat:{len(buckets)}"
-        assert expected_flag == "--capture-range-end=repeat:3"
+        # Only create file for first bucket (simulate nsys failure on second)
+        (nsys_dir / "baseline_profile.1.nsys-rep").write_text("ok")
+
+        for i, bucket in enumerate(buckets, 1):
+            src = nsys_dir / f"baseline_profile.{i}.nsys-rep"
+            tag = _bucket_file_tag(bucket, buckets)
+            dst = nsys_dir / f"baseline_{tag}.nsys-rep"
+            if src.exists():
+                src.rename(dst)
+
+        assert (nsys_dir / "baseline_bs1.nsys-rep").exists()
+        assert not (nsys_dir / "baseline_bs8.nsys-rep").exists()  # gracefully missing
 
 
 if __name__ == "__main__":

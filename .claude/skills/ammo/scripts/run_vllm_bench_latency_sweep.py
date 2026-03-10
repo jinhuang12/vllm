@@ -913,8 +913,18 @@ def _run_inproc_latency_sweep_child(
                 num_iters_eff = int(getattr(args, "num_iters", 30))
 
                 # Start nsys capture for this bucket (if enabled).
+                # NOTE: We call cudaProfilerStart/Stop directly instead of
+                # llm.start_profile() because the latter injects --profile
+                # semantics (single-iteration capture) and propagates via
+                # vLLM's executor RPC.  Direct cudaProfilerStart() works with
+                # nsys because nsys's --capture-range=cudaProfilerApi captures
+                # ALL traced processes (including TP workers followed via
+                # --trace-fork-before-exec) when ANY process triggers the
+                # capture range — this is an nsys-level mechanism, not CUDA
+                # profiler propagation.
                 if nsys_profile:
                     import torch as _torch_prof
+                    _torch_prof.cuda.synchronize()
                     _torch_prof.cuda.cudart().cudaProfilerStart()
                     _log(f"[nsys] cudaProfilerStart for {tag}")
 
@@ -928,6 +938,7 @@ def _run_inproc_latency_sweep_child(
 
                 # Stop nsys capture for this bucket.
                 if nsys_profile:
+                    _torch_prof.cuda.synchronize()
                     _torch_prof.cuda.cudart().cudaProfilerStop()
                     _log(f"[nsys] cudaProfilerStop for {tag}")
 

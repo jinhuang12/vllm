@@ -11,7 +11,7 @@ Profile and optimize **GPU kernels** for **vLLM inference** that beat the **prod
 
 User provides: model_id, hardware, dtype, tp, component (or "auto").
 
-Lead (you) scaffolds artifact directory, orchestrates the 6-stage pipeline using subagent invocations and an ephemeral debate team.
+Lead (you) scaffolds artifact directory, orchestrates the **campaign loop** — an iterative pipeline of 7 stages that repeats until diminishing returns. Each iteration (round) discovers, debates, and implements optimizations against the current bottleneck landscape.
 
 ```bash
 python .claude/skills/ammo/scripts/new_target.py \
@@ -19,23 +19,27 @@ python .claude/skills/ammo/scripts/new_target.py \
   --model-id <MODEL_ID> --hardware <HW> --dtype <DTYPE> --tp <TP>
 ```
 
-## 6-Stage Workflow
+## Campaign Workflow
 
 ```
-Stage 1: Baseline Capture        [main session + ammo-researcher subagent]   → constraints.md
-Stage 2: Bottleneck Mining        [main session + ammo-researcher subagent]   → bottleneck_analysis.md (grounded data only)
+Stage 1: Baseline Capture          [main session + ammo-researcher subagent]   → constraints.md
+Stage 2: Bottleneck Mining          [main session + ammo-researcher subagent]   → bottleneck_analysis.md (grounded data only)
 Stage 3: Candidate Proposal + Debate [ephemeral agent team: N ammo-champion agents] → debate/summary.md
-Stage 4+5: Parallel Tracks        [2-3 worktrees, each: ammo-implementer (implements + validates) + DA audit subagent]
-Stage 6: Integration Validation   [main session direct]                       → final decision
+Stage 4+5: Parallel Tracks          [2-3 worktrees, each: ammo-implementer (implements + validates) + DA audit subagent]
+Stage 6: Integration Validation     [main session direct]                       → SHIP or round-fail
+Stage 7: Campaign Evaluation        [main session direct]                       → next round, campaign_complete, or campaign_exhausted
 ```
 
-No persistent team across stages. Agents spawn when needed and terminate when done.
+Stages 1-6 form the **inner loop** of a round. Stage 7 decides whether to iterate. No persistent team across stages. Agents spawn when needed and terminate when done.
+
+The campaign continues until the **diminishing returns threshold** is met: the top remaining bottleneck is less than `campaign.diminishing_returns_threshold_pct` (default 3%) of total decode latency. See `orchestration/campaign-loop.md` for the full protocol.
 
 ## Orchestration Model
 
 ### Stages 1-2: Main Session + Subagents
 
 - Lead (you) invokes ammo-researcher as a subagent via Task tool for profiling, source analysis, bottleneck mining.
+- For multi-bucket nsys profiling, use `--nsys-profile` on the sweep script instead of manual per-batch-size nsys invocations (see `references/nsys-profiling-guide.md` §3.5).
 - No TeamCreate. No persistent agents. Subagent returns results directly.
 - Lead runs gates (`verify_phase1_baseline.py`, Stage 2 review) between stages.
       
@@ -63,12 +67,36 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 
 - If multiple candidates pass and target different components: cherry-pick both, re-run E2E.
 - If same component: pick best E2E.
-- If none pass: EXHAUSTED.
+- If none pass: round EXHAUSTED (not campaign-level — campaign evaluates in Stage 7).
 - See `orchestration/integration-logic.md`.
+
+### Stage 7: Campaign Evaluation
+
+- After integration: record round results in `campaign.rounds`.
+- If SHIP: update `campaign.cumulative_e2e_speedup`, trigger re-profiling (Stages 1-2 on patched code).
+- Check diminishing returns: top bottleneck < `campaign.diminishing_returns_threshold_pct`?
+  - Yes → `campaign.status = "campaign_complete"`. Done.
+  - No → increment `campaign.current_round`, invalidate stale queue, enter next round.
+- If round EXHAUSTED: check threshold against existing profile. Above → new debate. Below → `campaign_exhausted`.
+- **Hook-enforced**: `GATE: campaign evaluation` blocked until round results and diminishing returns check are recorded.
+- See `orchestration/campaign-loop.md` and `orchestration/integration-logic.md` § Campaign Loop Transition.
+
+### Async Pipeline: Debate Overlaps Implementation
+
+While Stages 4-5 implementers work on round N winners, the orchestrator may start round N+1 debate from existing bottleneck data to build a candidate queue:
+
+1. New debate follows the full adversarial protocol (no lighter screening).
+2. Winners are placed in `campaign.pending_queue`, NOT sent to implementation yet.
+3. If a round N candidate ships (triggers re-profile): let the debate finish, then re-validate winners against the new profile. Discard stale candidates.
+4. If round N completes without any ship: queued winners proceed to implementation immediately.
+
+See `orchestration/campaign-loop.md` § Async Pipeline for details.
 
 ## Task Graph
 
 ```
+=== Round N Inner Loop (Stages 1-6) ===
+
 T1:  Scaffold artifact directory                          [main]
 T2:  Baseline capture + constraints.md                    [ammo-researcher subagent]    <- T1
 T3:  GATE: verify_phase1_baseline.py                      [main]                        <- T2
@@ -86,7 +114,28 @@ T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]        
 
 T11: GATE: All tracks have results                        [main]               <- all T10
 T12: Integration validation (if multiple pass)            [main]               <- T11
-T13: Final decision (SHIP / EXHAUSTED)                    [main]               <- T12
+T13: Round decision (SHIP / round-EXHAUSTED)              [main]               <- T12
+
+=== Campaign Loop (Stage 7) ===
+
+T14: Record round in campaign.rounds                      [main]               <- T13
+T15: Campaign evaluation                                  [main]               <- T14
+  IF SHIP:
+    T16: Re-profile (baseline capture on patched code)    [ammo-researcher]    <- T15
+    T17: Bottleneck mining on new baseline                [ammo-researcher]    <- T16
+    T18: Diminishing returns check                        [main]               <- T17
+      IF below threshold: CAMPAIGN COMPLETE
+      ELSE: Invalidate stale queue → new Round (T6 debate → ...)
+  IF round-EXHAUSTED:
+    T16b: Diminishing returns check (on existing profile) [main]               <- T15
+      IF below threshold: CAMPAIGN EXHAUSTED
+      ELSE: new debate round from existing data (→ T6)
+T19: GATE: campaign evaluation                            [main]               <- T15..T18
+
+=== Async Pipeline (during Stages 4-5) ===
+
+T_async: Next-round debate                                [main + debate team]
+         (overlaps T8-T10; winners queued in campaign.pending_queue)
 ```
 
 ## Non-Negotiables (BLOCKING)
@@ -135,13 +184,39 @@ These are NOT advisory. Violation blocks stage progression.
     "combined_patch_branch": null,
     "combined_e2e_result": null,
     "final_decision": null
+  },
+  "campaign": {
+    "status": "active",                          /* active | paused | campaign_complete | campaign_exhausted */
+    "current_round": 1,
+    "diminishing_returns_threshold_pct": 3,      /* stop when top bottleneck < this % */
+    "cumulative_e2e_speedup": 1.0,               /* multiplicative across shipped rounds */
+    "rounds": [],                                /* per-round history (see schema below) */
+    "shipped_optimizations": [],                 /* op_ids that shipped across all rounds */
+    "pending_queue": []                          /* candidates from async debate awaiting implementation */
   }
+}
+```
+
+Each entry in `campaign.rounds`:
+```json
+{
+  "round_id": 1,
+  "profiling_baseline_path": "runs/baseline_round_1/",
+  "top_bottleneck_share_pct": 15.2,
+  "debate_team_name": "ammo-debate-...",
+  "selected_candidates": ["op001", "op002"],
+  "implementation_results": {
+    "op001": {"status": "PASSED", "e2e_speedup": 1.12},
+    "op002": {"status": "FAILED", "reason": "correctness"}
+  },
+  "shipped": ["op001"],
+  "cumulative_speedup_after": 1.12
 }
 ```
 
 ### Stage Values
 
-`1_baseline` -> `2_bottleneck_mining` -> `3_debate` -> `4_5_parallel_tracks` -> `6_integration` -> `complete` | `exhausted`
+`1_baseline` -> `2_bottleneck_mining` -> `3_debate` -> `4_5_parallel_tracks` -> `6_integration` -> `7_campaign_eval` -> {next round | `campaign_complete` | `campaign_exhausted`}
 
 ## Communication Patterns
 
@@ -158,7 +233,7 @@ Run, don't modify:
 - `scripts/collect_env.py` — Capture environment
 - `scripts/verify_phase1_baseline.py` — Stage 1->2 gate
 - `scripts/verify_validation_gates.py` — Stage 5 gate (supports `--track` for per-track validation)
-- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked)
+- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `workload_matrix` for multi-dimensional (input_len x output_len x batch_size) sweeps and `--nsys-profile` for per-bucket nsys traces without model reload.
 - `scripts/generate_validation_report.py` — Structured reporting
 
 ## References
@@ -182,6 +257,7 @@ Run, don't modify:
 
 | Topic | File |
 |-------|------|
+| Campaign loop | `orchestration/campaign-loop.md` |
 | Debate protocol | `orchestration/debate-protocol.md` |
 | Parallel tracks | `orchestration/parallel-tracks.md` |
 | Integration logic | `orchestration/integration-logic.md` |
@@ -208,16 +284,22 @@ After interruption or compaction:
 4. If Stage 3 debate active: read debate team config, check debate artifacts.
 5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status. DA audit is embedded in each agent's frontmatter Stop hook — no separate spawn needed.
 6. Resume from last completed gate.
+7. If campaign is active: read `campaign.current_round`, `campaign.status`, and `campaign.pending_queue`. Check if an async debate was in progress.
+8. If `campaign` key is missing (legacy state.json): treat as round 1 of a new campaign — initialize the campaign object from existing state.
 
 ## Quick Start Examples
 
 **Example 1**: `User: "Use ammo for Qwen3-30B-A3B on L40S TP=1"` ->
 
-1. Scaffold artifact directory.
-2. Invoke ammo-researcher subagent for baseline + bottleneck mining.
+1. Scaffold artifact directory (campaign initialized).
+2. Round 1: invoke ammo-researcher subagent for baseline + bottleneck mining.
 3. Run gates, spawn debate team for top candidates.
 4. Select winners, create parallel worktree tracks.
-5. Implement + validate in parallel.
-6. Integration if multiple pass -> SHIP or EXHAUSTED.
+5. Implement + validate in parallel. Optionally start async debate for round 2.
+6. Integration if multiple pass → SHIP or round-EXHAUSTED.
+7. Campaign evaluation: record round, check diminishing returns.
+8. If above threshold: re-profile → new round. Repeat until threshold met.
 
-**Example 2**: Resume -> Read `state.json`, check current stage, resume from last gate.
+**Example 2**: Resume -> Read `state.json`, check `campaign.current_round` and active stage, resume from last gate.
+
+**Example 3**: Mid-campaign resume after compaction -> SessionStart hook injects campaign context (round, status, cumulative speedup). Read `state.json`, resume current round.

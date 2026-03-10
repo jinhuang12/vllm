@@ -200,7 +200,31 @@ nsys profile \
   vllm serve {model_id} --profiler-config.profiler cuda
 ```
 
-### 3.5 Traces without `--cuda-graph-trace=node` are misleading (CRITICAL)                                                                                                                                                                                                                                         
+### 3.5 Automated per-bucket profiling via sweep script
+
+Instead of manually running nsys per batch size (which reloads the model each time), use the sweep script's `--nsys-profile` flag to profile all buckets in a single model load:
+
+```bash
+python scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --nsys-profile
+```
+
+This produces **one `.nsys-rep` per bucket** in `{artifact_dir}/e2e_latency/nsys/` (e.g., `baseline_bs1.nsys-rep`, `baseline_bs8.nsys-rep`).
+
+**How it works**: The sweep script wraps the child process with `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat:N` and calls `cudaProfilerStart()/Stop()` with `torch.cuda.synchronize()` around each bucket's measured iterations (after warmup). nsys's repeat mode automatically splits each capture range into a separate `.nsys-rep` file. The script renames the numbered files to match bucket tags.
+
+**TP > 1 compatibility**: The script sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` and uses `--trace-fork-before-exec=true`. nsys captures all traced processes (including TP workers) when any process triggers the capture range — this is an nsys-level mechanism, not CUDA profiler propagation. Each `.nsys-rep` contains traces from all GPUs.
+
+**Workload matrix support**: The sweep script also supports sweeping `(input_len, output_len, batch_size)` tuples via the `workload_matrix` field in `target.json` — see `references/e2e-latency-guide.md`.
+
+Each output file is independently analyzable:
+
+```bash
+nsys stats --report cuda_gpu_kern_sum {artifact_dir}/e2e_latency/nsys/baseline_bs8.nsys-rep
+```
+
+### 3.6 Traces without `--cuda-graph-trace=node` are misleading (CRITICAL)                                                                                                                                                                                                                                         
                                                                                                                                                                                                                                                                                                                    
 If `--cuda-graph-trace=node` is omitted (or the trace hangs and you fall back to a non-expanded trace), the resulting data has serious distortions:                                                                                                                                                                
                                                                                                                                                                                                                                                                                                                    
