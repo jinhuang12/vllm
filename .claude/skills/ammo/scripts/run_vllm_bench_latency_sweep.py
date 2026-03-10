@@ -1092,7 +1092,6 @@ def main() -> None:
                 f"{args.execution_mode!r}). nsys wraps the child process which "
                 "loads the model once — cli_per_bs is incompatible."
             )
-        import shutil
         if not shutil.which("nsys"):
             raise SystemExit(
                 "nsys not found on PATH. Install Nsight Systems CLI or remove --nsys-profile."
