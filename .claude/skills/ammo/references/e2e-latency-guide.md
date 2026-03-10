@@ -114,6 +114,26 @@ If you claim a prefill win, run a second benchmark with a large input length (an
 
 Use the **same bucket set** you profiled in Stage 1 and plan to enable in Stage 6.
 
+Use the sweep script for automated multi-bucket benchmarking (loads model once per label):
+
+```bash
+python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
+```
+
+The script reads `target.json` for workload config. Supports both the flat format
+(`input_len`, `output_len`, `batch_sizes`) and `workload_matrix` for multi-dimensional
+`(input_len x output_len x batch_size)` sweeps.
+
+To also capture per-bucket nsys profiles during the sweep (avoiding model reload):
+
+```bash
+python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir} --nsys-profile
+```
+
+This produces one `.nsys-rep` per bucket in `{artifact_dir}/e2e_latency/nsys/`.
+
+<details><summary>Manual equivalent (development only, NOT for validation)</summary>
+
 ```bash
 for BS in 8 32; do
   echo "=== batch_size=$BS ==="
@@ -137,6 +157,8 @@ for BS in 8 32; do
     --output-json /tmp/opt_bs${BS}.json
 done
 ```
+
+</details>
 
 ## Parity checklist (must match baseline)
 

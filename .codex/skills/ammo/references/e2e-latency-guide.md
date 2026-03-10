@@ -56,6 +56,26 @@ Run separately when claiming a prefill win. Keep it separate from decode-heavy r
 
 Use the same bucket set profiled in Stage 1.
 
+Use the sweep script for automated multi-bucket benchmarking (loads model once per label):
+
+```bash
+python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
+```
+
+The script reads `target.json` for workload config. Supports both the flat format
+(`input_len`, `output_len`, `batch_sizes`) and `workload_matrix` for multi-dimensional
+`(input_len x output_len x batch_size)` sweeps.
+
+To also capture per-bucket nsys profiles during the sweep (avoiding model reload):
+
+```bash
+python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir} --nsys-profile
+```
+
+This produces one `.nsys-rep` per bucket in `{artifact_dir}/e2e_latency/nsys/`.
+
+<details><summary>Manual equivalent (development only, NOT for validation)</summary>
+
 ```bash
 for BS in 8 32; do
   <ENABLE_FLAG>=1 vllm bench latency \
@@ -69,6 +89,8 @@ for BS in 8 32; do
     --output-json /tmp/opt_bs${BS}.json
 done
 ```
+
+</details>
 
 Use Stage 1 baseline JSONs for comparison. Do not regenerate baselines from the worktree.
 

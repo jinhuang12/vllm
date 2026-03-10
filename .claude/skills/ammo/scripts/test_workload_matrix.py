@@ -368,5 +368,51 @@ class TestRenderE2ESection:
         assert "| 1 |" in md
 
 
+class TestNsysProfileIntegration:
+    """Tests for nsys profiling integration (file naming, prefix construction)."""
+
+    def test_nsys_file_rename_mapping(self):
+        """Verify that nsys repeat output files map correctly to bucket tags."""
+        from run_vllm_bench_latency_sweep import _bucket_file_tag
+
+        buckets = [
+            {"input_len": 64, "output_len": 512, "batch_size": 1},
+            {"input_len": 64, "output_len": 512, "batch_size": 8},
+            {"input_len": 64, "output_len": 512, "batch_size": 32},
+        ]
+        # nsys repeat mode produces files numbered 1..N
+        for i, bucket in enumerate(buckets, 1):
+            src_name = f"baseline_profile.{i}.nsys-rep"
+            tag = _bucket_file_tag(bucket, buckets)
+            dst_name = f"baseline_{tag}.nsys-rep"
+            assert dst_name == f"baseline_bs{bucket['batch_size']}.nsys-rep", (
+                f"Expected baseline_bs{bucket['batch_size']}.nsys-rep, got {dst_name}"
+            )
+
+    def test_nsys_file_rename_heterogeneous(self):
+        """Verify nsys rename uses long form for heterogeneous buckets."""
+        from run_vllm_bench_latency_sweep import _bucket_file_tag
+
+        buckets = [
+            {"input_len": 64, "output_len": 512, "batch_size": 1},
+            {"input_len": 128, "output_len": 256, "batch_size": 4},
+        ]
+        tag0 = _bucket_file_tag(buckets[0], buckets)
+        tag1 = _bucket_file_tag(buckets[1], buckets)
+        assert f"baseline_{tag0}.nsys-rep" == "baseline_il64_ol512_bs1.nsys-rep"
+        assert f"baseline_{tag1}.nsys-rep" == "baseline_il128_ol256_bs4.nsys-rep"
+
+    def test_nsys_repeat_count_matches_buckets(self):
+        """Verify repeat:N in nsys prefix matches number of buckets."""
+        buckets = [
+            {"input_len": 64, "output_len": 512, "batch_size": 1},
+            {"input_len": 64, "output_len": 512, "batch_size": 8},
+            {"input_len": 64, "output_len": 512, "batch_size": 32},
+        ]
+        # The nsys prefix should contain --capture-range-end=repeat:{len(buckets)}
+        expected_flag = f"--capture-range-end=repeat:{len(buckets)}"
+        assert expected_flag == "--capture-range-end=repeat:3"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

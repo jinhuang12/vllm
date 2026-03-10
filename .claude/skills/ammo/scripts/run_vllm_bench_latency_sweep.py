@@ -692,6 +692,7 @@ def _run_inproc_latency_sweep_child(
     extra_args: List[str],
     out_root: Path,
     timeout_s_per_bucket: int,
+    nsys_profile: bool = False,
 ) -> int:
     """Child-mode runner: load model once, benchmark all buckets.
 
@@ -778,8 +779,9 @@ def _run_inproc_latency_sweep_child(
     )
     args = parser.parse_args(seed_argv)
 
-    if getattr(args, "profile", False):
+    if getattr(args, "profile", False) and not nsys_profile:
         # vllm bench latency --profile is a single-run action; sweeping doesn't make sense.
+        # (When nsys_profile is active, we handle profiler start/stop per-bucket ourselves.)
         _write_text(out_root / f"child_{label}_error.log", "Refusing to sweep with --profile enabled.\n")
         _update_status("error", extra={"error": "Refusing to sweep with --profile enabled."})
         return 2
@@ -909,6 +911,13 @@ def _run_inproc_latency_sweep_child(
                 latencies: List[float] = []
                 last_status_t = _time.monotonic()
                 num_iters_eff = int(getattr(args, "num_iters", 30))
+
+                # Start nsys capture for this bucket (if enabled).
+                if nsys_profile:
+                    import torch as _torch_prof
+                    _torch_prof.cuda.cudart().cudaProfilerStart()
+                    _log(f"[nsys] cudaProfilerStart for {tag}")
+
                 for i in range(num_iters_eff):
                     if _time.monotonic() > deadline:
                         raise TimeoutError(f"Bucket timeout exceeded ({timeout_s_per_bucket}s)")
@@ -916,6 +925,11 @@ def _run_inproc_latency_sweep_child(
                     if (_time.monotonic() - last_status_t) > 5.0:
                         _update_status("benchmark", batch_size=bs, extra={"iter": i + 1})
                         last_status_t = _time.monotonic()
+
+                # Stop nsys capture for this bucket.
+                if nsys_profile:
+                    _torch_prof.cuda.cudart().cudaProfilerStop()
+                    _log(f"[nsys] cudaProfilerStop for {tag}")
 
                 # Match vLLM bench JSON schema.
                 arr = np.array(latencies, dtype=np.float64)
@@ -1037,8 +1051,25 @@ def main() -> None:
     p.add_argument("--gpu-lock", action="store_true", default=True, help="Prevent concurrent sweeps on same GPUs (default)")
     p.add_argument("--no-gpu-lock", action="store_false", dest="gpu_lock", help=argparse.SUPPRESS)
     p.add_argument("--heartbeat-s", type=int, default=30, help="Heartbeat interval while a subprocess is quiet")
+    p.add_argument(
+        "--nsys-profile",
+        action="store_true",
+        default=False,
+        help=(
+            "Capture per-bucket nsys profiles during inproc_sweep. "
+            "Produces one .nsys-rep per bucket in {out}/nsys/. "
+            "Uses --capture-range=cudaProfilerApi with repeat mode."
+        ),
+    )
+    p.add_argument(
+        "--nsys-extra-flags",
+        type=str,
+        default="",
+        help="Extra flags to pass to nsys profile (e.g. '--cuda-graph-trace=node')",
+    )
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
 
     args = p.parse_args()
 
@@ -1359,6 +1390,7 @@ def main() -> None:
             extra_args=label_args,
             out_root=out_root,
             timeout_s_per_bucket=args.timeout_s,
+            nsys_profile=getattr(args, "_nsys_profile", False),
         )
         raise SystemExit(returncode)
 
@@ -1374,6 +1406,12 @@ def main() -> None:
     if args.execution_mode == "inproc_sweep":
         script_path = Path(__file__).resolve()
         child_timeout = int(args.timeout_s) * max(1, len(buckets)) + 1800
+
+        # Set up nsys output directory if profiling.
+        nsys_dir: Optional[Path] = None
+        if args.nsys_profile:
+            nsys_dir = out_root / "nsys"
+            nsys_dir.mkdir(parents=True, exist_ok=True)
 
         for run in (baseline_run, opt_run):
             child_cmd = [
@@ -1395,13 +1433,37 @@ def main() -> None:
                 "--_child-label",
                 run.label,
             ]
+            if args.nsys_profile:
+                child_cmd.append("--_nsys-profile")
+
+            # Prepend nsys wrapper when profiling.
+            child_env = dict(run.env) if run.env else dict(os.environ)
+            if args.nsys_profile:
+                assert nsys_dir is not None
+                child_env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+                nsys_prefix = [
+                    "nsys", "profile",
+                    "--trace=cuda,nvtx",
+                    "--sample=none",
+                    "--capture-range=cudaProfilerApi",
+                    f"--capture-range-end=repeat:{len(buckets)}",
+                    "--cuda-graph-trace=node",
+                    "--trace-fork-before-exec=true",
+                    "--force-overwrite=true",
+                    "-o", str(nsys_dir / f"{run.label}_profile"),
+                ]
+                if args.nsys_extra_flags:
+                    import shlex as _shlex
+                    nsys_prefix.extend(_shlex.split(args.nsys_extra_flags))
+                child_cmd = nsys_prefix + child_cmd
+
             print(f"\n=== Running inproc sweep for {run.label} ===")
             print(f"Child cmd: {_format_cmd_for_md(child_cmd, {})}")
             child_log = logs_dir / f"{run.label}_supervisor.log"
             child_status = status_dir / f"{run.label}.json"
             child_res = _run_cmd_streaming(
                 child_cmd,
-                env=run.env,
+                env=child_env,
                 cwd=None,
                 timeout_s=child_timeout,
                 log_path=child_log,
@@ -1413,6 +1475,16 @@ def main() -> None:
                     f"Inproc sweep child failed for {run.label}: returncode={child_res.get('returncode')}. "
                     f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
                 )
+
+            # Rename nsys output files to match bucket tags.
+            if nsys_dir is not None:
+                for i, bucket in enumerate(buckets, 1):
+                    src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
+                    tag = _bucket_file_tag(bucket, buckets)
+                    dst = nsys_dir / f"{run.label}_{tag}.nsys-rep"
+                    if src.exists():
+                        src.rename(dst)
+                        print(f"  nsys: {src.name} -> {dst.name}")
 
         # Populate per-bucket entries from artifacts written by children.
         new_rows: List[Dict[str, Any]] = []
