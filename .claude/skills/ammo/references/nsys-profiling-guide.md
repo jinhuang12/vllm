@@ -236,7 +236,7 @@ If `--cuda-graph-trace=node` is omitted (or the trace hangs and you fall back to
                                                                                                                                                                                                                                                                                                                    
 **If you must work with a non-expanded trace**, document these caveats prominently in `bottleneck_analysis.md` and flag all `f_decode` estimates as approximate with explicit uncertainty bounds. Prefer CUDA-graph micro-experiments (like those in Stage 3 debate) to validate nsys-extrapolated timings before committing to optimization targets.                                                                                                                                                                                                                                                                         
                                                                                                                                                                                                                                                                                                                    
-### 3.6 Export the minimum useful CSV reports                                                                                                                                                                                                                                                                      
+### 3.7 Export the minimum useful CSV reports                                                                                                                                                                                                                                                                      
     
 
 From a `.nsys-rep`, export:
@@ -269,7 +269,7 @@ nsys stats --report cuda_api_sum --format csv \
   {artifact_dir}/nsys/baseline_bs8.nsys-rep
 ```
 
-### 3.7 What each nsys report answers
+### 3.8 What each nsys report answers
 
 - `cuda_gpu_kern_sum`:
   - "What kernels dominate total GPU time?"

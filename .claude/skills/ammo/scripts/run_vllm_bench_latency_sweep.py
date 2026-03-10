@@ -1076,13 +1076,27 @@ def main() -> None:
         "--nsys-extra-flags",
         type=str,
         default="",
-        help="Extra flags to pass to nsys profile (e.g. '--cuda-graph-trace=node')",
+        help="Extra flags to pass to nsys profile (e.g. '--stats=true')",
     )
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
 
     args = p.parse_args()
+
+    # Validate --nsys-profile constraints early.
+    if args.nsys_profile:
+        if args.execution_mode != "inproc_sweep":
+            raise SystemExit(
+                "--nsys-profile requires --execution-mode inproc_sweep (got "
+                f"{args.execution_mode!r}). nsys wraps the child process which "
+                "loads the model once — cli_per_bs is incompatible."
+            )
+        import shutil
+        if not shutil.which("nsys"):
+            raise SystemExit(
+                "nsys not found on PATH. Install Nsight Systems CLI or remove --nsys-profile."
+            )
 
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
     target_path = Path(args.target_json).expanduser().resolve() if args.target_json else (artifact_dir / "target.json")
@@ -1489,6 +1503,7 @@ def main() -> None:
 
             # Rename nsys output files to match bucket tags.
             if nsys_dir is not None:
+                renamed = 0
                 for i, bucket in enumerate(buckets, 1):
                     src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
                     tag = _bucket_file_tag(bucket, buckets)
@@ -1496,6 +1511,12 @@ def main() -> None:
                     if src.exists():
                         src.rename(dst)
                         print(f"  nsys: {src.name} -> {dst.name}")
+                        renamed += 1
+                if renamed < len(buckets):
+                    print(
+                        f"  WARNING: nsys produced {renamed} of {len(buckets)} "
+                        f"expected profile files for {run.label}"
+                    )
 
         # Populate per-bucket entries from artifacts written by children.
         new_rows: List[Dict[str, Any]] = []

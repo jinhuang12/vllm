@@ -141,7 +141,19 @@ nsys profile \
   vllm serve {model_id} --profiler-config.profiler cuda
 ```
 
-### 3.5 Export the minimum useful CSV reports
+### 3.5 Automated per-bucket profiling via sweep script
+
+Instead of manually running nsys per batch size (which reloads the model each time), use the sweep script's `--nsys-profile` flag to profile all buckets in a single model load:
+
+```bash
+python scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --nsys-profile
+```
+
+This produces **one `.nsys-rep` per bucket** in `{artifact_dir}/e2e_latency/nsys/`. Uses `--capture-range=cudaProfilerApi --capture-range-end=repeat:N` with `torch.cuda.synchronize()` barriers to prevent cross-bucket kernel bleed. Works with TP > 1 (sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` and `--trace-fork-before-exec=true`). Requires `--execution-mode inproc_sweep` (default).
+
+### 3.6 Export the minimum useful CSV reports
 
 From a `.nsys-rep`, export:
 - `cuda_gpu_kern_sum` — per-kernel GPU time totals (what dominates)
@@ -173,7 +185,7 @@ nsys stats --report cuda_api_sum --format csv \
   {artifact_dir}/nsys/baseline_bs8.nsys-rep
 ```
 
-### 3.6 What each nsys report answers
+### 3.7 What each nsys report answers
 
 - `cuda_gpu_kern_sum`:
   - "What kernels dominate total GPU time?"
