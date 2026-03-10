@@ -39,12 +39,12 @@ The campaign continues until the **diminishing returns threshold** is met: the t
 ### Stages 1-2: Main Session + Subagents
 
 - Lead (you) invokes ammo-researcher as a subagent via Task tool for profiling, source analysis, bottleneck mining.
-- For multi-bucket nsys profiling, use `--nsys-profile` on the sweep script instead of manual per-batch-size nsys invocations (see `references/nsys-profiling-guide.md` §3.5).
+- Lead delegates profiling and E2E baseline capture to ammo-researcher (who uses the sweep script with `--nsys-profile`). The lead does NOT run benchmarks itself.
 - No TeamCreate. No persistent agents. Subagent returns results directly.
 - Lead runs gates (`verify_phase1_baseline.py`, Stage 2 review) between stages.
       
-**Profiling strategy selection (lead decides BEFORE dispatching researcher)**:                                                                                                                                                                                                                                      
-For TP > 1 or models > 10B params, the lead should instruct the researcher to use two-step delimited nsys capture (pre-warm + `--capture-range=cudaProfilerApi`). Full-run nsys with `--cuda-graph-trace=node` will hang on multi-GPU models because it traces torch.compile and CUDA graph capture across all worker processes. See `references/nsys-profiling-guide.md` §3.1B and §3.3 for the exact commands. The lead may also run the E2E baseline benchmark and nsys pre-warm step itself (in parallel with source analysis by the researcher) to save time.
+**Profiling strategy selection (lead decides BEFORE dispatching researcher)**:
+For TP > 1 or models > 10B params, the lead should instruct the researcher to use two-step delimited capture. The researcher handles this automatically when using the sweep script with `--nsys-profile` (it sets `VLLM_WORKER_MULTIPROC_METHOD=spawn`, `--trace-fork-before-exec=true`, and `--capture-range=cudaProfilerApi`). See `references/nsys-profiling-guide.md` §3.1B for background on why full-run capture hangs on multi-GPU models.
 
 ### Stage 3: Candidate Proposal + Adversarial Debate
 

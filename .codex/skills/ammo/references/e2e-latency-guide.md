@@ -8,9 +8,9 @@ Default gates and reporting rules live in `references/validation-defaults.md`.
 
 | Stage | Tool | Why |
 |---|---|---|
-| Stage 1 profiling | `nsys profile -- vllm bench latency` | capture traces for kernel analysis |
-| Stages 5-6 validation | `.codex/skills/ammo/scripts/run_vllm_bench_latency_sweep.py` | GPU-locked benchmark workflow |
-| Development only | `vllm bench latency` directly | quick checks, not final validation evidence |
+| Stage 1 profiling | `run_vllm_bench_latency_sweep.py --nsys-profile` | E2E baseline + per-bucket nsys traces in one pass |
+| Stages 5-6 validation | `run_vllm_bench_latency_sweep.py` | GPU-locked A/B comparison with fastpath evidence |
+| Development only | `vllm bench latency` directly | quick single-BS checks, not for validation_results.md |
 
 ## Using Stage 1 Baselines
 

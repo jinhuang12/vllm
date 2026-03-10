@@ -120,7 +120,7 @@ Commit all changes (implementation + tests + validation_results.md) to the workt
 Read as needed from `.claude/skills/ammo/references/`:
 - `validation-defaults.md` — tolerances, gate definitions, production parity requirements
 - `cudagraph-safety.md` — CUDA graph capture checklist
-- `e2e-latency-guide.md` — vllm bench latency methodology
+- `e2e-latency-guide.md` — E2E latency methodology (use sweep script)
 - `e2e-delta-math.md` — E2E improvement math
 - `gpu-configs.md` — hardware specs for benchmark validation
 - `code-templates.md` — GPU kernel patterns

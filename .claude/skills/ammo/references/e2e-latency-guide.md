@@ -11,12 +11,12 @@ This file focuses on **how to run and interpret** E2E benchmarks. Default gates 
 
 | Stage | Tool | Why |
 |-------|------|-----|
-| Stage 1 (profiling) | `nsys profile -- vllm bench latency` | Trace capture for kernel analysis |
-| Stages 5-6 (validation) | `scripts/run_vllm_bench_latency_sweep.py` | GPU-locked A/B comparison with fastpath evidence |
-| Development | `vllm bench latency` directly | Quick checks (GPU must be idle, not for validation_results.md) |
+| Stage 1 (profiling) | `run_vllm_bench_latency_sweep.py --nsys-profile` | E2E baseline + per-bucket nsys traces in one pass |
+| Stages 5-6 (validation) | `run_vllm_bench_latency_sweep.py` | GPU-locked A/B comparison with fastpath evidence |
+| Development | `vllm bench latency` directly | Quick single-BS checks only (GPU must be idle, not for validation_results.md) |
 
-The examples below show raw `vllm bench latency` for reference. For validation measurements
-reported in `validation_results.md`, always use the sweep script.
+For all measurements reported in `validation_results.md` or used for profiling, use the sweep script.
+The examples below show raw `vllm bench latency` for reference only — do not use them directly.
 
 ## Contents
 - Quickstart (baseline vs optimized)
@@ -65,9 +65,25 @@ Record in `validation_results.md`: "Baseline source: Stage 1 (not re-run)"
 
 ## Quickstart
 
-### Baseline run
+Run the sweep script from the artifact directory (which contains `target.json`):
 
 ```bash
+# Stage 1: E2E baseline + nsys profiling in one pass
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --nsys-profile
+
+# Stages 5-6: Validation sweep (no nsys)
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir}
+```
+
+The sweep script reads model, workload, and env config from `target.json` — no need to specify `--model`, `--dtype`, `--batch-size`, etc. on the command line.
+
+<details><summary>Raw vllm bench latency commands (development reference only)</summary>
+
+```bash
+# Baseline
 vllm bench latency \
   --model <MODEL_ID> \
   --tensor-parallel-size <TP> \
@@ -77,14 +93,8 @@ vllm bench latency \
   --batch-size 8 \
   --num-iters 5 \
   --output-json /tmp/baseline_bs8.json
-```
 
-### Optimized run (example: optimized fast-path)
-
-> Use the correct enable flag for *your* optimization (env var / config).
-> Replace `<ENABLE_FLAG>=1` with the actual flag for your optimization.
-
-```bash
+# Optimized (replace <ENABLE_FLAG> with your optimization's flag)
 <ENABLE_FLAG>=1 vllm bench latency \
   --model <MODEL_ID> \
   --tensor-parallel-size <TP> \
@@ -95,6 +105,8 @@ vllm bench latency \
   --num-iters 5 \
   --output-json /tmp/opt_bs8.json
 ```
+
+</details>
 
 ## Workload selection
 

@@ -42,10 +42,35 @@ Choose the right nsys capture strategy based on model size and TP configuration.
                                                                                                                                                                                                                                                                                                              
 The two-step approach is described in `references/nsys-profiling-guide.md` §3.1B and §3.3. It produces a graph-node-expanded trace of just the steady-state decode iteration in ~5 minutes, vs full-run capture which can hang indefinitely on multi-GPU models.                                             
                                                                                                                                                                                                                                                                                                              
-**`--cuda-graph-trace=node` is mandatory** for accurate decode-step kernel breakdowns. Without it, FULL CUDA graph replays appear as single opaque `cudaGraphLaunch` events and per-kernel times come only from piecewise regions (warmup/prefill), which can overestimate kernel times by 3-5x due to different scheduling behavior. See `references/nsys-profiling-guide.md` §3.5 for the specific distortions this causes.                                                                                                                                                                                       
-                                                                                                                                                                                                                                                                                                             
-If `--cuda-graph-trace=node` hangs during a full-run capture, do NOT fall back to omitting it. Switch to the two-step delimited capture instead.                                                                                                                                                             
- 
+**`--cuda-graph-trace=node` is mandatory** for accurate decode-step kernel breakdowns. Without it, FULL CUDA graph replays appear as single opaque `cudaGraphLaunch` events and per-kernel times come only from piecewise regions (warmup/prefill), which can overestimate kernel times by 3-5x due to different scheduling behavior. See `references/nsys-profiling-guide.md` §3.6 for the specific distortions this causes.
+
+If `--cuda-graph-trace=node` hangs during a full-run capture, do NOT fall back to omitting it. Switch to the two-step delimited capture instead.
+
+## E2E Baseline & Profiling Execution
+
+Use the sweep script for ALL E2E latency measurements and nsys profiling. Do NOT call `vllm bench latency` directly — it wastes time reloading the model for each batch size and is error-prone (e.g., `--dtype bf16` is invalid, must be `bfloat16`; the sweep script reads config from target.json so these errors don't happen).
+
+**Combined E2E baseline + nsys profiling (default for Stage 1)**:
+```bash
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --nsys-profile
+```
+
+This loads the model ONCE per label, benchmarks all batch sizes from target.json, AND captures per-bucket nsys traces in `{artifact_dir}/e2e_latency/nsys/`. The target.json in the artifact dir controls model, workload, and env config.
+
+**E2E baseline only (no nsys)**:
+```bash
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir}
+```
+
+**Analyze nsys traces after capture**:
+```bash
+nsys stats --report cuda_gpu_kern_sum \
+  {artifact_dir}/e2e_latency/nsys/baseline_bs8.nsys-rep
+```
+
 ## Steady-State vs Transient Classification (CRITICAL)
 
 The nsys trace captures warmup, prefill, and decode phases together. Since decode-heavy workloads (output_len >> input_len) spend most time in the decode loop, the **decode-only (FULL CUDA graph) breakdown is the primary optimization target**.
@@ -96,4 +121,4 @@ Read `.claude/skills/ammo/references/` for:
 - `nsys-profiling-guide.md` — nsys commands, multi-GPU tips, report exports
 - `validation-defaults.md` — tolerances, gate definitions, production parity requirements
 - `cudagraph-safety.md` — CUDA graph capture checklist
-- `e2e-latency-guide.md` — vllm bench latency methodology
+- `e2e-latency-guide.md` — E2E latency methodology (use sweep script)

@@ -101,8 +101,7 @@ def check_nsys_profiles(artifact_dir: Path) -> GateResult:
             evidence=[
                 f"Searched directories: {searched_list}",
                 "Expected patterns: *.nsys-rep, *.sqlite",
-                "Run: nsys profile -o {artifact_dir}/runs/baseline_bs{BS} vllm bench latency ...",
-                "Or: nsys profile -o {artifact_dir}/nsys/baseline_bs{BS} vllm bench latency ...",
+                "Run: python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir} --nsys-profile",
             ],
         )
 

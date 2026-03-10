@@ -122,8 +122,8 @@ os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "3"  # Explicit production parity
 - Before starting any benchmark, verify GPU is idle: `nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader`
 - **Validation (Stages 5-6)**: Use `scripts/run_vllm_bench_latency_sweep.py` for all
   E2E measurements — it holds a system-wide GPU lock to prevent concurrent runs
-- **Profiling (Stage 1)**: Direct `nsys profile -- vllm bench latency` is acceptable
-  for trace capture (see `nsys-profiling-guide.md`)
+- **Profiling (Stage 1)**: Use `run_vllm_bench_latency_sweep.py --nsys-profile`
+  for combined E2E baseline + nsys traces (see `nsys-profiling-guide.md` §3.5)
 - **Development**: Direct `vllm bench latency` is acceptable only if GPU is verified
   idle and results will NOT be included in validation_results.md
 - If contention is detected mid-benchmark: STOP, report to lead, and re-run after GPU is clear
