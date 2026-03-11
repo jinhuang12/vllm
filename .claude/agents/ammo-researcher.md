@@ -108,6 +108,15 @@ The nsys trace captures warmup, prefill, and decode phases together. Since decod
 
 The line is: you report **what the hardware and trace tell you** (headroom, utilization gaps, physical bounds). Champions propose **what to do about it** (approaches, prototypes, projected gains).
 
+## Long-Running Commands
+
+Sweep and profiling operations take 15-30 minutes. For Bash tool calls running the sweep
+script or nsys profiling:
+- Use `timeout: 1800000` (30 minutes) — the default 120s WILL time out
+- Run commands inline — do NOT use `run_in_background`
+- Before running sweeps, check for orphan processes: `ps aux | grep -E 'nsys|run_vllm_bench' | grep -v grep`
+- If orphans exist from a previous interrupted run, kill them before starting
+
 ## Prohibited Actions
 
 - DO NOT implement the optimizations yourself

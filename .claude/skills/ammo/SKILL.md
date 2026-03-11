@@ -83,7 +83,7 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 
 ### Async Pipeline: Debate Overlaps Implementation
 
-While Stages 4-5 implementers work on round N winners, the orchestrator may start round N+1 debate from existing bottleneck data to build a candidate queue:
+While Stages 4-5 implementers work on round N winners, the orchestrator MUST start round N+1 debate from existing bottleneck data to build a candidate queue:
 
 1. New debate follows the full adversarial protocol (no lighter screening).
 2. Winners are placed in `campaign.pending_queue`, NOT sent to implementation yet.
@@ -134,8 +134,8 @@ T19: GATE: campaign evaluation                            [main]               <
 
 === Async Pipeline (during Stages 4-5) ===
 
-T_async: Next-round debate                                [main + debate team]
-         (overlaps T8-T10; winners queued in campaign.pending_queue)
+T_async: Next-round debate                                [main + debate team]  <- T7
+         (MANDATORY after T7 completes; overlaps T8-T10)
 ```
 
 ## Non-Negotiables (BLOCKING)
@@ -286,6 +286,7 @@ After interruption or compaction:
 6. Resume from last completed gate.
 7. If campaign is active: read `campaign.current_round`, `campaign.status`, and `campaign.pending_queue`. Check if an async debate was in progress.
 8. If `campaign` key is missing (legacy state.json): treat as round 1 of a new campaign — initialize the campaign object from existing state.
+9. Check `campaign.status` before ending session. If active, either complete the current stage or set `campaign.status` to `"paused"`.
 
 ## Quick Start Examples
 
@@ -295,7 +296,7 @@ After interruption or compaction:
 2. Round 1: invoke ammo-researcher subagent for baseline + bottleneck mining.
 3. Run gates, spawn debate team for top candidates.
 4. Select winners, create parallel worktree tracks.
-5. Implement + validate in parallel. Optionally start async debate for round 2.
+5. Implement + validate in parallel. Start async debate for round 2.
 6. Integration if multiple pass → SHIP or round-EXHAUSTED.
 7. Campaign evaluation: record round, check diminishing returns.
 8. If above threshold: re-profile → new round. Repeat until threshold met.

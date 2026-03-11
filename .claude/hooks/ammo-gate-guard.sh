@@ -36,6 +36,7 @@ fi
 IS_GATE_DEBATE=false
 IS_GATE_TRACKS=false
 IS_GATE_INTEGRATION=false
+IS_GATE_CAMPAIGN=false
 
 if echo "$SUBJECT" | grep -qi "GATE:.*debate.*winner\|GATE:.*debate.*selection\|GATE:.*summary\.md"; then
     IS_GATE_DEBATE=true
@@ -43,11 +44,13 @@ elif echo "$SUBJECT" | grep -qi "GATE:.*all.*tracks\|GATE:.*track.*validated\|GA
     IS_GATE_TRACKS=true
 elif echo "$SUBJECT" | grep -qi "GATE:.*integration\|GATE:.*combined.*validation"; then
     IS_GATE_INTEGRATION=true
+elif echo "$SUBJECT" | grep -qi "GATE:.*campaign.*eval\|GATE:.*diminishing.*returns"; then
+    IS_GATE_CAMPAIGN=true
 fi
 
 if [ "$IS_GATE_VERIFY" = "false" ] && [ "$IS_ROUTE_DECISION" = "false" ] && \
    [ "$IS_GATE_DEBATE" = "false" ] && [ "$IS_GATE_TRACKS" = "false" ] && \
-   [ "$IS_GATE_INTEGRATION" = "false" ]; then
+   [ "$IS_GATE_INTEGRATION" = "false" ] && [ "$IS_GATE_CAMPAIGN" = "false" ]; then
     exit 0
 fi
 
@@ -176,36 +179,52 @@ fi
 
 # ── Path 3: Debate gate enforcement ──
 if [ "$IS_GATE_DEBATE" = "true" ]; then
-    if [ ! -d "$ARTIFACT_DIR/debate" ]; then
-        echo "BLOCKED: Debate gate requires debate/ directory in artifact dir." >&2
-        echo "  Expected: $ARTIFACT_DIR/debate" >&2
+    # Determine debate directory: campaign-round-scoped for round 2+, legacy for round 1
+    CAMPAIGN_ROUND=$(jq -r '.campaign.current_round // 1' "$STATE_FILE" 2>/dev/null)
+    DEBATE_DIR="$ARTIFACT_DIR/debate"
+
+    if [ "$CAMPAIGN_ROUND" -gt 1 ] 2>/dev/null; then
+        SCOPED_DIR="$ARTIFACT_DIR/debate/campaign_round_${CAMPAIGN_ROUND}"
+        if [ -d "$SCOPED_DIR" ]; then
+            DEBATE_DIR="$SCOPED_DIR"
+        else
+            echo "BLOCKED: Campaign round $CAMPAIGN_ROUND debate must use scoped path." >&2
+            echo "  Expected: $SCOPED_DIR" >&2
+            echo "  Round 2+ debates must not overwrite round 1 artifacts." >&2
+            exit 2
+        fi
+    fi
+
+    if [ ! -d "$DEBATE_DIR" ]; then
+        echo "BLOCKED: Debate gate requires debate directory." >&2
+        echo "  Expected: $DEBATE_DIR" >&2
         exit 2
     fi
 
-    if [ ! -f "$ARTIFACT_DIR/debate/summary.md" ]; then
-        echo "BLOCKED: Debate gate requires debate/summary.md." >&2
-        echo "  Expected: $ARTIFACT_DIR/debate/summary.md" >&2
+    if [ ! -f "$DEBATE_DIR/summary.md" ]; then
+        echo "BLOCKED: Debate gate requires summary.md." >&2
+        echo "  Expected: $DEBATE_DIR/summary.md" >&2
         exit 2
     fi
 
     # Check for proposals directory (Phase 0 must have run)
-    if [ ! -d "$ARTIFACT_DIR/debate/proposals" ]; then
-        echo "BLOCKED: Debate gate requires debate/proposals/ directory (Phase 0)." >&2
-        echo "  Expected: $ARTIFACT_DIR/debate/proposals/" >&2
+    if [ ! -d "$DEBATE_DIR/proposals" ]; then
+        echo "BLOCKED: Debate gate requires proposals/ directory (Phase 0)." >&2
+        echo "  Expected: $DEBATE_DIR/proposals/" >&2
         exit 2
     fi
 
-    PROPOSAL_COUNT=$(find "$ARTIFACT_DIR/debate/proposals" -maxdepth 1 -name "*.md" -type f | wc -l)
+    PROPOSAL_COUNT=$(find "$DEBATE_DIR/proposals" -maxdepth 1 -name "*.md" -type f | wc -l)
     if [ "$PROPOSAL_COUNT" -lt 2 ]; then
         echo "BLOCKED: Debate gate requires at least 2 champion proposals." >&2
-        echo "  Found $PROPOSAL_COUNT proposal files in $ARTIFACT_DIR/debate/proposals/" >&2
+        echo "  Found $PROPOSAL_COUNT proposal files in $DEBATE_DIR/proposals/" >&2
         exit 2
     fi
 
-    ROUND_COUNT=$(find "$ARTIFACT_DIR/debate" -maxdepth 1 -name "round_*" -type d | wc -l)
+    ROUND_COUNT=$(find "$DEBATE_DIR" -maxdepth 1 -name "round_*" -type d | wc -l)
     if [ "$ROUND_COUNT" -lt 1 ]; then
         echo "BLOCKED: Debate gate requires at least 1 debate round." >&2
-        echo "  Found $ROUND_COUNT round_* directories in $ARTIFACT_DIR/debate" >&2
+        echo "  Found $ROUND_COUNT round_* directories in $DEBATE_DIR" >&2
         exit 2
     fi
 
@@ -241,6 +260,66 @@ if [ "$IS_GATE_INTEGRATION" = "true" ]; then
         echo "BLOCKED: Integration gate requires integration.status to be 'validated', 'single_pass', 'combined', or 'exhausted'." >&2
         echo "  Current integration.status: '${INTEGRATION_STATUS:-empty}'" >&2
         exit 2
+    fi
+
+    exit 0
+fi
+
+# ── Path 6: Campaign evaluation gate ──
+if [ "$IS_GATE_CAMPAIGN" = "true" ]; then
+    # Check campaign object exists (backward compat: no campaign = allow)
+    CAMPAIGN_STATUS=$(jq -r '.campaign.status // empty' "$STATE_FILE" 2>/dev/null)
+    if [ -z "$CAMPAIGN_STATUS" ]; then
+        echo "BLOCKED: Campaign evaluation requires campaign object in state.json." >&2
+        echo "  If this is a legacy run, initialize the campaign object first." >&2
+        exit 2
+    fi
+
+    CURRENT_ROUND=$(jq -r '.campaign.current_round // 0' "$STATE_FILE" 2>/dev/null)
+
+    # Verify current round is recorded in campaign.rounds
+    ROUND_RECORDED=$(jq -r --argjson r "$CURRENT_ROUND" \
+        '[.campaign.rounds[] | select(.round_id == $r)] | length' \
+        "$STATE_FILE" 2>/dev/null)
+
+    if [ "$ROUND_RECORDED" = "0" ] || [ -z "$ROUND_RECORDED" ]; then
+        echo "BLOCKED: Campaign evaluation gate — round $CURRENT_ROUND not recorded in campaign.rounds." >&2
+        echo "  Record round results (shipped candidates, implementation_results, top_bottleneck_share_pct)" >&2
+        echo "  before completing this gate." >&2
+        exit 2
+    fi
+
+    # If campaign is still active, verify diminishing returns was checked
+    if [ "$CAMPAIGN_STATUS" = "active" ]; then
+        TOP_BOTTLENECK=$(jq -r --argjson r "$CURRENT_ROUND" \
+            '[.campaign.rounds[] | select(.round_id == $r)][0].top_bottleneck_share_pct // empty' \
+            "$STATE_FILE" 2>/dev/null)
+
+        if [ -z "$TOP_BOTTLENECK" ]; then
+            echo "BLOCKED: Campaign evaluation requires top_bottleneck_share_pct in round $CURRENT_ROUND entry." >&2
+            echo "  This field records the top bottleneck's share of total latency for the diminishing returns check." >&2
+            exit 2
+        fi
+    fi
+
+    # If candidates shipped and campaign continues, verify re-profiling path exists for next round
+    SHIPPED_COUNT=$(jq -r --argjson r "$CURRENT_ROUND" \
+        '[.campaign.rounds[] | select(.round_id == $r)][0].shipped | length // 0' \
+        "$STATE_FILE" 2>/dev/null)
+
+    if [ "$SHIPPED_COUNT" -gt 0 ] 2>/dev/null && [ "$CAMPAIGN_STATUS" = "active" ]; then
+        NEXT_ROUND=$((CURRENT_ROUND + 1))
+        # Check if next round has profiling_baseline_path OR if campaign was just marked complete
+        NEXT_PROFILING=$(jq -r --argjson r "$NEXT_ROUND" \
+            '[.campaign.rounds[] | select(.round_id == $r)][0].profiling_baseline_path // empty' \
+            "$STATE_FILE" 2>/dev/null)
+        UPDATED_STATUS=$(jq -r '.campaign.status // empty' "$STATE_FILE" 2>/dev/null)
+
+        if [ -z "$NEXT_PROFILING" ] && [ "$UPDATED_STATUS" = "active" ]; then
+            echo "BLOCKED: Candidates shipped in round $CURRENT_ROUND but no re-profiling recorded for round $NEXT_ROUND." >&2
+            echo "  Re-profile against the new baseline before starting the next round." >&2
+            exit 2
+        fi
     fi
 
     exit 0

@@ -13,6 +13,10 @@ if [ -n "$CHECKPOINT_FILES" ]; then
     TEAM_NAME=$(jq -r '.team_name // "unknown"' "$CHECKPOINT_FILES" 2>/dev/null)
     DEBATE_TEAM=$(jq -r '.debate_team // ""' "$CHECKPOINT_FILES" 2>/dev/null)
     TRACK_COUNT=$(jq -r '.track_count // 0' "$CHECKPOINT_FILES" 2>/dev/null)
+    CAMPAIGN_ROUND=$(jq -r '.campaign_round // 0' "$CHECKPOINT_FILES" 2>/dev/null)
+    CAMPAIGN_STATUS=$(jq -r '.campaign_status // ""' "$CHECKPOINT_FILES" 2>/dev/null)
+    CUMULATIVE_SPEEDUP=$(jq -r '.cumulative_speedup // 1.0' "$CHECKPOINT_FILES" 2>/dev/null)
+    PENDING_QUEUE_SIZE=$(jq -r '.pending_queue_size // 0' "$CHECKPOINT_FILES" 2>/dev/null)
 
     # Read current state for more context
     if [ -f "$STATE_FILE" ]; then
@@ -30,6 +34,9 @@ if [ -n "$CHECKPOINT_FILES" ]; then
     fi
     if [ "$TRACK_COUNT" -gt 0 ] 2>/dev/null; then
         EXTRA_CONTEXT="${EXTRA_CONTEXT}\n7. **Parallel tracks ($TRACK_COUNT active)**: Check parallel_tracks in state.json for worktree paths and GPU assignments."
+    fi
+    if [ -n "$CAMPAIGN_STATUS" ] && [ "$CAMPAIGN_STATUS" != "" ]; then
+        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n8. **Campaign loop active**: Round $CAMPAIGN_ROUND | Status: $CAMPAIGN_STATUS | Cumulative speedup: ${CUMULATIVE_SPEEDUP}x | Pending queue: $PENDING_QUEUE_SIZE candidates. Read campaign-loop.md for the iteration protocol."
     fi
 
     # Clean up checkpoint

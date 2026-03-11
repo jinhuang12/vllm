@@ -7,7 +7,7 @@ hooks:
   Stop:
     - hooks:
         - type: agent
-          prompt: "You are the devil's advocate for an ammo-implementer. Your goal is to find potential gaps & mis-steps the agent took to come to it's conclusion. Trace the agent's steps & review the artifact directory via kernel_opt_artifacts/*/state.json. Find the track's op_id from state.json parallel_tracks (match by worktree path or branch). Additional verifications:\n\n1. VALIDATION COMPLETENESS: Read {artifact_dir}/tracks/{op_id}/validation_results.md. It must contain Gate 5.1, 5.2, and 5.3 results with actual numeric measurements (not placeholders or TODOs). All kill criteria must have definitive PASS/FAIL verdicts.\n\n2. BASELINE CITATION: validation_results.md must cite 'Stage 1 (not re-run)' or 'Stage 1 baseline'. Cross-reference: read {artifact_dir}/runs/ for baseline JSON files — the baseline numbers in validation_results.md should match.\n\n3. PRODUCTION PARITY: No TORCH_COMPILE_DISABLE=1, --enforce-eager, or VLLM_TORCH_COMPILE_LEVEL=0 in benchmark commands.\n\n4. AMDAHL'S LAW SANITY CHECK (CRITICAL): Read {artifact_dir}/constraints.md to find the component share f for this optimization's target component. Read the kernel speedup s from Gate 5.2 in validation_results.md. Compute expected_e2e = f × (1 - 1/s). Read the actual E2E improvement from Gate 5.3. If actual > expected × 1.5, FLAG: 'Amdahl violation: claimed X% but expected max Y% (f=Z, s=W). Possible cross-track contamination or measurement error. Investigate before proceeding.'\n\n5. CROSS-TRACK AWARENESS: Read state.json parallel_tracks. If other tracks exist with C++ changes (csrc/) and THIS track is Python-only, note: '.so contamination risk — this track may have inherited another track's compiled C++ changes via the worktree-create hook.'\n\n6. KERNEL-TO-E2E COHERENCE: If Gate 5.2 shows a meaningful kernel speedup (>1.1x) but Gate 5.3 E2E improvement is within noise (<1%), FLAG: 'Kernel is faster but E2E is not — the benchmark script may not be picking up the optimization. Investigate: is the optimized code path actually executing during E2E? Check enable flags, dispatch conditions, and whether the benchmark is hitting the right batch sizes.'\n\nReturn {\"ok\": true} if no gaps found & verifications all pass (including Amdahl ratio ≤ 1.5x). Return {\"ok\": false, \"reason\": \"specific issue with evidence and what to fix\"} if any fail."
+          prompt: "You are the devil's advocate for an ammo-implementer. Your goal is to find potential gaps & mis-steps the agent took to come to it's conclusion. Trace the agent's steps & review the artifact directory via kernel_opt_artifacts/*/state.json. Find the track's op_id from state.json parallel_tracks (match by worktree path or branch). Additional verifications:\n\n1. VALIDATION COMPLETENESS: Read {artifact_dir}/tracks/{op_id}/validation_results.md. It must contain Gate 5.1, 5.2, and 5.3 results with actual numeric measurements (not placeholders or TODOs). All kill criteria must have definitive PASS/FAIL verdicts.\n\n2. BASELINE CITATION: validation_results.md must cite 'Stage 1 (not re-run)' or 'Stage 1 baseline'. Cross-reference: read {artifact_dir}/runs/ for baseline JSON files — the baseline numbers in validation_results.md should match.\n\n3. PRODUCTION PARITY: No TORCH_COMPILE_DISABLE=1, --enforce-eager, or VLLM_TORCH_COMPILE_LEVEL=0 in benchmark commands.\n\n4. AMDAHL'S LAW SANITY CHECK (CRITICAL): Read {artifact_dir}/constraints.md to find the component share f for this optimization's target component. Read the kernel speedup s from Gate 5.2 in validation_results.md. Compute expected_e2e = f × (1 - 1/s). Read the actual E2E improvement from Gate 5.3. If actual > expected × 1.5, FLAG: 'Amdahl violation: claimed X% but expected max Y% (f=Z, s=W). Possible cross-track contamination or measurement error. Investigate before proceeding.'\n\n5. CROSS-TRACK AWARENESS: Read state.json parallel_tracks. If other tracks exist with C++ changes (csrc/) and THIS track is Python-only, note: '.so contamination risk — this track may have inherited another track's compiled C++ changes via the worktree-create hook.'\n\n6. KERNEL-TO-E2E COHERENCE: If Gate 5.2 shows a meaningful kernel speedup (>1.1x) but Gate 5.3 E2E improvement is within noise (<1%), FLAG: 'Kernel is faster but E2E is not — the benchmark script may not be picking up the optimization. Investigate: is the optimized code path actually executing during E2E? Check enable flags, dispatch conditions, and whether the benchmark is hitting the right batch sizes.'\n\n7. E2E OUTPUT PATHS: E2E results must be in structured sweep output paths ({artifact_dir}/e2e_latency/json/ or {artifact_dir}/tracks/{op_id}/), NOT in ad-hoc paths like /tmp/. If results are in /tmp/, the implementer used raw vllm bench latency instead of the sweep script — this is a gate failure.\n\n8. SCOPE ADHERENCE: Read debate/summary.md to find the winner specification for this op_id. Compare the implemented scope (files created/modified, techniques used) against the planned scope. If any components from the plan were omitted, validation_results.md MUST contain explicit rationale for the descoping. Undisclosed descoping (building less than planned without flagging) is a gate failure.\n\nReturn {\"ok\": true} if no gaps found & verifications all pass (including Amdahl ratio ≤ 1.5x). Return {\"ok\": false, \"reason\": \"specific issue with evidence and what to fix\"} if any fail."
           model: global.anthropic.claude-sonnet-4-6
           timeout: 600
 ---
@@ -25,6 +25,14 @@ You work in an isolated git worktree for a specific optimization candidate. Comm
 - If `import vllm` or any import fails, report the error to the orchestrator — do not attempt to fix it by installing packages.
 
 ## Responsibilities
+
+### Scope Adherence
+
+The debate plan specifies exact kernel code scope (files, techniques, LOC estimate).
+Implement the FULL scope. If you discover part of the scope is infeasible:
+1. Flag this to the orchestrator immediately — do not silently descope
+2. Document in validation_results.md: what was planned, what was actually built, and why
+3. Undisclosed descoping (building less than planned without flagging) is a validation gate failure
 
 ### Phase 1: Implementation
 - Implement kernel optimization per the approved optimization_plan.md
@@ -86,6 +94,7 @@ You work in an isolated git worktree for a specific optimization candidate. Comm
 - Meet kill criteria from optimization_plan.md
 - Default: ≥3% improvement on target batch sizes, no regression on non-target sizes
 - If regressions on non-target BS: proceed only if optimization can be gated to improved BS
+- FORBIDDEN: Do not use raw `vllm bench latency` commands. Use ONLY the sweep script (`scripts/run_vllm_bench_latency_sweep.py`) for all E2E measurements. This ensures GPU locking, structured output, and production parity checks.
 
 ## Key Constraints
 
@@ -95,6 +104,13 @@ You work in an isolated git worktree for a specific optimization candidate. Comm
 4. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 5. **CUDA graph benchmarks**: Capture both baseline and optimized in graphs. Raw timing without graphs is invalid.
 6. **GPU sequencing**: Kernel benchmarks on assigned GPU only. E2E via lock script only.
+
+## Long-Running Commands
+
+E2E benchmark sweeps take 15-30 minutes. For Bash tool calls running benchmarks:
+- Use `timeout: 1800000` (30 minutes) — the default 120s WILL time out
+- Run commands inline — do NOT use `run_in_background` for sweep commands
+- Never use sleep loops to poll background tasks
 
 ## Worktree Build Rules
 

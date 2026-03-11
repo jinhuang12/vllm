@@ -193,6 +193,8 @@ After winner selection:
 
 ## Artifact Structure
 
+### Round 1 (or single-pass campaigns)
+
 ```
 {artifact_dir}/debate/
   summary.md
@@ -215,3 +217,36 @@ After winner selection:
     champion-2_ncu_query.txt
     ...
 ```
+
+### Campaign Round 2+ (scoped paths)
+
+For campaign rounds beyond the first, debate artifacts must use campaign-round-scoped paths to avoid overwriting previous rounds' evidence:
+
+```
+{artifact_dir}/debate/campaign_round_{N}/
+  summary.md
+  proposals/
+    champion-1_proposal.md
+    ...
+  round_1/          (debate round within this campaign round)
+    ...
+  round_2/
+    ...
+  micro_experiments/
+    ...
+```
+
+The debate gate hook enforces this: round 2+ debates that use the legacy `debate/` path are blocked.
+
+Note: "round_1" inside the campaign round directory refers to **debate rounds** (argument/critique/rebuttal cycles). The outer "campaign_round_{N}" refers to **campaign rounds** (profiling cycles).
+
+## Re-validation After Re-profiling
+
+When a debate completes while implementation is ongoing, winners are placed in `campaign.pending_queue`. After re-profiling (triggered by a shipped candidate), each queued winner must be re-validated before entering implementation:
+
+1. Check if the target kernel still appears in the updated `bottleneck_analysis.md`.
+2. Recalculate expected E2E impact using new f-values from the updated profiling data.
+3. If `new_f × kernel_speedup < 1%` E2E improvement: discard (not worth implementing).
+4. If still viable: candidate proceeds to implementation in the next available slot.
+
+This is a feasibility recheck, NOT a full re-debate. The debate evidence (micro-experiments, kernel analysis) remains valid — only the component share `f` has changed due to the shifted bottleneck landscape.

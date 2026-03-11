@@ -121,3 +121,42 @@ The integration section of `state.json` records all decisions and results:
 | `single_pass` | One candidate selected (sole passer or best among overlapping) |
 | `combined` | Multiple candidates merged and validated successfully |
 | `exhausted` | No candidates passed validation; no optimization to ship |
+
+## Campaign Loop Transition (Stage 7)
+
+After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orchestrator evaluates whether to continue the campaign. See `orchestration/campaign-loop.md` for the full protocol.
+
+### If SHIP (one or more candidates passed)
+
+1. Record shipped candidates in `campaign.shipped_optimizations`.
+2. Update `campaign.cumulative_e2e_speedup` (multiplicative: `old × round_speedup`).
+3. Record the round in `campaign.rounds` with all results.
+4. Trigger re-profiling: invoke `ammo-researcher` subagent for Stage 1 baseline capture on the patched codebase.
+5. After re-profile: run bottleneck mining (Stage 2) on the new baseline.
+6. Read the new top bottleneck's share of total decode latency.
+7. If `top_bottleneck_share < campaign.diminishing_returns_threshold_pct`: set `campaign.status = "campaign_complete"`. Done.
+8. Else: increment `campaign.current_round`, invalidate stale queue (see below), enter Stage 3 for the next round.
+
+### If EXHAUSTED (no candidates passed this round)
+
+1. Record the failed round in `campaign.rounds`.
+2. Check diminishing returns against the CURRENT profiling data (no re-profile since nothing changed).
+   - If `top_bottleneck_share < threshold`: set `campaign.status = "campaign_exhausted"`. Done.
+   - Else: start a new debate round from existing bottleneck data (skip re-profiling, skip Stage 2).
+
+### Stale Queue Handling (after re-profile)
+
+If an async debate completed during this round's implementation and placed winners in `campaign.pending_queue`:
+
+1. For each candidate in the queue: check if its target kernel still appears in the new top bottleneck list.
+2. Recalculate expected E2E impact using new f-values from the updated `bottleneck_analysis.md`.
+3. Discard candidates where `new_f × kernel_speedup < 1%` E2E improvement.
+4. Remaining candidates proceed to implementation in the next round (no re-debate needed).
+5. Clear `campaign.pending_queue` after processing.
+
+### Hook Enforcement
+
+The campaign evaluation gate in `ammo-gate-guard.sh` blocks the `GATE: campaign evaluation` task until:
+- `campaign.rounds[current_round]` exists with `top_bottleneck_share_pct`
+- If candidates shipped: re-profiling was initiated for the next round
+- The Stop hook in `ammo-campaign-stop-guard.sh` prevents ending the session mid-campaign

@@ -14,6 +14,10 @@ if [ -n "$STATE_FILES" ]; then
     TEAM_NAME=$(jq -r '.team.name // "unknown"' "$STATE_FILES" 2>/dev/null)
     DEBATE_TEAM=$(jq -r '.debate.team_name // ""' "$STATE_FILES" 2>/dev/null)
     TRACK_COUNT=$(jq -r '.parallel_tracks | length // 0' "$STATE_FILES" 2>/dev/null)
+    CAMPAIGN_ROUND=$(jq -r '.campaign.current_round // 0' "$STATE_FILES" 2>/dev/null)
+    CAMPAIGN_STATUS=$(jq -r '.campaign.status // ""' "$STATE_FILES" 2>/dev/null)
+    CUMULATIVE_SPEEDUP=$(jq -r '.campaign.cumulative_e2e_speedup // 1.0' "$STATE_FILES" 2>/dev/null)
+    PENDING_QUEUE_SIZE=$(jq '.campaign.pending_queue | length // 0' "$STATE_FILES" 2>/dev/null)
 
     # Create checkpoint for restoration
     CHECKPOINT_FILE="$STATE_DIR/compaction_checkpoint.json"
@@ -27,6 +31,10 @@ if [ -n "$STATE_FILES" ]; then
   "team_name": "$TEAM_NAME",
   "debate_team": "$DEBATE_TEAM",
   "track_count": $TRACK_COUNT,
+  "campaign_round": $CAMPAIGN_ROUND,
+  "campaign_status": "$CAMPAIGN_STATUS",
+  "cumulative_speedup": $CUMULATIVE_SPEEDUP,
+  "pending_queue_size": $PENDING_QUEUE_SIZE,
   "state_file": "$STATE_FILES",
   "skill_path": ".claude/skills/ammo/SKILL.md"
 }

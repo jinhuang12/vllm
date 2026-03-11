@@ -42,8 +42,16 @@
       {
         "hooks": [
           {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-gate-guard.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
             "type": "agent",
-            "prompt": "You are the AMMO gate validator. The task that was just completed: $ARGUMENTS\n\nFirst check the task_subject field. If it does NOT match any of these patterns (case-insensitive): GATE:.*verify_phase1, GATE:.*stage.?2.*review, bottleneck.*review, GATE:.*verify_validation, GATE:.*debate.*winner, GATE:.*debate.*selection, GATE:.*summary, GATE:.*all.*tracks, GATE:.*track.*validated, GATE:.*track.*results, GATE:.*integration, GATE:.*combined.*validation, Route.*decision, B14 — then return {\"ok\": true} immediately without reading any files.\n\nIf a gate pattern matches, read $CLAUDE_PROJECT_DIR/.claude/hooks/ammo-gate-agent-checklist.md for the full checklist. Find the artifact directory via kernel_opt_artifacts/*/state.json. Validate each checklist item by reading the actual files. Return {\"ok\": true} if all pass, or {\"ok\": false, \"reason\": \"specific item that failed and why\"} if any fail.",
+            "prompt": "You are the AMMO gate validator. The task that was just completed: $ARGUMENTS\n\nFirst check the task_subject field. If it does NOT match any of these patterns (case-insensitive): GATE:.*verify_phase1, GATE:.*stage.?2.*review, bottleneck.*review, GATE:.*verify_validation, GATE:.*debate.*winner, GATE:.*debate.*selection, GATE:.*summary, GATE:.*all.*tracks, GATE:.*track.*validated, GATE:.*track.*results, GATE:.*integration, GATE:.*combined.*validation, GATE:.*campaign.*eval, GATE:.*diminishing.*returns, Route.*decision, B14 — then return {\"ok\": true} immediately without reading any files.\n\nIf a gate pattern matches, read $CLAUDE_PROJECT_DIR/.claude/hooks/ammo-gate-agent-checklist.md for the full checklist. Find the artifact directory via kernel_opt_artifacts/*/state.json. Validate each checklist item by reading the actual files.\n\nFor campaign evaluation gates (GATE:.*campaign.*eval): additionally check that campaign.rounds[current_round] has all required fields (top_bottleneck_share_pct, implementation_results, shipped). If shipped is non-empty and campaign.status is 'active', verify that re-profiling was initiated (next round has profiling_baseline_path, or campaign was marked complete). Check that campaign.pending_queue was processed if non-empty.\n\nReturn {\"ok\": true} if all pass, or {\"ok\": false, \"reason\": \"specific item that failed and why\"} if any fail.",
             "timeout": 300,
             "model": "global.anthropic.claude-sonnet-4-6"
           }

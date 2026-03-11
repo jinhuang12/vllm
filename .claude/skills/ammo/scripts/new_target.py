@@ -170,7 +170,7 @@ Record:
 """
 
 
-def _state_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
+def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold: int = 3) -> Dict[str, Any]:
     # Derive a short target name for the team
     model_short = fields.model_id.split("/")[-1].lower().replace("-", "")[:12] if fields.model_id != PLACEHOLDER else "target"
     hw_short = fields.hardware.lower() if fields.hardware != PLACEHOLDER else "gpu"
@@ -223,6 +223,15 @@ def _state_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
             "combined_patch_branch": None,
             "combined_e2e_result": None,
             "final_decision": None,
+        },
+        "campaign": {
+            "status": "active",
+            "current_round": 1,
+            "diminishing_returns_threshold_pct": diminishing_threshold,
+            "cumulative_e2e_speedup": 1.0,
+            "rounds": [],
+            "shipped_optimizations": [],
+            "pending_queue": [],
         },
     }
 
@@ -286,6 +295,8 @@ def main() -> None:
 
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--ep", type=int, default=1)
+    p.add_argument("--diminishing-returns-threshold", type=int, default=3,
+                   help="Stop campaign when top bottleneck < this %% of total latency (default: 3)")
 
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--input-len", type=int, default=64)
@@ -312,7 +323,7 @@ def main() -> None:
     _write_text(artifact_dir / "validation_results.md", _validation_results_md(), force=args.force)
     _write_text(artifact_dir / "integration.md", _integration_md(), force=args.force)
 
-    _write_json(artifact_dir / "state.json", _state_json(fields, artifact_dir), force=args.force)
+    _write_json(artifact_dir / "state.json", _state_json(fields, artifact_dir, args.diminishing_returns_threshold), force=args.force)
     _write_json(artifact_dir / "target.json", _target_json(fields, artifact_dir), force=args.force)
 
     print(f"Initialized artifact directory: {artifact_dir}")

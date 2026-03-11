@@ -79,6 +79,10 @@ Agent(
     5. Run correctness tests (Gate 5.1): torch.allclose() against vLLM production kernel.
     6. Run kernel benchmarks (Gate 5.2): both baseline and optimized captured in CUDA graphs.
     7. Run E2E benchmark (Gate 5.3): ONLY the optimized run. Compare against Stage 1 baseline.
+       Use the sweep script:
+       python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+         --artifact-dir {artifact_dir} --label opt_{op_id}
+       FORBIDDEN: Do NOT use raw `vllm bench latency` commands. The sweep script is mandatory for all E2E measurements.
     8. Evaluate all kill criteria with definitive PASS/FAIL verdicts.
     9. Write results to {artifact_dir}/tracks/{op_id}/validation_results.md.
     10. Commit validation results.
@@ -151,3 +155,15 @@ git worktree remove {worktree_path} --force
 ```
 
 Run cleanup for all tracks, including failed ones. The integration branch (if created in Stage 6) is retained until the final patch is shipped.
+
+## In-Flight Tracks During Campaign Re-profiling
+
+When a candidate ships and triggers re-profiling (see `orchestration/campaign-loop.md`), other tracks from the same round may still be running. These tracks are NOT terminated:
+
+1. Let all in-flight implementations complete against the ORIGINAL round's baseline.
+2. Validate their results using Stage 1 baseline from the current round (not the re-profiled baseline).
+3. If they pass: they also ship as additional cumulative gain — update `campaign.cumulative_e2e_speedup` multiplicatively.
+4. Record all track results in the current round's entry in `campaign.rounds`.
+5. The next campaign round starts only after all current-round tracks have completed.
+
+This ensures no work is wasted — an implementer that started before the re-profile can still contribute a valid optimization, even if the bottleneck landscape has shifted.

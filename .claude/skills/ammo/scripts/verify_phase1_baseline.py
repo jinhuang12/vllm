@@ -70,10 +70,11 @@ def check_nsys_profiles(artifact_dir: Path) -> GateResult:
     Searches multiple directories for backward compatibility:
       - {artifact_dir}/runs/
       - {artifact_dir}/nsys/
+      - {artifact_dir}/e2e_latency/nsys/
       - {artifact_dir}/ (root)
     """
     search_dirs = []
-    for subdir_name in ("runs", "nsys"):
+    for subdir_name in ("runs", "nsys", "e2e_latency/nsys"):
         subdir = artifact_dir / subdir_name
         if subdir.exists():
             search_dirs.append(subdir)
@@ -92,7 +93,7 @@ def check_nsys_profiles(artifact_dir: Path) -> GateResult:
 
     if not nsys_files:
         searched_list = ", ".join(
-            str(d) for d in [artifact_dir / "runs", artifact_dir / "nsys", artifact_dir]
+            str(d) for d in [artifact_dir / "runs", artifact_dir / "nsys", artifact_dir / "e2e_latency/nsys", artifact_dir]
         )
         return GateResult(
             name="nsys_profiles_exist",

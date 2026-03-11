@@ -482,6 +482,187 @@ run_test "Integration gate with single_pass status allows" 0 '{
 
 # ══════════════════════════════════════
 echo ""
+echo "== Campaign evaluation gate enforcement =="
+# ══════════════════════════════════════
+
+# No campaign object — should BLOCK
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "route_decision": {},
+  "opportunity_attempts": [],
+  "verification_run": {},
+  "integration": {"status": "validated"}
+}
+EOF
+
+run_test "Campaign gate without campaign object BLOCKS" 2 '{
+  "hook_event_name": "TaskCompleted",
+  "task_subject": "GATE: campaign evaluation",
+  "task_description": "Evaluate campaign",
+  "team_name": "ammo-test-hookguard",
+  "cwd": "'"$TMPDIR"'"
+}'
+
+# Campaign active, no round recorded — should BLOCK
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "route_decision": {},
+  "opportunity_attempts": [],
+  "verification_run": {},
+  "integration": {"status": "validated"},
+  "campaign": {
+    "status": "active",
+    "current_round": 1,
+    "diminishing_returns_threshold_pct": 3,
+    "cumulative_e2e_speedup": 1.0,
+    "rounds": [],
+    "shipped_optimizations": [],
+    "pending_queue": []
+  }
+}
+EOF
+
+run_test "Campaign gate without round recorded BLOCKS" 2 '{
+  "hook_event_name": "TaskCompleted",
+  "task_subject": "GATE: campaign evaluation",
+  "task_description": "Evaluate campaign",
+  "team_name": "ammo-test-hookguard",
+  "cwd": "'"$TMPDIR"'"
+}'
+
+# Campaign active, round recorded without top_bottleneck_share_pct — should BLOCK
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "route_decision": {},
+  "opportunity_attempts": [],
+  "verification_run": {},
+  "integration": {"status": "validated"},
+  "campaign": {
+    "status": "active",
+    "current_round": 1,
+    "diminishing_returns_threshold_pct": 3,
+    "cumulative_e2e_speedup": 1.0,
+    "rounds": [{"round_id": 1, "shipped": [], "implementation_results": {}}],
+    "shipped_optimizations": [],
+    "pending_queue": []
+  }
+}
+EOF
+
+run_test "Campaign gate without top_bottleneck_share_pct BLOCKS" 2 '{
+  "hook_event_name": "TaskCompleted",
+  "task_subject": "GATE: campaign evaluation",
+  "task_description": "Evaluate campaign",
+  "team_name": "ammo-test-hookguard",
+  "cwd": "'"$TMPDIR"'"
+}'
+
+# Campaign complete with fully recorded round — should PASS
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "route_decision": {},
+  "opportunity_attempts": [],
+  "verification_run": {},
+  "integration": {"status": "validated"},
+  "campaign": {
+    "status": "campaign_complete",
+    "current_round": 1,
+    "diminishing_returns_threshold_pct": 3,
+    "cumulative_e2e_speedup": 1.12,
+    "rounds": [{"round_id": 1, "top_bottleneck_share_pct": 2.1, "shipped": ["op001"], "implementation_results": {"op001": {"status": "PASSED"}}}],
+    "shipped_optimizations": ["op001"],
+    "pending_queue": []
+  }
+}
+EOF
+
+run_test "Campaign gate with complete campaign allows" 0 '{
+  "hook_event_name": "TaskCompleted",
+  "task_subject": "GATE: campaign evaluation",
+  "task_description": "Evaluate campaign",
+  "team_name": "ammo-test-hookguard",
+  "cwd": "'"$TMPDIR"'"
+}'
+
+# Campaign active, round with top_bottleneck_share_pct — should PASS (no shipped candidates)
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "route_decision": {},
+  "opportunity_attempts": [],
+  "verification_run": {},
+  "integration": {"status": "exhausted"},
+  "campaign": {
+    "status": "active",
+    "current_round": 1,
+    "diminishing_returns_threshold_pct": 3,
+    "cumulative_e2e_speedup": 1.0,
+    "rounds": [{"round_id": 1, "top_bottleneck_share_pct": 8.5, "shipped": [], "implementation_results": {"op001": {"status": "FAILED"}}}],
+    "shipped_optimizations": [],
+    "pending_queue": []
+  }
+}
+EOF
+
+run_test "Campaign gate active with exhausted round allows (no shipped = no re-profile needed)" 0 '{
+  "hook_event_name": "TaskCompleted",
+  "task_subject": "GATE: diminishing returns check",
+  "task_description": "Check diminishing returns",
+  "team_name": "ammo-test-hookguard",
+  "cwd": "'"$TMPDIR"'"
+}'
+
+# ══════════════════════════════════════
+echo ""
+echo "== Debate gate with campaign round scoping =="
+# ══════════════════════════════════════
+
+# Round 2 debate without scoped directory — should BLOCK
+rm -rf "$ARTIFACT_DIR/debate"
+mkdir -p "$ARTIFACT_DIR/debate/proposals"
+echo "# Summary" > "$ARTIFACT_DIR/debate/summary.md"
+echo "# Proposal 1" > "$ARTIFACT_DIR/debate/proposals/champion-1_proposal.md"
+echo "# Proposal 2" > "$ARTIFACT_DIR/debate/proposals/champion-2_proposal.md"
+mkdir -p "$ARTIFACT_DIR/debate/round_1"
+
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "route_decision": {},
+  "opportunity_attempts": [],
+  "verification_run": {},
+  "campaign": {
+    "status": "active",
+    "current_round": 2,
+    "rounds": [{"round_id": 1}],
+    "pending_queue": []
+  }
+}
+EOF
+
+run_test "Round 2 debate without scoped dir BLOCKS" 2 '{
+  "hook_event_name": "TaskCompleted",
+  "task_subject": "GATE: debate winner selection",
+  "task_description": "Select debate winner",
+  "team_name": "ammo-test-hookguard",
+  "cwd": "'"$TMPDIR"'"
+}'
+
+# Round 2 debate with scoped directory — should PASS
+mkdir -p "$ARTIFACT_DIR/debate/campaign_round_2/proposals"
+mkdir -p "$ARTIFACT_DIR/debate/campaign_round_2/round_1"
+echo "# Summary" > "$ARTIFACT_DIR/debate/campaign_round_2/summary.md"
+echo "# Proposal 1" > "$ARTIFACT_DIR/debate/campaign_round_2/proposals/champion-1_proposal.md"
+echo "# Proposal 2" > "$ARTIFACT_DIR/debate/campaign_round_2/proposals/champion-2_proposal.md"
+
+run_test "Round 2 debate with scoped dir allows" 0 '{
+  "hook_event_name": "TaskCompleted",
+  "task_subject": "GATE: debate winner selection",
+  "task_description": "Select debate winner",
+  "team_name": "ammo-test-hookguard",
+  "cwd": "'"$TMPDIR"'"
+}'
+
+# ══════════════════════════════════════
+echo ""
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed out of $TOTAL tests"
 echo "================================"
