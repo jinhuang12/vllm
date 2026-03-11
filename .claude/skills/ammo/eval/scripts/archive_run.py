@@ -114,6 +114,7 @@ def archive_run(
     run_number: Optional[int] = None,
     transcript_grading_path: Optional[Path] = None,
     git_hash: Optional[str] = None,
+    changes_snapshot_path: Optional[Path] = None,
 ) -> Dict[str, str]:
     """Archive a scored run into the repository. Returns paths created."""
     scorecard = json.loads(scorecard_path.read_text(encoding="utf-8"))
@@ -149,6 +150,12 @@ def archive_run(
     # Store reference to original artifact directory
     artifact_dir = snapshot.get("artifact_dir", "unknown")
     (run_dir / "artifact_dir_ref.txt").write_text(artifact_dir + "\n", encoding="utf-8")
+
+    # Copy changes snapshot (worktree patches, artifact copies, manifest)
+    if changes_snapshot_path and changes_snapshot_path.is_dir():
+        dest = run_dir / "changes_snapshot"
+        shutil.copytree(changes_snapshot_path, dest, dirs_exist_ok=True)
+
 
     # Create/update meta.json for the version
     meta_path = version_dir / "meta.json"
@@ -188,6 +195,8 @@ def main() -> int:
     parser.add_argument("--run-number", type=int, default=None)
     parser.add_argument("--transcript-grading", type=str, default=None)
     parser.add_argument("--git-hash", type=str, default=None)
+    parser.add_argument("--changes-snapshot", type=str, default=None,
+                        help="Path to changes snapshot directory from snapshot_changes.py")
 
     args = parser.parse_args()
 
@@ -202,6 +211,10 @@ def main() -> int:
             if args.transcript_grading else None
         ),
         git_hash=args.git_hash,
+        changes_snapshot_path=(
+            Path(args.changes_snapshot).expanduser().resolve()
+            if args.changes_snapshot else None
+        ),
     )
 
     print(json.dumps(result, indent=2))

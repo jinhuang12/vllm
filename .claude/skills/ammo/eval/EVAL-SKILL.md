@@ -35,7 +35,23 @@ python .claude/skills/ammo/eval/scripts/parse_artifacts.py \
   --output /tmp/ammo_eval_snapshot.json
 ```
 
-### Step 2: Score Campaign
+### Step 2: Snapshot Changes
+```bash
+python .claude/skills/ammo/eval/scripts/snapshot_changes.py \
+  --artifact-dir <ARTIFACT_DIR> \
+  --output /tmp/ammo_eval_changes_snapshot
+```
+
+This captures a full record of all code produced during the campaign:
+- Git diffs (patches) from every campaign worktree listed in `state.json`'s `parallel_tracks`
+- Session-member worktrees that shared the same session ID
+- A complete copy of the artifact directory (minus large binary profiling files)
+- Skill diff from the main branch
+- A manifest summarizing worktree metadata, merge status, and changed files
+
+The output directory is passed to `archive_run.py` in Step 5.
+
+### Step 3: Score Campaign
 ```bash
 python .claude/skills/ammo/eval/scripts/score_campaign.py \
   --snapshot /tmp/ammo_eval_snapshot.json \
@@ -43,7 +59,7 @@ python .claude/skills/ammo/eval/scripts/score_campaign.py \
   --report /tmp/ammo_eval_report.md
 ```
 
-### Step 3: Transcript Grading (Optional)
+### Step 4: Transcript Grading (Optional)
 
 If `--skip-transcript-grading` is NOT set, spawn an LLM grader subagent:
 
@@ -63,16 +79,19 @@ python .claude/skills/ammo/eval/scripts/score_campaign.py \
   --enrich-from /tmp/ammo_eval_transcript_grading.json
 ```
 
-### Step 4: Archive
+### Step 5: Archive
 ```bash
 python .claude/skills/ammo/eval/scripts/archive_run.py \
   --scorecard /tmp/ammo_eval_scorecard.json \
   --snapshot /tmp/ammo_eval_snapshot.json \
   --description "<DESCRIPTION>" \
-  --transcript-grading /tmp/ammo_eval_transcript_grading.json
+  --transcript-grading /tmp/ammo_eval_transcript_grading.json \
+  --changes-snapshot /tmp/ammo_eval_changes_snapshot
 ```
 
-### Step 5: Aggregate & Dashboard
+The `--changes-snapshot` flag stores the full changes snapshot (worktree patches, artifact copies, manifest) alongside the scored run in the archive. This ensures you can always reconstruct what code was produced, even after cleanup.
+
+### Step 6: Aggregate & Dashboard
 ```bash
 python .claude/skills/ammo/eval/scripts/aggregate_versions.py \
   --repository ~/.claude/ammo-eval
@@ -81,11 +100,39 @@ python .claude/skills/ammo/eval/scripts/generate_dashboard.py \
   --repository ~/.claude/ammo-eval
 ```
 
-### Step 6: Present Results
+### Step 7: Present Results
 
 1. Read and display `/tmp/ammo_eval_report.md` to the user
 2. Tell the user: "Dashboard generated at `~/.claude/ammo-eval/dashboard.html`"
 3. If there are previous versions in the repository, highlight the delta vs the most recent previous version
+
+### Step 8: Cleanup
+
+After presenting results, ask the user whether to clean up campaign artifacts. Use `AskUserQuestion` with a single multi-select question:
+
+**Question**: "The eval run has been archived with a full snapshot. Which artifacts should I clean up?"
+
+**Options**:
+1. **Campaign worktrees** — Remove all worktrees listed in the changes snapshot manifest via `git worktree remove <path> --force` and delete their tracking branches
+2. **Artifact directory** — Remove the `kernel_opt_artifacts/<campaign_dir>/` directory
+3. **Temp files** — Remove `/tmp/ammo_eval_*.json`, `/tmp/ammo_eval_*.md`, and `/tmp/ammo_eval_changes_snapshot/`
+
+If the user selects nothing (or cancels), skip cleanup entirely. For each selected category, execute the cleanup and report what was removed.
+
+Cleanup commands:
+```bash
+# Worktrees (for each path in manifest.worktrees[*].path):
+git worktree remove <path> --force
+git branch -D <branch>   # only for local-only branches, skip remote-tracking
+
+# Artifact directory:
+rm -rf <ARTIFACT_DIR>
+
+# Temp files:
+rm -rf /tmp/ammo_eval_snapshot.json /tmp/ammo_eval_scorecard.json \
+       /tmp/ammo_eval_report.md /tmp/ammo_eval_transcript_grading.json \
+       /tmp/ammo_eval_changes_snapshot
+```
 
 ## Scoring Dimensions
 
@@ -111,6 +158,13 @@ When transcript grading is skipped, the remaining 4 dimensions redistribute prop
     runs/{target_slug}/
       run_1/scorecard.json       # Scored run
       run_1/report.md
+      run_1/changes_snapshot/    # Full code snapshot
+        manifest.json            #   Worktree metadata, merge status
+        patches/                 #   Git diffs for each worktree
+          agent-xxx.patch
+          agent-xxx_uncommitted.patch
+        campaign_artifacts/      #   Copy of kernel_opt_artifacts dir
+        skill.patch              #   Skill diff vs main
       aggregate.json             # Mean/stddev across runs
     summary.json                 # Cross-target summary
   dashboard.html                 # Static HTML dashboard
@@ -129,8 +183,9 @@ Run 2-3 campaigns per target per skill revision (sequential) to handle non-deter
 
 If the eval pipeline is interrupted, check which files exist:
 - `/tmp/ammo_eval_snapshot.json` → Step 1 complete, continue from Step 2
-- `/tmp/ammo_eval_scorecard.json` → Step 2 complete, continue from Step 3/4
-- Check repository for existing runs → Step 4 may already be done
+- `/tmp/ammo_eval_changes_snapshot/manifest.json` → Step 2 complete, continue from Step 3
+- `/tmp/ammo_eval_scorecard.json` → Step 3 complete, continue from Step 4/5
+- Check repository for existing runs → Step 5 may already be done
 
 ## Dashboard Views
 
