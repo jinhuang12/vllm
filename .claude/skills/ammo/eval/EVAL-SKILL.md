@@ -21,6 +21,7 @@ After an `/ammo` campaign completes (or is interrupted with results), invoke thi
 The user provides:
 - `--artifact-dir` (required): Path to the completed campaign's artifact directory
 - `--description` (required): Human-readable description of what skill changes were made
+- `--session-id` (required): Claude Code session UUID for the campaign (find via `ls -lt ~/.claude/projects/-home-jinhun-vllm/*.jsonl | head`)
 - `--skip-transcript-grading` (optional): Skip the LLM grader for speed
 - `--repository` (optional, default `~/.claude/ammo-eval`): Eval repository path
 
@@ -28,12 +29,25 @@ The user provides:
 
 Run these scripts in sequence from `.claude/skills/ammo/eval/scripts/`:
 
+### Step 0: Parse Session Logs
+```bash
+python .claude/skills/ammo/eval/scripts/parse_session_logs.py \
+  --session-id <SESSION_ID> \
+  --artifact-dir <ARTIFACT_DIR> \
+  --output /tmp/ammo_eval_session_data.json
+```
+
+Extracts ground-truth timing and token cost data from the session JSONL. This replaces manual `stage_timestamps` and `agent_costs` tracking in state.json — no manual recording by the lead is needed.
+
 ### Step 1: Parse Artifacts
 ```bash
 python .claude/skills/ammo/eval/scripts/parse_artifacts.py \
   --artifact-dir <ARTIFACT_DIR> \
+  --session-data /tmp/ammo_eval_session_data.json \
   --output /tmp/ammo_eval_snapshot.json
 ```
+
+The `--session-data` flag provides session-log-derived timing and cost data. When omitted, falls back to state.json (backward compatible).
 
 ### Step 2: Snapshot Changes
 ```bash
@@ -142,9 +156,15 @@ rm -rf /tmp/ammo_eval_snapshot.json /tmp/ammo_eval_scorecard.json \
 | Gate Pass Rates | 15% | First-attempt pass rate across all verification gates |
 | Debate Quality | 15% | Proposal grounding, micro-experiment backing, filtering |
 | Campaign Efficiency | 15% | Rounds to completion, failure rate, convergence |
-| Transcript Quality | 15% | LLM-graded: wasted retries, hallucinated data, off-track reasoning |
+| Transcript Quality | 15% | LLM-graded: wasted retries, hallucinated data, off-track reasoning, delegation causality |
 
 When transcript grading is skipped, the remaining 4 dimensions redistribute proportionally (E2E→47%, others→18%/18%/17%).
+
+When delegation is enabled, the transcript grader additionally scores:
+- **Delegation causality bonus** (+0.5 per verified causal chain, max +1.5): delegate research that demonstrably improved proposals
+- **Delegation failures** (-1.0 each, max -2.0): wrong delegate data that went uncaught
+- **Delegation efficiency** (-0.25 each, max -1.0): redundant delegate work
+- **Delegation utilization failures** (-0.5 each, max -1.5): champions ignoring correct delegate data
 
 **Philosophy**: Speedup is king. Guardrail violations are scored and reported but never automatically fail the eval.
 

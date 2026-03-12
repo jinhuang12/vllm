@@ -418,11 +418,226 @@ def _parse_tracks(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Stage Timestamps
+# ---------------------------------------------------------------------------
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Parse ISO timestamp, returning None on failure."""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_stage_timestamps(
+    state: Dict[str, Any],
+    session_data: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Extract stage timing data.
+
+    If session_data is provided, use its stage_timestamps (ground-truth from session logs).
+    Otherwise fall back to state.json stage_timestamps.
+    """
+    if session_data is not None:
+        sd_ts = session_data.get("stage_timestamps")
+        if sd_ts and isinstance(sd_ts, dict):
+            # Convert session_data stage_timestamps to the standard output format
+            # session_data has per-round keys like "round_1", "round_2"
+            # We convert to the flat stages list for compatibility
+            stages = []
+            total_seconds = 0.0
+            # Use round_1 as the primary source for backward-compatible stage list
+            round_1 = sd_ts.get("round_1", {})
+            stage_map = [
+                ("1_baseline", "stage_1_baseline_start", "stage_2_bottleneck_end"),
+                ("3_debate", "stage_3_debate_start", "stage_3_debate_end"),
+                ("4_5_parallel_tracks", "stage_4_5_impl_start", "stage_4_5_impl_end"),
+                ("6_integration", "stage_6_7_eval_start", "stage_6_7_eval_end"),
+            ]
+            for stage_name, start_key, end_key in stage_map:
+                started_at = round_1.get(start_key)
+                completed_at = round_1.get(end_key) if end_key else None
+                started = _parse_iso(started_at)
+                completed = _parse_iso(completed_at)
+                duration_s = None
+                if started and completed:
+                    duration_s = (completed - started).total_seconds()
+                    total_seconds += duration_s
+                stages.append({
+                    "stage": stage_name,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_seconds": round(duration_s, 1) if duration_s is not None else None,
+                })
+            return {
+                "stages": stages,
+                "total_tracked_seconds": round(total_seconds, 1) if total_seconds > 0 else None,
+                "per_round": sd_ts,
+                "source": "session_logs",
+            }
+
+    ts_data = state.get("stage_timestamps")
+    if not ts_data or not isinstance(ts_data, dict):
+        return None
+
+    stages = []
+    total_seconds = 0.0
+    for stage_name in ["1_baseline", "2_bottleneck_mining", "3_debate",
+                       "4_5_parallel_tracks", "6_integration", "7_campaign_eval"]:
+        entry = ts_data.get(stage_name, {})
+        if not isinstance(entry, dict):
+            continue
+        started = _parse_iso(entry.get("started_at"))
+        completed = _parse_iso(entry.get("completed_at"))
+        duration_s = None
+        if started and completed:
+            duration_s = (completed - started).total_seconds()
+            total_seconds += duration_s
+        stages.append({
+            "stage": stage_name,
+            "started_at": entry.get("started_at"),
+            "completed_at": entry.get("completed_at"),
+            "duration_seconds": round(duration_s, 1) if duration_s is not None else None,
+        })
+
+    return {
+        "stages": stages,
+        "total_tracked_seconds": round(total_seconds, 1) if total_seconds > 0 else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Delegation
+# ---------------------------------------------------------------------------
+
+def _parse_delegation(artifact_dir: Path, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Parse delegation metrics from debate artifacts and state.json."""
+    debate_state = state.get("debate", {})
+    delegation = debate_state.get("delegation", {})
+
+    if not delegation.get("enabled"):
+        return {"enabled": False}
+
+    mapping = delegation.get("champion_delegate_mapping", {})
+    delegate_results = delegation.get("delegate_results", {})
+
+    # Count delegate work artifacts
+    delegate_work_dir = artifact_dir / "debate" / "delegate_work"
+    delegate_artifacts = list(delegate_work_dir.glob("*.md")) if delegate_work_dir.exists() else []
+    delegate_scripts = list(delegate_work_dir.glob("*.py")) if delegate_work_dir.exists() else []
+
+    # Check if proposals cite delegate work
+    proposals_dir = artifact_dir / "debate" / "proposals"
+    proposal_files = list(proposals_dir.glob("*.md")) if proposals_dir.exists() else []
+    proposals_citing_delegates = 0
+    for pf in proposal_files:
+        content = _load_text(pf)
+        if content and re.search(r"delegate[-_]?\d|delegate.work|Source:\s*delegate", content, re.IGNORECASE):
+            proposals_citing_delegates += 1
+
+    total_proposals = len(proposal_files)
+    citation_rate = proposals_citing_delegates / total_proposals if total_proposals > 0 else None
+
+    # Count delegate results by status
+    completed = sum(1 for v in delegate_results.values()
+                    if isinstance(v, dict) and v.get("status") == "completed")
+    failed = sum(1 for v in delegate_results.values()
+                 if isinstance(v, dict) and v.get("status") == "failed")
+    timed_out = sum(1 for v in delegate_results.values()
+                    if isinstance(v, dict) and v.get("status") == "timeout")
+
+    total_delegates = sum(len(v) for v in mapping.values() if isinstance(v, list))
+
+    return {
+        "enabled": True,
+        "delegates_per_champion": delegation.get("delegates_per_champion", 1),
+        "total_delegates_spawned": total_delegates,
+        "champion_delegate_mapping": mapping,
+        "delegate_artifacts_count": len(delegate_artifacts),
+        "delegate_scripts_count": len(delegate_scripts),
+        "proposals_citing_delegates": proposals_citing_delegates,
+        "total_proposals": total_proposals,
+        "delegate_citation_rate": round(citation_rate, 3) if citation_rate is not None else None,
+        "delegate_task_results": {
+            "completed": completed,
+            "failed": failed,
+            "timed_out": timed_out,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Agent Costs
+# ---------------------------------------------------------------------------
+
+def _parse_agent_costs(
+    state: Dict[str, Any],
+    session_data: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Parse agent cost data.
+
+    If session_data is provided, use its agent_costs and cost_summary (ground-truth).
+    Otherwise fall back to state.json agent_costs.
+    """
+    if session_data is not None:
+        summary = session_data.get("cost_summary")
+        agent_list = session_data.get("agent_costs")
+        if summary and isinstance(summary, dict):
+            result = dict(summary)
+            result["source"] = "session_logs"
+            if agent_list:
+                result["agent_list"] = agent_list
+            return result
+
+    costs = state.get("agent_costs")
+    if not costs or not isinstance(costs, list):
+        return None
+
+    total_tokens = 0
+    total_duration_ms = 0
+    by_role: Dict[str, Dict[str, Any]] = {}
+
+    for entry in costs:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role", "unknown")
+        tokens = entry.get("total_tokens", 0) or 0
+        duration = entry.get("duration_ms", 0) or 0
+        total_tokens += tokens
+        total_duration_ms += duration
+
+        if role not in by_role:
+            by_role[role] = {"count": 0, "total_tokens": 0, "total_duration_ms": 0}
+        by_role[role]["count"] += 1
+        by_role[role]["total_tokens"] += tokens
+        by_role[role]["total_duration_ms"] += duration
+
+    return {
+        "total_agent_invocations": len(costs),
+        "total_tokens": total_tokens,
+        "total_duration_ms": total_duration_ms,
+        "by_role": by_role,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Master Parser
 # ---------------------------------------------------------------------------
 
-def parse_campaign(artifact_dir: Path) -> Dict[str, Any]:
-    """Master parser. Returns the complete artifacts_snapshot dict."""
+def parse_campaign(
+    artifact_dir: Path,
+    session_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Master parser. Returns the complete artifacts_snapshot dict.
+
+    Args:
+        artifact_dir: Path to the completed campaign artifact directory.
+        session_data: Optional parsed session log data (from parse_session_logs.py).
+            When provided, stage_timestamps and agent_costs use session log data
+            instead of state.json.
+    """
     state = _load_json(artifact_dir / "state.json") or {}
 
     target = _parse_target(artifact_dir)
@@ -432,6 +647,10 @@ def parse_campaign(artifact_dir: Path) -> Dict[str, Any]:
     gates = _parse_gates(artifact_dir, state)
     debate = _parse_debate(artifact_dir, state)
     tracks = _parse_tracks(state)
+
+    stage_timestamps = _parse_stage_timestamps(state, session_data=session_data)
+    delegation = _parse_delegation(artifact_dir, state)
+    agent_costs = _parse_agent_costs(state, session_data=session_data)
 
     return {
         "parsed_at": datetime.now(timezone.utc).isoformat(),
@@ -443,6 +662,9 @@ def parse_campaign(artifact_dir: Path) -> Dict[str, Any]:
         "gates": gates,
         "debate": debate,
         "tracks": tracks,
+        "stage_timestamps": stage_timestamps,
+        "delegation": delegation,
+        "agent_costs": agent_costs,
     }
 
 
@@ -456,6 +678,12 @@ def main() -> int:
         help="Path to completed campaign artifact directory",
     )
     parser.add_argument(
+        "--session-data", type=str, default=None,
+        help="Optional: path to session log data JSON (output of parse_session_logs.py). "
+             "When provided, stage_timestamps and agent_costs use session log data "
+             "instead of state.json.",
+    )
+    parser.add_argument(
         "--output", type=str, default=None,
         help="Output path for artifacts_snapshot.json (default: stdout)",
     )
@@ -467,7 +695,19 @@ def main() -> int:
         print(f"ERROR: Artifact directory does not exist: {artifact_dir}", file=sys.stderr)
         return 1
 
-    snapshot = parse_campaign(artifact_dir)
+    session_data: Optional[Dict[str, Any]] = None
+    if args.session_data:
+        session_data_path = Path(args.session_data).expanduser().resolve()
+        if not session_data_path.exists():
+            print(f"ERROR: Session data file does not exist: {session_data_path}", file=sys.stderr)
+            return 1
+        session_data = _load_json(session_data_path)
+        if session_data is None:
+            print(f"ERROR: Failed to parse session data JSON: {session_data_path}", file=sys.stderr)
+            return 1
+        print(f"Using session data from: {session_data_path}", file=sys.stderr)
+
+    snapshot = parse_campaign(artifact_dir, session_data=session_data)
     json_str = json.dumps(snapshot, indent=2) + "\n"
 
     if args.output:

@@ -34,6 +34,12 @@ Implement the FULL scope. If you discover part of the scope is infeasible:
 2. Document in validation_results.md: what was planned, what was actually built, and why
 3. Undisclosed descoping (building less than planned without flagging) is a validation gate failure
 
+### Context Gathering
+Before starting implementation, read the debate artifacts for your assigned candidate:
+1. Your champion's proposal in `{artifact_dir}/debate/proposals/` (specified in your spawn prompt)
+2. `{artifact_dir}/debate/summary.md` for the full debate context, including critiques and conceded weaknesses
+3. Any delegate research files cited in the proposal (look for `[Source: delegate-*]` references pointing to `{artifact_dir}/debate/delegate_work/`). These contain hardware specs, integration patterns, and pitfall analysis that inform implementation decisions.
+
 ### Phase 1: Implementation
 - Implement kernel optimization per the approved optimization_plan.md
 - Write a correctness test script that imports the vLLM production kernel as baseline and uses `torch.allclose()` to verify output equivalence

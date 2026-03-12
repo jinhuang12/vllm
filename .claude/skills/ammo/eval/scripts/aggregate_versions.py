@@ -20,6 +20,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
+    """Safely traverse nested dicts."""
+    for key in keys:
+        if not isinstance(d, dict):
+            return default
+        d = d.get(key, default)
+    return d
+
+
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -110,6 +119,49 @@ def aggregate_target_runs(target_dir: Path) -> Optional[Dict[str, Any]]:
         aggregate["dimensions"][dim] = calculate_stats(
             _collect_metric(scorecards, "dimensions", dim, "score")
         )
+
+    # Timing aggregation
+    total_times = _collect_metric(scorecards, "timing", "total_tracked_seconds")
+    if total_times:
+        aggregate["total_time_seconds"] = calculate_stats(total_times)
+        # Per-stage timing
+        stage_times: Dict[str, List[float]] = {}
+        for sc in scorecards:
+            per_stage = _safe_get(sc, "timing", "per_stage_seconds") or {}
+            for stage, secs in per_stage.items():
+                if isinstance(secs, (int, float)):
+                    stage_times.setdefault(stage, []).append(float(secs))
+        aggregate["per_stage_time_seconds"] = {
+            stage: calculate_stats(vals) for stage, vals in stage_times.items()
+        }
+
+    # Agent cost aggregation
+    total_tokens = _collect_metric(scorecards, "agent_costs", "total_tokens")
+    if total_tokens:
+        aggregate["agent_costs"] = {
+            "total_tokens": calculate_stats(total_tokens),
+            "total_duration_ms": calculate_stats(
+                _collect_metric(scorecards, "agent_costs", "total_duration_ms")
+            ),
+            "total_agent_invocations": calculate_stats(
+                _collect_metric(scorecards, "agent_costs", "total_agent_invocations")
+            ),
+        }
+
+    # Delegation aggregation
+    deleg_enabled = any(
+        _safe_get(sc, "delegation", "enabled") for sc in scorecards
+    )
+    if deleg_enabled:
+        aggregate["delegation"] = {
+            "enabled": True,
+            "delegate_citation_rate": calculate_stats(
+                _collect_metric(scorecards, "delegation", "delegate_citation_rate")
+            ),
+            "delegate_artifacts_count": calculate_stats(
+                _collect_metric(scorecards, "delegation", "delegate_artifacts_count")
+            ),
+        }
 
     return aggregate
 

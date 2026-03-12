@@ -170,7 +170,8 @@ Record:
 """
 
 
-def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold: int = 3) -> Dict[str, Any]:
+def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold: int = 3,
+                enable_delegation: bool = True, delegates_per_champion: int = 1) -> Dict[str, Any]:
     # Derive a short target name for the team
     model_short = fields.model_id.split("/")[-1].lower().replace("-", "")[:12] if fields.model_id != PLACEHOLDER else "target"
     hw_short = fields.hardware.lower() if fields.hardware != PLACEHOLDER else "gpu"
@@ -214,6 +215,12 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
             "max_rounds": 4,
             "selected_winners": [],
             "selection_rationale": None,
+            "delegation": {
+                "enabled": enable_delegation,
+                "delegates_per_champion": delegates_per_champion,
+                "champion_delegate_mapping": {},
+                "delegate_results": {},
+            },
         },
         "parallel_tracks": {},
         "integration": {
@@ -224,6 +231,16 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
             "combined_e2e_result": None,
             "final_decision": None,
         },
+        "stage_timestamps": {
+            "1_baseline": {"started_at": None, "completed_at": None},
+            "2_bottleneck_mining": {"started_at": None, "completed_at": None},
+            "3_debate": {"started_at": None, "completed_at": None},
+            "4_5_parallel_tracks": {"started_at": None, "completed_at": None},
+            "6_integration": {"started_at": None, "completed_at": None},
+            "7_campaign_eval": {"started_at": None, "completed_at": None},
+        },
+        "session_id": None,  # Lead records session UUID at campaign start; eval extracts timing/costs from logs
+        "agent_costs": [],  # Auto-populated by eval pipeline from session logs
         "campaign": {
             "status": "active",
             "current_round": 1,
@@ -304,6 +321,12 @@ def main() -> None:
     p.add_argument("--batch-sizes", type=int, nargs="+", default=[8])
     p.add_argument("--num-iters", type=int, default=5)
 
+    # Delegation options (Stage 3 debate)
+    p.add_argument("--enable-delegation", action="store_true", default=True,
+                   help="Enable delegate sub-agents for debate champions (default: disabled)")
+    p.add_argument("--delegates-per-champion", type=int, default=1,
+                   help="Number of Sonnet delegate agents per Opus champion (default: 1)")
+
     args = p.parse_args()
 
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
@@ -323,7 +346,11 @@ def main() -> None:
     _write_text(artifact_dir / "validation_results.md", _validation_results_md(), force=args.force)
     _write_text(artifact_dir / "integration.md", _integration_md(), force=args.force)
 
-    _write_json(artifact_dir / "state.json", _state_json(fields, artifact_dir, args.diminishing_returns_threshold), force=args.force)
+    _write_json(artifact_dir / "state.json", _state_json(
+        fields, artifact_dir, args.diminishing_returns_threshold,
+        enable_delegation=args.enable_delegation,
+        delegates_per_champion=args.delegates_per_champion,
+    ), force=args.force)
     _write_json(artifact_dir / "target.json", _target_json(fields, artifact_dir), force=args.force)
 
     print(f"Initialized artifact directory: {artifact_dir}")

@@ -272,26 +272,78 @@ def score_transcript(grading: Dict[str, Any]) -> Dict[str, Any]:
     if not grading:
         return {"score": None, "sub_scores": {"graded": False}}
 
+    delegation_enabled = grading.get("delegation_enabled", False)
+
     score = grading.get("score")
     if score is None:
         score = 10.0
         wasted = len(grading.get("wasted_retries", []))
         hallucinated = len(grading.get("hallucinated_data", []))
         off_track = len(grading.get("off_track_reasoning", []))
-        score -= min(3.0, wasted * 0.5)
-        score -= min(4.0, hallucinated * 1.0)
-        score -= min(3.0, off_track * 0.75)
-        score = max(0.0, score)
+
+        if delegation_enabled:
+            # Reduced maxes for original categories when delegation is enabled
+            score -= min(2.5, wasted * 0.5)
+            score -= min(3.5, hallucinated * 1.0)
+            score -= min(2.5, off_track * 0.75)
+        else:
+            score -= min(3.0, wasted * 0.5)
+            score -= min(4.0, hallucinated * 1.0)
+            score -= min(3.0, off_track * 0.75)
+
+        if delegation_enabled:
+            # Delegation failures (-1.0 each, max -2.0)
+            deleg_failures = len(grading.get("delegation_failures", []))
+            score -= min(2.0, deleg_failures * 1.0)
+
+            # Delegation efficiency issues (-0.25 each, max -1.0)
+            deleg_efficiency = len(grading.get("delegation_efficiency_issues", []))
+            score -= min(1.0, deleg_efficiency * 0.25)
+
+            # Delegation utilization failures (-0.5 each, max -1.5)
+            deleg_utilization = len(grading.get("delegation_utilization_failures", []))
+            score -= min(1.5, deleg_utilization * 0.5)
+
+            # Causality bonus (+0.5 per chain, max +1.5)
+            causality = grading.get("delegation_causality_bonus") or {}
+            bonus = causality.get("total_bonus", 0.0)
+            if bonus == 0.0:
+                chains = causality.get("chains", [])
+                bonus = sum(c.get("bonus_awarded", 0.5) for c in chains)
+            bonus = min(1.5, bonus)
+            score += bonus
+
+        score = max(0.0, min(10.0, score))
+
+    sub_scores: Dict[str, Any] = {
+        "graded": True,
+        "wasted_retries": len(grading.get("wasted_retries", [])),
+        "hallucinated_data_instances": len(grading.get("hallucinated_data", [])),
+        "off_track_reasoning_instances": len(grading.get("off_track_reasoning", [])),
+        "grader_notes": grading.get("notes"),
+    }
+
+    if delegation_enabled:
+        causality = grading.get("delegation_causality_bonus") or {}
+        bonus = causality.get("total_bonus", 0.0)
+        if bonus == 0.0:
+            chains = causality.get("chains", [])
+            bonus = sum(c.get("bonus_awarded", 0.5) for c in chains)
+        bonus = min(1.5, bonus)
+
+        sub_scores["delegation_enabled"] = True
+        sub_scores["delegation_causality_chains"] = len(causality.get("chains", []))
+        sub_scores["delegation_causality_bonus"] = round(bonus, 2)
+        sub_scores["delegation_failures"] = len(grading.get("delegation_failures", []))
+        sub_scores["delegation_efficiency_issues"] = len(grading.get("delegation_efficiency_issues", []))
+        sub_scores["delegation_utilization_failures"] = len(grading.get("delegation_utilization_failures", []))
+        counterfactual = grading.get("counterfactual_assessment")
+        if counterfactual:
+            sub_scores["counterfactual_quality_delta"] = counterfactual.get("estimated_quality_delta")
 
     return {
         "score": round(score, 2),
-        "sub_scores": {
-            "graded": True,
-            "wasted_retries": len(grading.get("wasted_retries", [])),
-            "hallucinated_data_instances": len(grading.get("hallucinated_data", [])),
-            "off_track_reasoning_instances": len(grading.get("off_track_reasoning", [])),
-            "grader_notes": grading.get("notes"),
-        },
+        "sub_scores": sub_scores,
     }
 
 
@@ -373,12 +425,54 @@ def compute_scorecard(
         "campaign_status": campaign.get("status"),
     }
 
+    # Timing metrics (not scored — for cross-run comparison)
+    stage_timestamps = snapshot.get("stage_timestamps")
+    timing_metrics = None
+    if stage_timestamps and stage_timestamps.get("stages"):
+        per_stage = {}
+        for s in stage_timestamps["stages"]:
+            if s.get("duration_seconds") is not None:
+                per_stage[s["stage"]] = s["duration_seconds"]
+        timing_metrics = {
+            "per_stage_seconds": per_stage,
+            "total_tracked_seconds": stage_timestamps.get("total_tracked_seconds"),
+        }
+
+    # Delegation metrics (not scored — for cross-run comparison)
+    delegation_data = snapshot.get("delegation")
+    delegation_metrics = None
+    if delegation_data and delegation_data.get("enabled"):
+        delegation_metrics = {
+            "enabled": True,
+            "delegates_per_champion": delegation_data.get("delegates_per_champion"),
+            "total_delegates_spawned": delegation_data.get("total_delegates_spawned"),
+            "delegate_artifacts_count": delegation_data.get("delegate_artifacts_count"),
+            "delegate_citation_rate": delegation_data.get("delegate_citation_rate"),
+            "delegate_task_results": delegation_data.get("delegate_task_results"),
+        }
+    elif delegation_data:
+        delegation_metrics = {"enabled": False}
+
+    # Agent cost metrics (not scored — for cross-run comparison)
+    agent_costs_data = snapshot.get("agent_costs")
+    agent_cost_metrics = None
+    if agent_costs_data:
+        agent_cost_metrics = {
+            "total_tokens": agent_costs_data.get("total_tokens"),
+            "total_duration_ms": agent_costs_data.get("total_duration_ms"),
+            "total_agent_invocations": agent_costs_data.get("total_agent_invocations"),
+            "by_role": agent_costs_data.get("by_role"),
+        }
+
     return {
         "scored_at": datetime.now(timezone.utc).isoformat(),
         "overall_score": round(overall, 2),
         "overall_score_without_transcript": round(overall_no_t, 2),
         "dimensions": dimensions,
         "raw_metrics": raw_metrics,
+        "timing": timing_metrics,
+        "delegation": delegation_metrics,
+        "agent_costs": agent_cost_metrics,
         "metadata": {
             "artifact_dir": snapshot.get("artifact_dir"),
             "target": snapshot.get("target"),
@@ -490,8 +584,84 @@ def generate_report(scorecard: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
         lines.append(f"- Wasted retries: {t_sub.get('wasted_retries', 0)}")
         lines.append(f"- Hallucinated data: {t_sub.get('hallucinated_data_instances', 0)}")
         lines.append(f"- Off-track reasoning: {t_sub.get('off_track_reasoning_instances', 0)}")
+        if t_sub.get("delegation_enabled"):
+            lines.append("")
+            lines.append("### Delegation Analysis")
+            lines.append("")
+            bonus = t_sub.get("delegation_causality_bonus", 0)
+            chains = t_sub.get("delegation_causality_chains", 0)
+            lines.append(f"- Causality bonus: +{bonus} ({chains} verified chain(s))")
+            failures = t_sub.get("delegation_failures", 0)
+            if failures:
+                lines.append(f"- Delegation failures (uncaught errors): {failures} (-{min(2.0, failures * 1.0):.1f} pts)")
+            efficiency = t_sub.get("delegation_efficiency_issues", 0)
+            if efficiency:
+                lines.append(f"- Delegation efficiency issues: {efficiency} (-{min(1.0, efficiency * 0.25):.2f} pts)")
+            utilization = t_sub.get("delegation_utilization_failures", 0)
+            if utilization:
+                lines.append(f"- Delegation utilization failures: {utilization} (-{min(1.5, utilization * 0.5):.1f} pts)")
+            delta = t_sub.get("counterfactual_quality_delta")
+            if delta:
+                lines.append(f"- Counterfactual quality delta: {delta}")
         if t_sub.get("grader_notes"):
             lines.append(f"- Notes: {t_sub['grader_notes']}")
+        lines.append("")
+
+    # Timing (not scored — for cross-run comparison)
+    timing = scorecard.get("timing")
+    if timing and timing.get("per_stage_seconds"):
+        lines.append("## Stage Timing")
+        lines.append("")
+        lines.append("| Stage | Duration |")
+        lines.append("|---|---|")
+        for stage, secs in timing["per_stage_seconds"].items():
+            mins = secs / 60
+            label = stage.replace("_", " ").title()
+            lines.append(f"| {label} | {mins:.1f} min ({secs:.0f}s) |")
+        total = timing.get("total_tracked_seconds")
+        if total:
+            lines.append(f"| **Total** | **{total / 60:.1f} min** |")
+        lines.append("")
+
+    # Delegation (not scored — for cross-run comparison)
+    deleg = scorecard.get("delegation")
+    if deleg and deleg.get("enabled"):
+        lines.append("## Delegation")
+        lines.append("")
+        lines.append(f"- Delegates per champion: {deleg.get('delegates_per_champion', '?')}")
+        lines.append(f"- Total delegates spawned: {deleg.get('total_delegates_spawned', 0)}")
+        lines.append(f"- Delegate artifacts produced: {deleg.get('delegate_artifacts_count', 0)}")
+        cr = deleg.get('delegate_citation_rate')
+        lines.append(f"- Proposals citing delegate work: {f'{cr:.0%}' if cr is not None else 'N/A'}")
+        tasks = deleg.get("delegate_task_results", {})
+        lines.append(f"- Delegate tasks: {tasks.get('completed', 0)} completed, {tasks.get('failed', 0)} failed, {tasks.get('timed_out', 0)} timed out")
+        lines.append("")
+    elif deleg and not deleg.get("enabled"):
+        lines.append("## Delegation")
+        lines.append("")
+        lines.append("- Delegation: disabled (baseline run)")
+        lines.append("")
+
+    # Agent Costs (not scored — for cross-run comparison)
+    costs = scorecard.get("agent_costs")
+    if costs and costs.get("total_tokens"):
+        lines.append("## Agent Costs")
+        lines.append("")
+        total_tokens = costs["total_tokens"]
+        total_ms = costs.get("total_duration_ms", 0)
+        lines.append(f"- Total tokens: {total_tokens:,}")
+        lines.append(f"- Total agent time: {total_ms / 1000:.0f}s ({total_ms / 60000:.1f} min)")
+        lines.append(f"- Agent invocations: {costs.get('total_agent_invocations', 0)}")
+        by_role = costs.get("by_role", {})
+        if by_role:
+            lines.append("")
+            lines.append("| Role | Invocations | Tokens | Time |")
+            lines.append("|---|---|---|---|")
+            for role, data in sorted(by_role.items()):
+                tok = data.get("total_tokens", 0)
+                ms = data.get("total_duration_ms", 0)
+                cnt = data.get("count", 0)
+                lines.append(f"| {role} | {cnt} | {tok:,} | {ms / 1000:.0f}s |")
         lines.append("")
 
     return "\n".join(lines)
