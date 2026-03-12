@@ -289,52 +289,6 @@ def _check_patterns(text: str, require: List[str], forbid: List[str]) -> Dict[st
     }
 
 
-def _run_cmd(cmd: List[str], env: Dict[str, str], *, cwd: Optional[Path], timeout_s: int) -> Dict[str, Any]:
-    start = datetime.now(timezone.utc)
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        end = datetime.now(timezone.utc)
-        return {
-            "ok": proc.returncode == 0,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-            "start_time": start.isoformat(),
-            "end_time": end.isoformat(),
-            "duration_s": (end - start).total_seconds(),
-        }
-    except FileNotFoundError as e:
-        end = datetime.now(timezone.utc)
-        return {
-            "ok": False,
-            "error": f"FileNotFoundError: {e}",
-            "stdout": "",
-            "stderr": "",
-            "start_time": start.isoformat(),
-            "end_time": end.isoformat(),
-            "duration_s": (end - start).total_seconds(),
-        }
-    except subprocess.TimeoutExpired as e:
-        end = datetime.now(timezone.utc)
-        return {
-            "ok": False,
-            "error": f"TimeoutExpired: {e}",
-            "stdout": e.stdout or "",
-            "stderr": e.stderr or "",
-            "start_time": start.isoformat(),
-            "end_time": end.isoformat(),
-            "duration_s": (end - start).total_seconds(),
-        }
-
-
 def _format_cmd_for_md(cmd: List[str], env_overrides: Dict[str, str]) -> str:
     # Keep it copy/pasteable.
     env_prefix = " ".join([f"{k}={shlex.quote(v)}" for k, v in env_overrides.items()])
@@ -1063,6 +1017,22 @@ def main() -> None:
     p.add_argument("--no-gpu-lock", action="store_false", dest="gpu_lock", help=argparse.SUPPRESS)
     p.add_argument("--heartbeat-s", type=int, default=30, help="Heartbeat interval while a subprocess is quiet")
     p.add_argument(
+        "--labels",
+        type=str,
+        default="baseline,opt",
+        help=(
+            "Comma-separated labels to run: 'baseline', 'opt', or 'baseline,opt' (default). "
+            "Use '--labels baseline' for Stage 1 baseline-only sweeps (no opt). "
+            "Use '--labels opt' for Stage 5 validation (opt only, compare against Stage 1 baseline)."
+        ),
+    )
+    p.add_argument(
+        "--allow-identical-config",
+        action="store_true",
+        default=False,
+        help="Allow running when baseline and opt configs are identical (for variance testing)",
+    )
+    p.add_argument(
         "--nsys-profile",
         action="store_true",
         default=False,
@@ -1096,6 +1066,17 @@ def main() -> None:
             raise SystemExit(
                 "nsys not found on PATH. Install Nsight Systems CLI or remove --nsys-profile."
             )
+
+    # Parse and validate --labels.
+    selected_labels = {s.strip() for s in args.labels.split(",")}
+    invalid_labels = selected_labels - {"baseline", "opt"}
+    if invalid_labels:
+        raise SystemExit(
+            f"Invalid --labels value(s): {invalid_labels}. "
+            "Accepted: 'baseline', 'opt', or 'baseline,opt'."
+        )
+    if not selected_labels:
+        raise SystemExit("--labels must specify at least one label.")
 
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
     target_path = Path(args.target_json).expanduser().resolve() if args.target_json else (artifact_dir / "target.json")
@@ -1169,6 +1150,17 @@ def main() -> None:
     if not isinstance(opt_env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in opt_env.items()):
         raise SystemExit("bench.opt_env must be a dict[str,str]")
 
+    # Validate env dict keys and values are not placeholders.
+    for env_name, env_dict in [("baseline_env", baseline_env), ("opt_env", opt_env)]:
+        for k, v in env_dict.items():
+            if _is_placeholder(k):
+                raise SystemExit(
+                    f"bench.{env_name} key is still a placeholder: {k!r}. "
+                    "Replace it with the actual environment variable name (e.g., VLLM_MY_OPT=1)."
+                )
+            if _is_placeholder(v):
+                raise SystemExit(f"bench.{env_name}[{k!r}] value is still a placeholder: {v!r}")
+
     baseline_label = bench.get("baseline_label", "baseline")
     opt_label = bench.get("opt_label", "opt")
 
@@ -1230,6 +1222,23 @@ def main() -> None:
         require_patterns=opt_req,
         forbid_patterns=opt_forb,
     )
+
+    # Config identity check: warn or fail when baseline and opt are identical.
+    if "baseline" in selected_labels and "opt" in selected_labels:
+        if not opt_env and opt_extra_args == baseline_extra_args:
+            if args.allow_identical_config:
+                print(
+                    "WARNING: baseline and opt configs are identical "
+                    "(--allow-identical-config set).",
+                    file=sys.stderr,
+                )
+            else:
+                raise SystemExit(
+                    "baseline and opt configs are identical — opt would produce the "
+                    "same results as baseline.\n"
+                    "Update opt_env in target.json, or use --allow-identical-config "
+                    "for variance testing, or use --labels baseline to skip opt."
+                )
 
     # Validate all buckets fit within max_model_len at plan time.
     _validate_buckets_model_len(buckets, max_model_len)
@@ -1383,7 +1392,8 @@ def main() -> None:
                 )
 
     # Seed status files so supervisors can poll immediately.
-    for label in (baseline_label, opt_label):
+    for label in [l for l in (baseline_label, opt_label)
+                  if ("baseline" if l == baseline_label else "opt") in selected_labels]:
         st = status_dir / f"{label}.json"
         if not st.exists():
             _write_json_atomic(
@@ -1437,7 +1447,13 @@ def main() -> None:
             nsys_dir = out_root / "nsys"
             nsys_dir.mkdir(parents=True, exist_ok=True)
 
-        for run in (baseline_run, opt_run):
+        runs_to_execute = []
+        if "baseline" in selected_labels:
+            runs_to_execute.append(baseline_run)
+        if "opt" in selected_labels:
+            runs_to_execute.append(opt_run)
+
+        for run in runs_to_execute:
             child_cmd = [
                 sys.executable,
                 str(script_path),
@@ -1631,25 +1647,31 @@ def main() -> None:
             baseline_json = Path(p["baseline_json"])
             opt_json = Path(p["opt_json"])
 
-            # Run baseline.
-            baseline_res = _run_cmd_streaming(
-                baseline_cmd,
-                env=baseline_run.env,
-                cwd=None,
-                timeout_s=args.timeout_s,
-                log_path=baseline_log,
-                heartbeat_s=int(args.heartbeat_s),
-            )
+            # Run baseline (if selected).
+            if "baseline" in selected_labels:
+                baseline_res = _run_cmd_streaming(
+                    baseline_cmd,
+                    env=baseline_run.env,
+                    cwd=None,
+                    timeout_s=args.timeout_s,
+                    log_path=baseline_log,
+                    heartbeat_s=int(args.heartbeat_s),
+                )
+            else:
+                baseline_res = {"ok": None, "skipped": True}
 
-            # Run opt.
-            opt_res = _run_cmd_streaming(
-                opt_cmd,
-                env=opt_run.env,
-                cwd=None,
-                timeout_s=args.timeout_s,
-                log_path=opt_log,
-                heartbeat_s=int(args.heartbeat_s),
-            )
+            # Run opt (if selected).
+            if "opt" in selected_labels:
+                opt_res = _run_cmd_streaming(
+                    opt_cmd,
+                    env=opt_run.env,
+                    cwd=None,
+                    timeout_s=args.timeout_s,
+                    log_path=opt_log,
+                    heartbeat_s=int(args.heartbeat_s),
+                )
+            else:
+                opt_res = {"ok": None, "skipped": True}
 
             baseline_text = baseline_log.read_text(encoding="utf-8", errors="replace") if baseline_log.exists() else ""
             opt_text = opt_log.read_text(encoding="utf-8", errors="replace") if opt_log.exists() else ""

@@ -162,6 +162,21 @@ end.record()
 **Verification**: The `verify_validation_gates.py` script checks for CUDA graph usage.
 If absent, the `production_parity` gate will FAIL.
 
+### Cold-Cache Requirement for Bandwidth-Bound Kernels
+
+For kernel benchmarks targeting bandwidth-bound kernels (arithmetic intensity < breakeven AI):
+
+**REQUIRED**: Report both warm-cache and cold-cache kernel times.
+
+- **Warm-cache**: Standard CUDA-graphed loop (100+ iterations on same tensors)
+- **Cold-cache**: Use L2-busting methodology — chained distinct data totaling > 2.5x L2 cache size between measurements, or use distinct random tensors per iteration
+
+**Rationale**: Tight CUDA graph loops on small tensors keep data in L2 cache, inflating speedups for BW-bound kernels. In production, the full model pipeline (N layers x per-layer state) typically exceeds L2, forcing DRAM access.
+
+**Fusion kernels**: If the optimization fuses kernels, the cold-cache benchmark MUST use chained data totaling > 2.5x L2 cache size to simulate production L2 competition.
+
+If warm/cold speedup ratio exceeds 1.5x, the E2E projection in `validation_results.md` MUST use the cold-cache speedup. Omitting cold-cache measurement for a BW-bound kernel is a Stage 5.2 FAIL.
+
 ---
 
 ## Default correctness tolerances (starting points)

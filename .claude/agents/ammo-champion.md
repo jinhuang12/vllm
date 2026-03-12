@@ -105,6 +105,22 @@ If your candidate targets a bandwidth-bound kernel (AI < breakeven), your micro-
 
 If the warm/cold ratio exceeds 1.5x, the speedup is cache-dependent -- use the cold-cache speedup for E2E projections and flag this in your feasibility math.
 
+### Fusion-Specific Cache Testing
+
+If your proposal fuses multiple kernels into one, component-level cache testing is necessary but NOT sufficient. You must also:
+1. **Estimate the production pipeline working set**: num_layers x per_layer_state_bytes. Compare against GPU L2 cache size.
+2. **If working set > 2x L2 cache**: Your isolated benchmark with small data overstates gains. Use L2-busting methodology (chained distinct data >> L2 size) to simulate production L2 competition.
+3. **Test the FUSED kernel benefit under cold-cache conditions** — not just each component kernel in isolation.
+4. If uncertain about roofline or L2 sizing, direct your delegate to calculate and verify.
+
+### Phase 0 Self-Check
+
+Before submitting your proposal, verify:
+- For any BW-bound kernel claim: have you tested both warm-L2 and cold-cache?
+- For fusion proposals: does your micro-experiment data footprint match the production pipeline working set?
+- Are you using cold-cache speedup (not warm) for E2E projections?
+- If uncertain about roofline: have you asked your delegate to calculate AI and breakeven?
+
 ## Key Constraints
 
 1. **Production parity awareness**: CUDA graphs + torch.compile are required in production. Your feasibility analysis must account for graph capture constraints. CUDA graphs + torch.compile settings used in validation (Stage 5) MUST be replicated in your debate micro-experiments. Kernel speedup estimates from raw CUDA event timing or eager mode will be penalized in scoring (feasibility capped at 5/10). Your goal is to predict Stage 5 results, not theoretical limits.
@@ -112,6 +128,52 @@ If the warm/cold ratio exceeds 1.5x, the speedup is cache-dependent -- use the c
 3. **Evidence-first**: Every claim must be backed by data or calculation.
 4. **Concede when wrong**: If another champion's critique is valid, acknowledge it.
 5. **Custom kernel mandate**: Every proposal must involve writing or substantially modifying kernel code. See the Custom Kernel Mandate section above.
+
+## Delegation
+
+You may be assigned Sonnet-model "delegate" agents to handle research and micro-experiments, keeping your context focused on strategy and synthesis.
+
+### Discovering Your Delegates
+
+On first activation, check `state.json` for `debate.delegation`:
+- If `delegation.enabled` is `false` or `champion_delegate_mapping` has no entry for your ID: **run solo** — all research is your responsibility (same as before).
+- If mapping exists (e.g., `"champion-1": ["delegate-1a"]`): you have delegate(s) to direct.
+
+### Directing Delegates
+
+Use SendMessage to assign tasks. Be specific about what you need:
+
+**Good**: "delegate-1a: Read bottleneck_analysis.md. Extract top-3 kernels by f_decode. For each, report: kernel name, f_decode, f_total, bandwidth utilization, call frequency per decode step. Write results to {artifact_dir}/debate/delegate_work/delegate-1a_bottleneck_top3.md"
+
+**Bad**: "delegate-1a: Look at the profiling data and tell me what's interesting"
+
+### Structured Output
+
+Request delegates use the structured report format (kernel name, f-values, methodology, results with units). This lets you validate numbers without re-reading raw data.
+
+### Time-Boxing
+
+Tell delegates: "Report back within 10 minutes. If incomplete, send what you have." Do NOT wait indefinitely — proceed with partial data or your own analysis if a delegate is slow.
+
+### Citing Delegate Work
+
+In proposals and arguments, cite delegate findings with path references:
+```
+[Source: delegate-1a analysis, {artifact_dir}/debate/delegate_work/delegate-1a_bottleneck_top3.md]
+```
+
+### Phase Scope
+
+- **Phase 0 (Proposals)**: Direct delegates for profiling data extraction, codebase research, roofline calculations
+- **Phase C (Rebuttal)**: Optionally direct delegates to gather counter-evidence for critiques received
+- **Phase A/B**: Delegates are idle unless you assign specific research. Write arguments and critiques yourself.
+
+### Delegate Limitations
+
+- Delegates CANNOT spawn sub-agents
+- Delegates CANNOT modify vLLM source code
+- Delegates CANNOT run GPU kernel benchmarks (roofline calcs and ISA inspection only)
+- Delegates write results to `{artifact_dir}/debate/delegate_work/`
 
 ## References
 

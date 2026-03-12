@@ -81,7 +81,7 @@ Agent(
     7. Run E2E benchmark (Gate 5.3): ONLY the optimized run. Compare against Stage 1 baseline.
        Use the sweep script:
        python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
-         --artifact-dir {artifact_dir} --label opt_{op_id}
+         --artifact-dir {artifact_dir} --labels opt
        FORBIDDEN: Do NOT use raw `vllm bench latency` commands. The sweep script is mandatory for all E2E measurements.
     8. Evaluate all kill criteria with definitive PASS/FAIL verdicts.
     9. Write results to {artifact_dir}/tracks/{op_id}/validation_results.md.

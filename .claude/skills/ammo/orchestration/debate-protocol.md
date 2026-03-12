@@ -11,6 +11,83 @@ Champions independently propose optimization candidates from grounded Stage 2 da
   - `name="champion-{N}"` (e.g., `champion-1`, `champion-2`)
   - `team_name` set to the team name above
 
+## Delegation
+
+When `state.json` has `debate.delegation.enabled: true`, each champion is assigned 1-N Sonnet-model delegate agents for research and micro-experiments. Delegates are pre-spawned as teammates in the same team — champions direct them via SendMessage.
+
+### Team Composition with Delegates
+
+```
+Team: ammo-debate-{component}-{model_short}-{hardware}
+├── champion-1 (Opus)
+│   └── delegate-1a (Sonnet)
+├── champion-2 (Opus)
+│   └── delegate-2a (Sonnet)
+└── champion-3 (Opus)
+    └── delegate-3a (Sonnet)
+```
+
+Naming convention: `delegate-{champion_number}{letter}` (e.g., `delegate-1a`, `delegate-1b` for champion-1's first and second delegates).
+
+The mapping is stored in `state.json` at `debate.delegation.champion_delegate_mapping`:
+```json
+{
+  "champion-1": ["delegate-1a"],
+  "champion-2": ["delegate-2a"],
+  "champion-3": ["delegate-3a"]
+}
+```
+
+### Communication Flow
+
+1. **Lead broadcasts phase-start to champions only**: Include routing clarity — "Champions: advance to Phase 0. Delegates: await champion instructions."
+2. **Champion → Delegate via SendMessage**: Champion assigns specific research tasks with structured output requirements.
+3. **Delegate → Champion via SendMessage**: Delegate reports results with structured data (kernel name, f-values, methodology, measurements).
+4. **Champion writes debate artifacts**: Only champions write to `debate/proposals/` and `debate/round_{N}/`. Delegates write to `debate/delegate_work/` only.
+
+### Phase Scope for Delegates
+
+| Phase | Delegate Role |
+|-------|--------------|
+| **Phase 0 (Proposals)** | Active — profiling data extraction, codebase research, roofline calcs, ISA inspection |
+| **Phase A (Evidence)** | Idle unless champion assigns specific research |
+| **Phase B (Critique)** | Idle unless champion assigns specific research |
+| **Phase C (Rebuttal)** | Optionally active — gather counter-evidence for critiques received |
+
+### Delegate Constraints
+
+- **No GPU kernel benchmarks**: Roofline calculations, codebase research, and `ncu --query-metrics` (static) only. No kernel benchmarks that require GPU allocation — this avoids GPU contention with the async pipeline.
+- **No vLLM source modifications**: Research and analysis only.
+- **15-minute task timeout**: Champions should time-box delegate tasks. If a delegate exceeds the timeout, the champion proceeds with partial data.
+
+### Delegate Artifacts
+
+Delegates write results to:
+```
+{artifact_dir}/debate/delegate_work/
+  delegate-1a_bottleneck_top3.md
+  delegate-1a_roofline_attention.py
+  delegate-2a_kernel_source_trace.md
+  ...
+```
+
+Champions cite these in proposals: `[Source: delegate-1a, {path}]`
+
+### Timeout Handling
+
+If a delegate does not respond within the phase deadline:
+1. Champion proceeds with its own analysis or partial delegate data
+2. Champion notes in proposal: "Delegate research incomplete; used own analysis for [section]"
+3. This is NOT a debate failure — champions must be self-sufficient
+
+### Teardown
+
+On TeamDelete (after winner selection), ALL agents are shut down — both champions and delegates. No special delegate cleanup needed.
+
+### Without Delegation
+
+If `debate.delegation.enabled` is `false` (default), the debate runs with champions only — identical to the current protocol. No delegates are spawned, no `delegate_work/` directory is created.
+
 ## Debate is Always Mandatory
 
 There is no fast-track exception. Every run must go through at least Phase 0 (proposals) + 1 debate round.
@@ -38,6 +115,7 @@ Required sections in the proposal file:
 | **Expected E2E Impact** | `f × kernel_speedup` where both factors have provenance |
 | **Kill Criteria** | What threshold defines failure for this candidate |
 | **Kernel Code Scope** | Specific kernel files to create/modify, language (CUDA/Triton/CUTLASS), estimated LOC — demonstrates this is custom kernel work |
+| **Micro-Experiment Cache Audit** | For BW-bound kernels (AI < breakeven): (1) Were both warm-cache and cold-cache times reported? (2) If warm/cold > 1.5x, was cold-cache speedup used for E2E? For fusion proposals: was the fused kernel tested under production L2 conditions (data footprint matching pipeline working set)? |
 
 **CRITICAL**: `kernel_speedup` estimates MUST come from the champion's own micro-experiment. Stage 2 does not provide speedup estimates.
 
@@ -183,6 +261,14 @@ For kernels identified as bandwidth-bound (AI < breakeven threshold), micro-expe
 2. Cold-cache time (single iteration after L2 flush or fresh random tensors)
 
 If the warm/cold ratio exceeds 1.5x, the speedup is cache-dependent. Use the cold-cache result for E2E projections and flag this in the proposal's feasibility math.
+
+### Fusion-Specific Cache Testing
+
+For proposals that fuse multiple kernels into one, the above requirements are necessary but not sufficient:
+
+1. **Pipeline working set check**: Estimate total per-iteration working set (num_layers x per_layer_state). If this exceeds 2x the GPU's L2 cache, isolated benchmarks on small tensors overstate the fused kernel's benefit.
+2. **L2-busting methodology**: Test the fused kernel with chained distinct data totaling > 2.5x L2 cache size, forcing DRAM streaming. This simulates production L2 competition.
+3. **Report both**: Report speedup under (a) isolated warm-cache and (b) L2-busted cold conditions. If (a)/(b) > 1.5x, the E2E estimate MUST use the cold-cache speedup.
 
 ## Teardown
 
