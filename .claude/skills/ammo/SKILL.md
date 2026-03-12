@@ -28,6 +28,7 @@ Stage 3: Candidate Proposal + Debate [ephemeral agent team: N ammo-champion agen
 Stage 4+5: Parallel Tracks          [2-3 worktrees, each: ammo-implementer (implements + validates) + DA audit subagent]
 Stage 6: Integration Validation     [main session direct]                       → SHIP or round-fail
 Stage 7: Campaign Evaluation        [main session direct]                       → next round, campaign_complete, or campaign_exhausted
+Stage 7b: Report Generation          [general-purpose subagent, background]       → REPORT.md (on campaign_complete or campaign_exhausted)
 ```
 
 Stages 1-6 form the **inner loop** of a round. Stage 7 decides whether to iterate. No persistent team across stages. Agents spawn when needed and terminate when done.
@@ -39,7 +40,7 @@ The campaign continues until the **diminishing returns threshold** is met: the t
 ### Stages 1-2: Main Session + Subagents
 
 - Lead (you) invokes ammo-researcher as a subagent via Task tool for profiling, source analysis, bottleneck mining.
-- Lead delegates profiling and E2E baseline capture to ammo-researcher (who uses the sweep script with `--nsys-profile`). The lead does NOT run benchmarks itself.
+- Lead delegates profiling and E2E baseline capture to ammo-researcher (who uses the sweep script with `--nsys-profile --labels baseline`). Use `--labels baseline` to avoid running a meaningless opt sweep (opt_env is still a placeholder at this stage). The lead does NOT duplicate work assigned to the ammo-researcher (i.e. run benchmarks, extract profiling results).
 - No TeamCreate. No persistent agents. Subagent returns results directly.
 - Lead runs gates (`verify_phase1_baseline.py`, Stage 2 review) between stages.
       
@@ -50,10 +51,11 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 
 - **TeamCreate**: `ammo-debate-{component}-{model_short}-{hardware}`
 - Spawn 2-4 ammo-champion agents. Each reads the grounded bottleneck_analysis.md independently.
-- **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists.
+- **Delegation**: If `state.json` has `debate.delegation.enabled: true`, also spawn Sonnet delegate agents alongside champions (1-N per champion, configurable via `delegates_per_champion`). Champions direct delegates via SendMessage for research and micro-experiments. See `orchestration/debate-protocol.md` § Delegation.
+- **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists. With delegation, champions may direct delegates to extract profiling data and run roofline calculations.
 - **Debate rounds**: Champions argue for their proposals, critique others, rebut. See `orchestration/debate-protocol.md`.
 - Main session selects 2-3 winners using scoring rubric (`references/debate-scoring-rubric.md`).
-- **TeamDelete** after selection.
+- **TeamDelete** after selection (shuts down all champions AND delegates).
 - **Debate is always mandatory.** If all champions independently converge on the same candidate in Phase 0 with micro-experiment evidence, the lead may shorten to 1 debate round instead of 2.
 
 ### Stages 4-5: Parallel Worktree Tracks
@@ -81,6 +83,12 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 - **Hook-enforced**: `GATE: campaign evaluation` blocked until round results and diminishing returns check are recorded.
 - See `orchestration/campaign-loop.md` and `orchestration/integration-logic.md` § Campaign Loop Transition.
 
+### Stage 7b: Report Generation
+
+When the campaign ends (`campaign_complete` or `campaign_exhausted`), spawn a general-purpose subagent in the background to generate the optimization report. The subagent reads `.claude/skills/ammo/report/SKILL.md` and follows its instructions, passing the artifact directory path. This produces `{artifact_dir}/REPORT.md` with supporting charts in `{artifact_dir}/report_assets/`.
+
+The report subagent runs as a background task — the orchestrator does not wait for it before declaring the campaign done. No GPU access is needed; the subagent reads existing campaign artifacts (state.json, constraints.md, bottleneck_analysis.md, debate artifacts, validation results, benchmark JSONs) and writes the report.
+
 ### Async Pipeline: Debate Overlaps Implementation
 
 While Stages 4-5 implementers work on round N winners, the orchestrator MUST start round N+1 debate from existing bottleneck data to build a candidate queue:
@@ -102,7 +110,7 @@ T2:  Baseline capture + constraints.md                    [ammo-researcher subag
 T3:  GATE: verify_phase1_baseline.py                      [main]                        <- T2
 T4:  Bottleneck mining (grounded data only)                [ammo-researcher subagent]    <- T3
 T5:  GATE: Stage 2 review (no ungrounded estimates)       [main]                        <- T4
-T6:  Champion proposals + debate (TeamCreate -> Phase 0 -> rounds -> selection) [main + debate team] <- T5
+T6:  Champion proposals + debate (TeamCreate -> Phase 0 [+delegates if enabled] -> rounds -> selection) [main + debate team] <- T5
 T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]                <- T6
 
   +- Per winning candidate (parallel) -----------------------------------------+
@@ -131,6 +139,7 @@ T15: Campaign evaluation                                  [main]               <
       IF below threshold: CAMPAIGN EXHAUSTED
       ELSE: new debate round from existing data (→ T6)
 T19: GATE: campaign evaluation                            [main]               <- T15..T18
+T20: Generate optimization report                         [general-purpose subagent, background] <- T19 (campaign_complete or campaign_exhausted)
 
 === Async Pipeline (during Stages 4-5) ===
 
@@ -152,7 +161,11 @@ These are NOT advisory. Violation blocks stage progression.
 
 ## State Management
 
-`state.json` in artifact directory tracks stage, status, debate, parallel tracks, and integration:
+`state.json` in artifact directory tracks stage, status, debate, parallel tracks, and integration.
+
+**Session ID**: The lead SHOULD record the session ID in state.json at campaign start: `"session_id": "<uuid>"`. This enables the eval pipeline to extract ground-truth timing and agent cost data from session logs automatically.
+
+**Stage timestamps and agent costs**: Auto-extracted from session logs by `parse_session_logs.py` during eval. No manual recording needed — the `stage_timestamps` and `agent_costs` fields in state.json are populated by the eval pipeline, not by the lead.
 
 ```json
 {
@@ -174,8 +187,24 @@ These are NOT advisory. Violation blocks stage progression.
     "rounds_completed": 0,
     "max_rounds": 4,
     "selected_winners": [],
-    "selection_rationale": null
+    "selection_rationale": null,
+    "delegation": {
+      "enabled": false,
+      "delegates_per_champion": 1,
+      "champion_delegate_mapping": {},
+      "delegate_results": {}
+    }
   },
+  "stage_timestamps": {   /* lead records ISO timestamps at stage transitions */
+    "1_baseline": {"started_at": null, "completed_at": null},
+    "2_bottleneck_mining": {"started_at": null, "completed_at": null},
+    "3_debate": {"started_at": null, "completed_at": null},
+    "4_5_parallel_tracks": {"started_at": null, "completed_at": null},
+    "6_integration": {"started_at": null, "completed_at": null},
+    "7_campaign_eval": {"started_at": null, "completed_at": null}
+  },
+  "session_id": null,     /* lead records session UUID at campaign start */
+  "agent_costs": [],      /* auto-populated by eval pipeline from session logs */
   "parallel_tracks": {},  /* per-track: { status, correctness, kernel_speedup, e2e_speedup, validation_results_path } */
   "integration": {
     "status": "pending",
@@ -218,6 +247,8 @@ Each entry in `campaign.rounds`:
 
 `1_baseline` -> `2_bottleneck_mining` -> `3_debate` -> `4_5_parallel_tracks` -> `6_integration` -> `7_campaign_eval` -> {next round | `campaign_complete` | `campaign_exhausted`}
 
+On `campaign_complete` or `campaign_exhausted`, report generation (T20) is spawned in the background before the session ends.
+
 ## Communication Patterns
 
 - **Blocker escalation**: Subagent returns error -> lead investigates.
@@ -233,7 +264,7 @@ Run, don't modify:
 - `scripts/collect_env.py` — Capture environment
 - `scripts/verify_phase1_baseline.py` — Stage 1->2 gate
 - `scripts/verify_validation_gates.py` — Stage 5 gate (supports `--track` for per-track validation)
-- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `workload_matrix` for multi-dimensional (input_len x output_len x batch_size) sweeps and `--nsys-profile` for per-bucket nsys traces without model reload.
+- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `--labels baseline` for baseline-only sweeps (Stage 1), `--labels opt` for opt-only (Stage 5), or `--labels baseline,opt` (default, A/B comparison). Also supports `workload_matrix` for multi-dimensional sweeps and `--nsys-profile` for per-bucket nsys traces without model reload. **WARNING**: If `opt_env` in target.json still contains placeholder keys (e.g., `<ENABLE_FLAG>`), the script will fail fast — update `opt_env` before running with `--labels opt`.
 - `scripts/generate_validation_report.py` — Structured reporting
 
 ## References
@@ -287,6 +318,7 @@ After interruption or compaction:
 7. If campaign is active: read `campaign.current_round`, `campaign.status`, and `campaign.pending_queue`. Check if an async debate was in progress.
 8. If `campaign` key is missing (legacy state.json): treat as round 1 of a new campaign — initialize the campaign object from existing state.
 9. Check `campaign.status` before ending session. If active, either complete the current stage or set `campaign.status` to `"paused"`.
+10. If `campaign.status` is `campaign_complete` or `campaign_exhausted` but no `REPORT.md` exists in the artifact directory, spawn the report generation subagent (T20).
 
 ## Quick Start Examples
 
