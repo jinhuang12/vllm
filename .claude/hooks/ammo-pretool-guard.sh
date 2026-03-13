@@ -12,7 +12,7 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 ls "$PROJECT_DIR"/kernel_opt_artifacts/*/state.json &>/dev/null || exit 0
 
 # Skip read-only / inspection commands (prevent false positives)
-if echo "$COMMAND" | grep -qP '^\s*(grep|rg|cat|head|tail|less|find|ag|ack|env|printenv|echo|printf|jq|wc|python\s+-c|git\s+(log|show|diff|blame))\b'; then
+if echo "$COMMAND" | grep -qP '^\s*(grep|rg|cat|head|tail|less|find|ag|ack|env|printenv|echo|printf|jq|wc|python\s+-c|git\s+(log|show|diff|blame|commit|tag|stash|rebase|cherry-pick))\b'; then
     exit 0
 fi
 
