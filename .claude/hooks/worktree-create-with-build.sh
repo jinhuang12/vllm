@@ -127,18 +127,63 @@ PY_VERSION=$("$MAIN_REPO/.venv/bin/python" -c "import sys; print(f'{sys.version_
     # so the main venv's editable install meta_path finder is NOT loaded
     echo "$MAIN_REPO/.venv/lib/python${PY_VERSION}/site-packages" > "$SITE_PKGS/main-venv.pth"
 
-    # Add worktree root so `import vllm` finds the worktree's vllm/ package
-    echo "$WORKTREE_DIR" > "$SITE_PKGS/worktree.pth"
+    # Python isolation: use a meta-path finder to redirect `import vllm` to the
+    # worktree. This is necessary because sys.path[0] = '' (CWD) is set by CPython
+    # AFTER .pth files process, so sys.path.insert(0, ...) and plain .pth entries
+    # both lose to CWD when CWD is the main repo. A meta-path finder intercepts
+    # imports BEFORE PathFinder checks sys.path — same pattern as pip editable installs.
+    cat > "$SITE_PKGS/_worktree_finder.py" << 'FINDER_EOF'
+import sys
+from importlib.util import spec_from_file_location
+from pathlib import Path
+
+WORKTREE_ROOT = '__WORKTREE_DIR__'
+WORKTREE_PACKAGES = {'vllm'}
+
+class WorktreeFinder:
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        top_level = fullname.split('.')[0]
+        if top_level not in WORKTREE_PACKAGES:
+            return None
+        if fullname in WORKTREE_PACKAGES:
+            pkg_path = Path(WORKTREE_ROOT) / fullname
+            init = pkg_path / '__init__.py'
+            if init.exists():
+                return spec_from_file_location(
+                    fullname, str(init),
+                    submodule_search_locations=[str(pkg_path)]
+                )
+        return None
+
+def install():
+    if not any(getattr(f, '__name__', '') == 'WorktreeFinder' for f in sys.meta_path):
+        for i, finder in enumerate(sys.meta_path):
+            if getattr(finder, '__name__', '') == 'PathFinder':
+                sys.meta_path.insert(i, WorktreeFinder)
+                return
+        sys.meta_path.append(WorktreeFinder)
+FINDER_EOF
+    sed -i "s|__WORKTREE_DIR__|$WORKTREE_DIR|g" "$SITE_PKGS/_worktree_finder.py"
+
+    # Install via .pth import directive (processed during site init)
+    echo "import _worktree_finder; _worktree_finder.install()" > "$SITE_PKGS/worktree.pth"
+
+    # Also add worktree to sys.path for non-vllm imports (test fixtures, scripts)
+    echo "$WORKTREE_DIR" > "$SITE_PKGS/worktree-path.pth"
 
     # Create console script wrappers (thin venv has no pip-installed scripts)
-    for cmd in pytest vllm; do
-        cat > "$WORKTREE_DIR/.venv/bin/$cmd" << 'WRAPPER'
+    cat > "$WORKTREE_DIR/.venv/bin/vllm" << WRAPPER
 #!/bin/bash
-exec "$(dirname "$0")/python" -m CMD_PLACEHOLDER "$@"
+exec "\$(dirname "\$0")/python" -c "from vllm.entrypoints.cli.main import main; main()" "\$@"
 WRAPPER
-        sed -i "s|CMD_PLACEHOLDER|$cmd|g" "$WORKTREE_DIR/.venv/bin/$cmd"
-        chmod +x "$WORKTREE_DIR/.venv/bin/$cmd"
-    done
+    chmod +x "$WORKTREE_DIR/.venv/bin/vllm"
+
+    cat > "$WORKTREE_DIR/.venv/bin/pytest" << WRAPPER
+#!/bin/bash
+exec "\$(dirname "\$0")/python" -m pytest "\$@"
+WRAPPER
+    chmod +x "$WORKTREE_DIR/.venv/bin/pytest"
 
     echo "  .venv created (Python isolation active)" >&2
 } || echo "  WARN: venv creation failed" >&2
