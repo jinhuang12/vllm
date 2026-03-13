@@ -73,14 +73,6 @@ def find_python_files(artifact_dir: Path, pattern: str = "*.py") -> List[Path]:
     return files
 
 
-def _latest_attempt_kill_results(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract kill_criteria_results from the latest opportunity_attempts entry."""
-    attempts = state.get("opportunity_attempts", [])
-    if attempts:
-        return attempts[-1].get("kill_criteria_results", {})
-    return {}
-
-
 def _strip_comments(content: str) -> str:
     """Remove Python # comments and triple-quoted docstrings to reduce false positives.
 
@@ -334,72 +326,91 @@ def check_production_parity(artifact_dir: Path) -> GateResult:
 
 
 def check_kill_criteria_complete(artifact_dir: Path) -> GateResult:
-    """Gate 4.4: Check all kill criteria are evaluated (not TODO/optional)."""
-    state_file = artifact_dir / "state.json"
+    """Gate 4.4: Check all kill criteria are evaluated (not TODO/optional).
 
-    if not state_file.exists():
+    Reads kill criteria directly from tracks/{op_id}/validation_results.md files.
+    """
+    tracks_dir = artifact_dir / "tracks"
+    if not tracks_dir.exists():
         return GateResult(
             name="kill_criteria_complete",
             status="FAIL",
-            message="state.json does not exist",
-            evidence=[f"Expected: {state_file}"],
+            message="No tracks/ directory found",
+            evidence=[f"Expected: {tracks_dir}"],
         )
 
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+    validation_files = list(tracks_dir.glob("*/validation_results.md"))
+    if not validation_files:
         return GateResult(
             name="kill_criteria_complete",
             status="FAIL",
-            message=f"state.json is invalid JSON: {e}",
-            evidence=[],
+            message="No validation_results.md files found in tracks/",
+            evidence=[f"Searched: {tracks_dir}/*/validation_results.md"],
         )
 
-    # Check kill_criteria_results with fallback chain for backward compatibility.
-    # Preferred: route_decision.kill_criteria_results
-    # Fallback 1: top-level kill_criteria_results (legacy)
-    # Fallback 2: opportunity_attempts[-1].kill_criteria_results
-    kill_results = (
-        state.get("route_decision", {}).get("kill_criteria_results", {})
-        or state.get("kill_criteria_results", {})
-        or _latest_attempt_kill_results(state)
-    )
+    # Parse kill criteria from validation_results.md files
+    all_incomplete: List[str] = []
+    all_complete: List[str] = []
+    tracks_checked: List[str] = []
 
-    if not kill_results:
+    for vf in validation_files:
+        track_id = vf.parent.name
+        tracks_checked.append(track_id)
+        content = vf.read_text(encoding="utf-8", errors="ignore")
+
+        # Extract kill criteria section — look for "Kill Criteria" or "kill_criteria"
+        # heading and parse status entries beneath it
+        in_kill_section = False
+        for line in content.split("\n"):
+            # Detect start of kill criteria section
+            if re.search(r"(?i)(kill\s*criteria|kill_criteria)", line) and (
+                line.strip().startswith("#") or line.strip().startswith("**")
+            ):
+                in_kill_section = True
+                continue
+            # Detect start of a new section (end of kill criteria)
+            if in_kill_section and line.strip().startswith("#"):
+                in_kill_section = False
+                continue
+            if not in_kill_section:
+                continue
+
+            # Parse criterion lines (e.g., "- correctness: PASS", "- **latency**: PASS")
+            criterion_match = re.match(
+                r"\s*[-*]\s*\*{0,2}(\w[\w\s]*?)\*{0,2}\s*:\s*(.+)", line
+            )
+            if criterion_match:
+                criterion = criterion_match.group(1).strip()
+                result = criterion_match.group(2).strip()
+                result_upper = result.upper()
+                label = f"{track_id}/{criterion}: {result}"
+                if "TODO" in result_upper or "OPTIONAL" in result_upper or "SKIP" in result_upper:
+                    all_incomplete.append(label)
+                else:
+                    all_complete.append(label)
+
+    if not all_complete and not all_incomplete:
         return GateResult(
             name="kill_criteria_complete",
             status="FAIL",
-            message="No kill_criteria_results in state.json",
+            message="No kill criteria found in validation_results.md files",
             evidence=[
-                "Required: state.json must document all kill criteria evaluation",
-                "Expected at one of these JSON paths:",
-                "  1. route_decision.kill_criteria_results (preferred)",
-                "  2. kill_criteria_results (top-level, legacy)",
-                "  3. opportunity_attempts[-1].kill_criteria_results",
+                f"Checked tracks: {', '.join(tracks_checked)}",
+                "Expected: a 'Kill Criteria' section with criterion status entries",
             ],
         )
 
-    incomplete = []
-    complete = []
-
-    for criterion, result in kill_results.items():
-        result_str = str(result).upper()
-        if "TODO" in result_str or "OPTIONAL" in result_str or "SKIP" in result_str:
-            incomplete.append(f"{criterion}: {result}")
-        else:
-            complete.append(f"{criterion}: {result}")
-
-    if incomplete:
+    if all_incomplete:
         return GateResult(
             name="kill_criteria_complete",
             status="FAIL",
-            message=f"{len(incomplete)} kill criteria not evaluated",
+            message=f"{len(all_incomplete)} kill criteria not evaluated",
             evidence=[
                 "INCOMPLETE criteria:",
-                *[f"  - {c}" for c in incomplete],
+                *[f"  - {c}" for c in all_incomplete],
                 "",
                 "COMPLETE criteria:",
-                *[f"  - {c}" for c in complete],
+                *[f"  - {c}" for c in all_complete],
                 "",
                 "BLOCKER: All kill criteria must be evaluated before SHIP decision",
             ],
@@ -408,8 +419,8 @@ def check_kill_criteria_complete(artifact_dir: Path) -> GateResult:
     return GateResult(
         name="kill_criteria_complete",
         status="PASS",
-        message=f"All {len(complete)} kill criteria evaluated",
-        evidence=[f"  - {c}" for c in complete],
+        message=f"All {len(all_complete)} kill criteria evaluated across {len(tracks_checked)} track(s)",
+        evidence=[f"  - {c}" for c in all_complete],
     )
 
 
@@ -435,35 +446,17 @@ def check_state_json_gates(artifact_dir: Path) -> GateResult:
             evidence=[],
         )
 
-    # Check for INVALID status (already invalidated)
-    if state.get("status") == "INVALID":
-        return GateResult(
-            name="state_json_gates",
-            status="FAIL",
-            message="state.json status is INVALID - validation was already rejected",
-            evidence=[
-                f"Invalidation reason: {state.get('invalidation_reason', 'unknown')}",
-                "Cannot proceed with INVALID validation",
-            ],
-        )
-
-    # Check gates with fallback chain for backward compatibility.
-    # Preferred: phase_4_validation.gates (legacy name, still accepted)
-    # Fallback: verification_run.validation.gates
-    gates = (
-        state.get("phase_4_validation", {}).get("gates", {})
-        or state.get("verification_run", {}).get("validation", {}).get("gates", {})
-    )
+    # Check gates in state.json (legacy path, may be absent in newer schemas).
+    gates = state.get("phase_4_validation", {}).get("gates", {})
 
     if not gates:
         return GateResult(
             name="state_json_gates",
             status="WARN",
-            message="No gates documented in state.json",
+            message="No gates documented in state.json (check tracks/*/validation_results.md instead)",
             evidence=[
-                "Expected at one of these JSON paths:",
-                "  1. phase_4_validation.gates (legacy, still accepted)",
-                "  2. verification_run.validation.gates (canonical Stage 5 schema)",
+                "Expected at: phase_4_validation.gates",
+                "Gate results may be in validation_results.md rather than state.json.",
             ],
         )
 

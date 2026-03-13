@@ -7,7 +7,7 @@ Reads an artifacts_snapshot.json (from parse_artifacts.py) and produces:
 
 Scoring dimensions:
   1. E2E Outcome (40%)    — cumulative speedup, shipped count
-  2. Gate Pass Rates (15%) — first-attempt pass rate
+  2. Gate Pass Rates (15%) — pass/fail rate
   3. Debate Quality (15%)  — grounding, micro-experiments, filtering
   4. Campaign Efficiency (15%) — rounds, failure rate, convergence
   5. Transcript Quality (15%) — LLM-graded (optional, from transcript_grading.json)
@@ -127,41 +127,41 @@ def score_e2e(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def score_gates(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Score gate pass rates dimension."""
+    """Score gate pass rates dimension (pure pass/fail)."""
     gates = snapshot.get("gates") or {}
     total = 0
-    first_attempt = 0
+    passed = 0
 
     # Phase 1
     p1 = gates.get("phase1_baseline", {})
     if p1.get("status") != "UNKNOWN":
         total += 1
-        if p1.get("first_attempt", False) and p1.get("status") == "PASS":
-            first_attempt += 1
+        if p1.get("status") == "PASS":
+            passed += 1
 
     # Per-track validation gates
     for track in gates.get("validation_gates", []):
         total += 1
-        if track.get("first_attempt", False) and track.get("status") == "PASSED":
-            first_attempt += 1
+        if track.get("status") == "PASSED":
+            passed += 1
 
     # Integration
     integration = gates.get("integration", {})
     if integration.get("status") not in (None, "pending"):
         total += 1
         if integration.get("status") in ("validated", "single_pass", "combined"):
-            first_attempt += 1
+            passed += 1
 
-    rate = first_attempt / total if total > 0 else 1.0
+    rate = passed / total if total > 0 else 1.0
     score = _tier_score(rate, GATE_TIERS)
 
     return {
         "score": round(score, 2),
         "sub_scores": {
-            "phase1_first_attempt": p1.get("first_attempt"),
-            "track_first_attempt_rate": round(rate, 3),
+            "phase1_passed": p1.get("status") == "PASS",
+            "pass_rate": round(rate, 3),
             "total_gates_checked": total,
-            "total_first_attempt_passes": first_attempt,
+            "total_passed": passed,
         },
     }
 
@@ -548,8 +548,8 @@ def generate_report(scorecard: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
     gate_sub = scorecard.get("dimensions", {}).get("gate_pass_rates", {}).get("sub_scores", {})
     lines.append("## Gate Pass Rates")
     lines.append("")
-    lines.append(f"- First-attempt pass rate: {gate_sub.get('track_first_attempt_rate', '?'):.0%}" if isinstance(gate_sub.get('track_first_attempt_rate'), float) else f"- First-attempt pass rate: {gate_sub.get('track_first_attempt_rate', '?')}")
-    lines.append(f"- Gates checked: {gate_sub.get('total_gates_checked', 0)}, passed first try: {gate_sub.get('total_first_attempt_passes', 0)}")
+    lines.append(f"- Pass rate: {gate_sub.get('pass_rate', '?'):.0%}" if isinstance(gate_sub.get('pass_rate'), float) else f"- Pass rate: {gate_sub.get('pass_rate', '?')}")
+    lines.append(f"- Gates checked: {gate_sub.get('total_gates_checked', 0)}, passed: {gate_sub.get('total_passed', 0)}")
     lines.append("")
 
     # Debate Quality detail

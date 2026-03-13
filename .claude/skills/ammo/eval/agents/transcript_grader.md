@@ -29,7 +29,6 @@ A "wasted retry" is when a stage was repeated due to an avoidable error — not 
 - Data collected, discarded, and re-collected unnecessarily
 - Benchmark results invalidated by GPU contention (concurrent processes)
 - Gate failures caused by missing files that should have been created earlier
-- State.json showing `opportunity_attempts` with >1 entries for the same stage
 
 DO NOT count: genuine correctness failures (kernel doesn't pass torch.allclose), intentional re-profiling after shipping an optimization, or normal campaign round progression.
 

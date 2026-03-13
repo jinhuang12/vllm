@@ -22,7 +22,6 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -172,11 +171,6 @@ Record:
 
 def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold: int = 3,
                 enable_delegation: bool = True, delegates_per_champion: int = 1) -> Dict[str, Any]:
-    # Derive a short target name for the team
-    model_short = fields.model_id.split("/")[-1].lower().replace("-", "")[:12] if fields.model_id != PLACEHOLDER else "target"
-    hw_short = fields.hardware.lower() if fields.hardware != PLACEHOLDER else "gpu"
-    target_name = f"{model_short}-{hw_short}"
-
     return {
         "target": {
             "model_id": fields.model_id,
@@ -187,21 +181,7 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
             "component": "auto",
         },
         "stage": "1_baseline",
-        "status": "in_progress",
-        "current_opportunity_id": None,
-        "max_attempts": 3,
-        "opportunity_attempts": [],
-        "route_decision": {},
-        "verification_run": {
-            "stage1": None,
-            "validation": None,
-        },
-        "last_update": date.today().isoformat(),
         "summary": "Initialized.",
-        "team": {
-            "name": f"ammo-{target_name}",
-            "members": ["lead", "researcher", "implementer"],
-        },
         "gpu_resources": {
             "gpu_count": 1,
             "gpu_model": PLACEHOLDER,

@@ -158,7 +158,7 @@ Run cleanup for all tracks, including failed ones. The integration branch (if cr
 
 ## In-Flight Tracks During Campaign Re-profiling
 
-When a candidate ships and triggers re-profiling (see `orchestration/campaign-loop.md`), other tracks from the same round may still be running. These tracks are NOT terminated:
+When a candidate ships and triggers re-profiling (see Campaign Loop section in `SKILL.md`), other tracks from the same round may still be running. These tracks are NOT terminated:
 
 1. Let all in-flight implementations complete against the ORIGINAL round's baseline.
 2. Validate their results using Stage 1 baseline from the current round (not the re-profiled baseline).

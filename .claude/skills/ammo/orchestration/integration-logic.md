@@ -124,7 +124,7 @@ The integration section of `state.json` records all decisions and results:
 
 ## Campaign Loop Transition (Stage 7)
 
-After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orchestrator evaluates whether to continue the campaign. See `orchestration/campaign-loop.md` for the full protocol.
+After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orchestrator evaluates whether to continue the campaign. See the Campaign Loop section in `SKILL.md` for the full protocol.
 
 ### If SHIP (one or more candidates passed)
 
@@ -156,7 +156,4 @@ If an async debate completed during this round's implementation and placed winne
 
 ### Hook Enforcement
 
-The campaign evaluation gate in `ammo-gate-guard.sh` blocks the `GATE: campaign evaluation` task until:
-- `campaign.rounds[current_round]` exists with `top_bottleneck_share_pct`
-- If candidates shipped: re-profiling was initiated for the next round
-- The Stop hook in `ammo-campaign-stop-guard.sh` prevents ending the session mid-campaign
+The Stop hook (`ammo-stop-guard.sh`) blocks the session from ending while the campaign is active. The orchestrator must either complete the current stage or set `campaign.status` to `"paused"` before the session can end.

@@ -304,7 +304,7 @@ The skill was rewritten from the ground up. Here is what changed:
 - **New references**: `e2e-latency-guide.md`, `validator-troubleshooting.md`
 - **New scripts**: `verify_validation_gates.py` (per-track), `generate_validation_report.py`
 - **Agent definitions**: 3 specialized agents in `.claude/agents/ammo-*.md` (implementer now includes validation; DA audit spawned by orchestrator)
-- **Lead rules**: `.claude/rules/ammo.md` (prohibits lead from writing kernel code)
+- **Lead rules**: Merged into `SKILL.md` Lead Role section (prohibits lead from writing kernel code)
 
 ---
 

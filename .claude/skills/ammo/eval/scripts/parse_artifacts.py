@@ -225,11 +225,10 @@ def _parse_e2e_results(artifact_dir: Path) -> Optional[Dict[str, Any]]:
 
 def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
     """Parse gate pass/fail information from state.json and validation files."""
-    # Phase 1 baseline gate
-    phase1_status = _safe_get(state, "verification_run", "stage1")
+    # Phase 1 baseline gate — determined by constraints.md existence
+    has_constraints = (artifact_dir / "constraints.md").exists()
     phase1 = {
-        "status": "PASS" if phase1_status else ("UNKNOWN" if phase1_status is None else "FAIL"),
-        "first_attempt": _infer_first_attempt(state, "stage1"),
+        "status": "PASS" if has_constraints else "UNKNOWN",
     }
 
     # Per-track validation gates
@@ -244,7 +243,6 @@ def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
             "correctness": track_data.get("correctness"),
             "kernel_speedup": track_data.get("kernel_speedup"),
             "e2e_speedup": track_data.get("e2e_speedup"),
-            "first_attempt": True,  # No retry tracking in current schema
         })
 
     # Integration gate
@@ -258,15 +256,6 @@ def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
             "final_decision": _safe_get(integration, "final_decision", "action"),
         },
     }
-
-
-def _infer_first_attempt(state: Dict[str, Any], stage: str) -> bool:
-    """Infer if a stage passed on first attempt from opportunity_attempts."""
-    attempts = state.get("opportunity_attempts", [])
-    if not attempts:
-        return True  # No retry data = assume first attempt
-    # If there's more than one attempt, it wasn't first-attempt
-    return len(attempts) <= 1
 
 
 # ---------------------------------------------------------------------------

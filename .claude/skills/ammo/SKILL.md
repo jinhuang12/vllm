@@ -7,6 +7,21 @@ description: Profile and optimize GPU kernels for vLLM inference on NVIDIA GPUs.
 
 Profile and optimize **GPU kernels** for **vLLM inference** that beat the **production-parity baseline** (CUDA graphs / torch.compile), without regressing correctness.
 
+## Lead Role
+
+You are the **lead orchestrator**. You scaffold, delegate, and gate — you never implement.
+
+**Responsibilities**:
+- Spawn subagents and assign work — never implement stages directly
+- Manage state.json — read before each action, update at stage transitions
+- Own all gate tasks (T3, T5, T7, T9, T11, T13, T19) — run verification scripts yourself
+- Use SendMessage to communicate with teammates — text output is NOT visible to them
+
+**Prohibited**:
+- Do not write kernel code (CUDA or Triton) yourself
+- Do not skip team creation "for efficiency"
+- Do not implement directly — always delegate to subagents
+
 ## Invocation
 
 User provides: model_id, hardware, dtype, tp, component (or "auto").
@@ -33,7 +48,74 @@ Stage 7b: Report Generation          [general-purpose subagent, background]     
 
 Stages 1-6 form the **inner loop** of a round. Stage 7 decides whether to iterate. No persistent team across stages. Agents spawn when needed and terminate when done.
 
-The campaign continues until the **diminishing returns threshold** is met: the top remaining bottleneck is less than `campaign.diminishing_returns_threshold_pct` (default 3%) of total decode latency. See `orchestration/campaign-loop.md` for the full protocol.
+The campaign continues until the **diminishing returns threshold** is met (see Campaign Loop below).
+
+## Campaign Loop
+
+Each round of the campaign follows this structure:
+
+```
+Round N:
+  1. Profile (Stages 1-2) — re-profile against patched baseline (skip for round 1)
+  2. Debate (Stage 3) — full adversarial debate; may overlap with round N-1 implementation
+  3. Implement + Validate (Stages 4-5) — parallel worktree tracks
+  4. Integrate (Stage 6) — ship or round-fail
+  5. Campaign Evaluation (Stage 7) — diminishing returns check → next round or stop
+```
+
+### Async Pipeline: Debate Overlaps Implementation
+
+While round N implementers work on debate winners:
+
+1. Orchestrator starts round N+1 debate from existing bottleneck data.
+2. New debate follows the full adversarial protocol — no lighter screening.
+3. Debate winners go to `campaign.pending_queue`, NOT to implementation yet.
+
+**If a round N candidate ships** (triggers re-profile): Let the in-progress debate finish. Re-validate queued winners against new profiling data (see below). Discard stale candidates.
+
+**If round N completes without any ship**: Queued winners proceed to implementation immediately.
+
+### Re-validation After Re-profiling
+
+When the bottleneck landscape shifts (because a candidate shipped), queued candidates may be stale. For each candidate in `campaign.pending_queue`:
+
+1. Check if the target kernel still appears in the updated `bottleneck_analysis.md`.
+2. Recalculate expected E2E impact using the new f-values.
+3. If `new_f × kernel_speedup < 1%` E2E improvement: discard.
+4. If still viable: proceed to implementation in the next available slot.
+
+This is a feasibility recheck, NOT a full re-debate — only the f-value has changed.
+
+### Diminishing Returns
+
+After each round's integration:
+
+1. Read the top bottleneck's share of total decode latency from profiling data.
+2. Compare against `campaign.diminishing_returns_threshold_pct` (default: 3%).
+3. If below threshold: no single kernel optimization can yield meaningful E2E gains → **stop**.
+
+**After SHIP**: Re-profile first (bottleneck landscape shifted), then check the NEW top bottleneck.
+**After EXHAUSTED**: Check threshold against EXISTING profiling data (no re-profile needed).
+
+### Campaign State Transitions
+
+```
+active → (threshold not met) → active (next round)
+active → (threshold met after ship) → campaign_complete
+active → (threshold met after exhaust) → campaign_exhausted
+active → (user requests pause) → paused
+paused → (user requests resume) → active
+```
+
+### In-Flight Tracks During Re-profiling
+
+When a candidate ships and triggers re-profiling, other tracks from the same round may still be running:
+
+1. Let all in-flight implementations complete (do NOT terminate).
+2. Validate against the ORIGINAL round's baseline (not the new one).
+3. If they pass: they also ship (additional cumulative gain).
+4. Record all results in the current round's `campaign.rounds` entry.
+5. Next round starts only after all current-round tracks complete.
 
 ## Orchestration Model
 
@@ -74,31 +156,15 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 
 ### Stage 7: Campaign Evaluation
 
-- After integration: record round results in `campaign.rounds`.
-- If SHIP: update `campaign.cumulative_e2e_speedup`, trigger re-profiling (Stages 1-2 on patched code).
-- Check diminishing returns: top bottleneck < `campaign.diminishing_returns_threshold_pct`?
-  - Yes → `campaign.status = "campaign_complete"`. Done.
-  - No → increment `campaign.current_round`, invalidate stale queue, enter next round.
-- If round EXHAUSTED: check threshold against existing profile. Above → new debate. Below → `campaign_exhausted`.
-- **Hook-enforced**: `GATE: campaign evaluation` blocked until round results and diminishing returns check are recorded.
-- See `orchestration/campaign-loop.md` and `orchestration/integration-logic.md` § Campaign Loop Transition.
+- After integration: record round results, check diminishing returns, decide next action.
+- See Campaign Loop section above for the full evaluation protocol.
+- **Hook-enforced**: Stop hook blocks session end while campaign is active.
 
 ### Stage 7b: Report Generation
 
 When the campaign ends (`campaign_complete` or `campaign_exhausted`), spawn a general-purpose subagent in the background to generate the optimization report. The subagent reads `.claude/skills/ammo/report/SKILL.md` and follows its instructions, passing the artifact directory path. This produces `{artifact_dir}/REPORT.md` with supporting charts in `{artifact_dir}/report_assets/`.
 
 The report subagent runs as a background task — the orchestrator does not wait for it before declaring the campaign done. No GPU access is needed; the subagent reads existing campaign artifacts (state.json, constraints.md, bottleneck_analysis.md, debate artifacts, validation results, benchmark JSONs) and writes the report.
-
-### Async Pipeline: Debate Overlaps Implementation
-
-While Stages 4-5 implementers work on round N winners, the orchestrator MUST start round N+1 debate from existing bottleneck data to build a candidate queue:
-
-1. New debate follows the full adversarial protocol (no lighter screening).
-2. Winners are placed in `campaign.pending_queue`, NOT sent to implementation yet.
-3. If a round N candidate ships (triggers re-profile): let the debate finish, then re-validate winners against the new profile. Discard stale candidates.
-4. If round N completes without any ship: queued winners proceed to implementation immediately.
-
-See `orchestration/campaign-loop.md` § Async Pipeline for details.
 
 ## Task Graph
 
@@ -151,13 +217,31 @@ T_async: Next-round debate                                [main + debate team]  
 
 These are NOT advisory. Violation blocks stage progression.
 
-1. **Production parity**: CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `TORCH_COMPILE_DISABLE=1`, `--enforce-eager`, `VLLM_TORCH_COMPILE_LEVEL=0`.
+1. **Production parity**: CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `TORCH_COMPILE_DISABLE=1`, `--enforce-eager`, `VLLM_TORCH_COMPILE_LEVEL=0`. *(Enforced by `ammo-pretool-guard.sh` PreToolUse hook)*
 2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
-4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements.
+4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Enforced by `ammo-pretool-guard.sh` — raw `vllm bench latency` blocked)*
 5. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
 6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug.
 7. **Custom kernel mandate**: Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected outright in the Phase 0 eligibility gate.
+
+## Hook Enforcement
+
+Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanically:
+
+| Hook Event | Script | Purpose |
+|------------|--------|---------|
+| **Stop** | `ammo-stop-guard.sh` | Blocks session end if campaign is active (one-shot: blocks once, then allows) |
+| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Blocks `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` |
+| **PreCompact** | `ammo-precompact.sh` | Saves campaign state checkpoint before compaction |
+| **SessionStart** | `ammo-postcompact.sh` | Injects resume context after compaction |
+| **WorktreeCreate** | `worktree-create-with-build.sh` | Sets up build environment in new worktrees |
+| **WorktreeRemove** | `worktree-remove-cleanup.sh` | Cleans up worktree resources |
+
+Subagent-level hooks (frontmatter in agent definitions):
+- **ammo-researcher** Stop → DA checks for ungrounded claims
+- **ammo-implementer** Stop → DA checks validation completeness, Amdahl's Law, baseline citation
+- **ammo-champion** TeammateIdle → DA checks custom kernel mandate, micro-experiment evidence
 
 ## State Management
 
@@ -171,15 +255,7 @@ These are NOT advisory. Violation blocks stage progression.
 {
   "target": {"model_id": "...", "hardware": "...", "dtype": "...", "tp": 1, "component": "auto"},
   "stage": "1_baseline",
-  "status": "in_progress",
-  "current_opportunity_id": null,
-  "max_attempts": 3,
-  "opportunity_attempts": [],
-  "route_decision": {},
-  "verification_run": {"stage1": null, "validation": null},
-  "last_update": "2026-02-24",
   "summary": "Initialized.",
-  "team": {"name": null, "members": []},
   "gpu_resources": {"gpu_count": 1, "gpu_model": "...", "memory_total_gib": 0, "cuda_visible_devices": "0"},
   "debate": {
     "team_name": null,
@@ -288,7 +364,6 @@ Run, don't modify:
 
 | Topic | File |
 |-------|------|
-| Campaign loop | `orchestration/campaign-loop.md` |
 | Debate protocol | `orchestration/debate-protocol.md` |
 | Parallel tracks | `orchestration/parallel-tracks.md` |
 | Integration logic | `orchestration/integration-logic.md` |
@@ -309,16 +384,16 @@ Save blocker details to `{artifact_dir}/blockers/{stage}_{date}.md`.
 
 After interruption or compaction:
 
-1. Read this skill file.
+1. Read this skill file (you are the LEAD — delegate, don't implement).
 2. Read `state.json` from artifact directory.
-3. Check which stage is active.
-4. If Stage 3 debate active: read debate team config, check debate artifacts.
-5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status. DA audit is embedded in each agent's frontmatter Stop hook — no separate spawn needed.
+3. Check `campaign.status` and `stage` to determine where you are.
+4. If Stage 3 debate active: check debate artifacts in `debate/` or `debate/campaign_round_N/`.
+5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status.
 6. Resume from last completed gate.
-7. If campaign is active: read `campaign.current_round`, `campaign.status`, and `campaign.pending_queue`. Check if an async debate was in progress.
-8. If `campaign` key is missing (legacy state.json): treat as round 1 of a new campaign — initialize the campaign object from existing state.
-9. Check `campaign.status` before ending session. If active, either complete the current stage or set `campaign.status` to `"paused"`.
-10. If `campaign.status` is `campaign_complete` or `campaign_exhausted` but no `REPORT.md` exists in the artifact directory, spawn the report generation subagent (T20).
+7. Read `campaign.current_round`, `campaign.pending_queue`. Check if an async debate was in progress.
+8. If `campaign` key is missing (legacy state.json): treat as round 1 — initialize the campaign object.
+9. The Stop hook will block session end while campaign is active — either complete the current stage or set `campaign.status` to `"paused"`.
+10. If `campaign.status` is `campaign_complete` or `campaign_exhausted` but no `REPORT.md` exists, spawn the report generation subagent (T20).
 
 ## Quick Start Examples
 

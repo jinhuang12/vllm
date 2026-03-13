@@ -10,7 +10,7 @@ if [ -n "$STATE_FILES" ]; then
     # Extract key state info using simplified schema
     MODEL=$(jq -r '.target.model_id // "unknown"' "$STATE_FILES" 2>/dev/null)
     STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILES" 2>/dev/null)
-    STATUS=$(jq -r '.status // "unknown"' "$STATE_FILES" 2>/dev/null)
+    STATUS=$(jq -r '.campaign.status // "unknown"' "$STATE_FILES" 2>/dev/null)
     TEAM_NAME=$(jq -r '.team.name // "unknown"' "$STATE_FILES" 2>/dev/null)
     DEBATE_TEAM=$(jq -r '.debate.team_name // ""' "$STATE_FILES" 2>/dev/null)
     TRACK_COUNT=$(jq -r '.parallel_tracks | length // 0' "$STATE_FILES" 2>/dev/null)

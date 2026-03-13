@@ -20,7 +20,7 @@ if [ -n "$CHECKPOINT_FILES" ]; then
 
     # Read current state for more context
     if [ -f "$STATE_FILE" ]; then
-        CURRENT_STATUS=$(jq -r '.status // "unknown"' "$STATE_FILE" 2>/dev/null)
+        CURRENT_STATUS=$(jq -r '.campaign.status // "unknown"' "$STATE_FILE" 2>/dev/null)
         SUMMARY=$(jq -r '.summary // ""' "$STATE_FILE" 2>/dev/null)
     else
         CURRENT_STATUS="unknown"
@@ -30,13 +30,13 @@ if [ -n "$CHECKPOINT_FILES" ]; then
     # Build additional resume context for v2 features
     EXTRA_CONTEXT=""
     if [ -n "$DEBATE_TEAM" ] && [ "$DEBATE_TEAM" != "" ]; then
-        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n6. **Debate team active**: Check debate section in state.json. Read team config to message champions."
+        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n6. **Debate active**: Check debate section in state.json for champion status."
     fi
     if [ "$TRACK_COUNT" -gt 0 ] 2>/dev/null; then
         EXTRA_CONTEXT="${EXTRA_CONTEXT}\n7. **Parallel tracks ($TRACK_COUNT active)**: Check parallel_tracks in state.json for worktree paths and GPU assignments."
     fi
     if [ -n "$CAMPAIGN_STATUS" ] && [ "$CAMPAIGN_STATUS" != "" ]; then
-        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n8. **Campaign loop active**: Round $CAMPAIGN_ROUND | Status: $CAMPAIGN_STATUS | Cumulative speedup: ${CUMULATIVE_SPEEDUP}x | Pending queue: $PENDING_QUEUE_SIZE candidates. Read campaign-loop.md for the iteration protocol."
+        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n8. **Campaign loop active**: Round $CAMPAIGN_ROUND | Status: $CAMPAIGN_STATUS | Cumulative speedup: ${CUMULATIVE_SPEEDUP}x | Pending queue: $PENDING_QUEUE_SIZE candidates. See Campaign Loop section in SKILL.md."
     fi
 
     # Clean up checkpoint
@@ -46,7 +46,7 @@ if [ -n "$CHECKPOINT_FILES" ]; then
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "# Session Resumed After Compaction\n\n## You Are The AMMO Lead Orchestrator\n\nThis session was compacted while orchestrating an AMMO optimization.\n\n### Immediate Actions\n\n1. **Read the skill**: \`.claude/skills/ammo/SKILL.md\`\n2. **Read team config**: \`~/.claude/teams/$TEAM_NAME/config.json\`\n3. **Run TaskList** to see task progress\n4. **Load state**: \`cat $STATE_FILE\`\n5. **Message idle teammates** to resume work${EXTRA_CONTEXT}\n\n### Model: $MODEL | Stage: $STAGE | Status: $CURRENT_STATUS\n### Summary: $SUMMARY\n\nYou are the LEAD — manage tasks and gates, do not implement directly."
+    "additionalContext": "# Session Resumed After Compaction\n\n## You Are The AMMO Lead Orchestrator\n\nThis session was compacted while orchestrating an AMMO optimization.\n\n### Immediate Actions\n\n1. **Read the skill**: \`.claude/skills/ammo/SKILL.md\`\n2. **Load state**: \`cat $STATE_FILE\`\n3. **Resume current stage** — spawn subagents as needed${EXTRA_CONTEXT}\n\n### Model: $MODEL | Stage: $STAGE | Status: $CURRENT_STATUS\n### Summary: $SUMMARY\n\nYou are the LEAD — scaffold, delegate, gate. Do not implement directly."
   }
 }
 CONTEXT_EOF
@@ -63,7 +63,7 @@ else
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "# AMMO Optimization Detected\n\nExisting optimization state at: \`$STATE_FILES\`\nModel: $MODEL | Stage: $STAGE\n\nIf continuing this optimization:\n- Read the skill: \`.claude/skills/ammo/SKILL.md\`\n- You are the lead orchestrator — spawn Tasks, don't implement directly"
+    "additionalContext": "# AMMO Optimization Detected\n\nExisting optimization state at: \`$STATE_FILES\`\nModel: $MODEL | Stage: $STAGE\n\nIf continuing this optimization:\n- Read the skill: \`.claude/skills/ammo/SKILL.md\`\n- You are the lead orchestrator — scaffold, delegate, gate. Do not implement directly."
   }
 }
 CONTEXT_EOF
