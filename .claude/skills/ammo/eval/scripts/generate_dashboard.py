@@ -64,14 +64,20 @@ def _collect_dashboard_data(repository: Path) -> Dict[str, Any]:
             "run_details": run_details,
         })
 
-    # Compute deltas (change vs previous version per target)
+    # Compute deltas (change vs most recent previous version with same target)
     for i in range(1, len(enriched_versions)):
         curr = enriched_versions[i]
-        prev = enriched_versions[i - 1]
         deltas = {}
         for target in curr.get("summary", {}):
             curr_data = curr["summary"].get(target, {})
-            prev_data = prev.get("summary", {}).get(target, {})
+            # Scan backward to find the most recent version with this target
+            prev_data = {}
+            for j in range(i - 1, -1, -1):
+                candidate = enriched_versions[j].get("summary", {}).get(target)
+                if candidate:
+                    prev_data = candidate
+                    break
+
             curr_score = (curr_data.get("overall_score") or {}).get("mean")
             prev_score = (prev_data.get("overall_score") or {}).get("mean")
             curr_speedup = (curr_data.get("e2e_speedup") or {}).get("mean")

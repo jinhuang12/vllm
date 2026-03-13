@@ -298,7 +298,7 @@ def main() -> None:
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--input-len", type=int, default=64)
     p.add_argument("--output-len", type=int, default=512)
-    p.add_argument("--batch-sizes", type=int, nargs="+", default=[8])
+    p.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 8, 32])
     p.add_argument("--num-iters", type=int, default=5)
 
     # Delegation options (Stage 3 debate)

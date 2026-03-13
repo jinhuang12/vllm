@@ -186,10 +186,8 @@ function renderTrend(targetSlug) {
 
 function renderTrendChart(rows) {
   const canvas = document.getElementById('trendChart');
-  if (typeof Chart === 'undefined') {
-    canvas.parentElement.innerHTML = '<div class="chart-placeholder">Chart.js not available — see table below</div>';
-    return;
-  }
+  if (!canvas || typeof Chart === 'undefined') return;
+
   if (window._trendChart) window._trendChart.destroy();
   const ctx = canvas.getContext('2d');
   window._trendChart = new Chart(ctx, {
@@ -286,8 +284,10 @@ function renderChanges() {
 renderChanges();
 
 // ---- Run Detail ----
+const DONUT_COLORS = ['#e94560','#4caf50','#ffc107','#2196f3','#aaa'];
 function renderDetail() {
   let html = '';
+  const donutQueue = [];
   versions.slice().reverse().forEach(v => {
     html += `<div style="margin-bottom:24px">`;
     html += `<h3>${v.version_id}</h3><p style="font-size:12px;color:var(--text-muted)">${v.description||''} | ${v.created_at||''}</p>`;
@@ -304,6 +304,10 @@ function renderDetail() {
           html += `<tr><td>${dim.replace(/_/g,' ')}</td><td>${data.score != null ? fmt(data.score,1) : 'N/A'}</td><td>${fmtPct(data.weight)}</td><td>${fmt(data.weighted_contribution,2)}</td></tr>`;
         });
         html += '</table>';
+        // Dimension donut chart canvas
+        const donutId = uid + '_donut';
+        html += `<canvas id="${donutId}" width="200" height="200" style="max-width:200px;max-height:200px;margin:8px 0"></canvas>`;
+        donutQueue.push({ canvasId: donutId, dimensions: sc.dimensions || {} });
         // Raw metrics
         const rm = sc.raw_metrics || {};
         html += `<p style="margin-top:8px;font-size:11px">Speedup: ${fmt(rm.cumulative_e2e_speedup,3)}x | Shipped: ${rm.shipped_optimizations||0} | Rounds: ${rm.total_rounds||'?'} | Status: ${rm.campaign_status||'?'}</p>`;
@@ -313,13 +317,36 @@ function renderDetail() {
     html += '</div>';
   });
   document.getElementById('detailContent').innerHTML = html || '<div class="empty-state">No runs archived yet</div>';
+  // Render donut charts after DOM update (graceful degradation if Chart.js not loaded)
+  if (typeof Chart !== 'undefined') {
+    donutQueue.forEach(item => {
+      const canvas = document.getElementById(item.canvasId);
+      if (!canvas) return;
+      const dims = Object.entries(item.dimensions);
+      if (dims.length === 0) return;
+      const labels = dims.map(([d]) => d.replace(/_/g, ' '));
+      const data = dims.map(([, d]) => d.weighted_contribution || 0);
+      const colors = dims.map((_, i) => DONUT_COLORS[i % DONUT_COLORS.length]);
+      new Chart(canvas.getContext('2d'), {
+        type: 'doughnut',
+        data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 0 }] },
+        options: {
+          responsive: false,
+          plugins: {
+            legend: { display: true, position: 'right', labels: { color: '#eee', font: { size: 10 } } },
+            tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${fmt(ctx.raw,2)} (score ${fmt(dims[ctx.dataIndex][1].score,1)})` } }
+          }
+        }
+      });
+    });
+  }
 }
 renderDetail();
 </script>
 
 <!-- Optional: Chart.js CDN for trend charts (degrades gracefully if unavailable) -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" defer
-  onload="if(targets.length>0)renderTrend(trendSelect.value)"></script>
+  onload="if(targets.length>0)renderTrend(trendSelect.value);renderDetail()"></script>
 
 </body>
 </html>

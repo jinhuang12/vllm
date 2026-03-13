@@ -20,6 +20,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def _normalize_slug(slug: str) -> str:
+    """Normalize dtype aliases in target slugs.
+
+    Maps common dtype aliases to canonical short forms:
+      bfloat16 -> bf16, float16 -> fp16, float32 -> fp32.
+
+    Idempotent: applying twice gives the same result.
+    """
+    replacements = [
+        ("bfloat16", "bf16"),
+        ("float16", "fp16"),
+        ("float32", "fp32"),
+    ]
+    for long, short in replacements:
+        slug = slug.replace(long, short)
+    return slug
+
+
 def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     """Safely traverse nested dicts."""
     for key in keys:
@@ -72,6 +90,80 @@ def _collect_metric(scorecards: List[Dict], *path: str) -> List[float]:
         if isinstance(val, (int, float)) and val is not None:
             values.append(float(val))
     return values
+
+
+def _aggregate_scorecards(target_slug: str, scorecards: List[Dict]) -> Optional[Dict[str, Any]]:
+    """Build an aggregate dict from a list of scorecards for one target slug."""
+    if not scorecards:
+        return None
+
+    aggregate: Dict[str, Any] = {
+        "target_slug": target_slug,
+        "runs_count": len(scorecards),
+        "overall_score": calculate_stats(
+            _collect_metric(scorecards, "overall_score")
+        ),
+        "overall_score_without_transcript": calculate_stats(
+            _collect_metric(scorecards, "overall_score_without_transcript")
+        ),
+        "e2e_speedup": calculate_stats(
+            _collect_metric(scorecards, "raw_metrics", "cumulative_e2e_speedup")
+        ),
+        "shipped_count": calculate_stats(
+            _collect_metric(scorecards, "raw_metrics", "shipped_optimizations")
+        ),
+        "total_rounds": calculate_stats(
+            _collect_metric(scorecards, "raw_metrics", "total_rounds")
+        ),
+        "dimensions": {},
+    }
+
+    for dim in ["e2e_outcome", "gate_pass_rates", "debate_quality",
+                "campaign_efficiency", "transcript_quality"]:
+        aggregate["dimensions"][dim] = calculate_stats(
+            _collect_metric(scorecards, "dimensions", dim, "score")
+        )
+
+    total_times = _collect_metric(scorecards, "timing", "total_tracked_seconds")
+    if total_times:
+        aggregate["total_time_seconds"] = calculate_stats(total_times)
+        stage_times: Dict[str, List[float]] = {}
+        for sc in scorecards:
+            per_stage = _safe_get(sc, "timing", "per_stage_seconds") or {}
+            for stage, secs in per_stage.items():
+                if isinstance(secs, (int, float)):
+                    stage_times.setdefault(stage, []).append(float(secs))
+        aggregate["per_stage_time_seconds"] = {
+            stage: calculate_stats(vals) for stage, vals in stage_times.items()
+        }
+
+    total_tokens = _collect_metric(scorecards, "agent_costs", "total_tokens")
+    if total_tokens:
+        aggregate["agent_costs"] = {
+            "total_tokens": calculate_stats(total_tokens),
+            "total_duration_ms": calculate_stats(
+                _collect_metric(scorecards, "agent_costs", "total_duration_ms")
+            ),
+            "total_agent_invocations": calculate_stats(
+                _collect_metric(scorecards, "agent_costs", "total_agent_invocations")
+            ),
+        }
+
+    deleg_enabled = any(
+        _safe_get(sc, "delegation", "enabled") for sc in scorecards
+    )
+    if deleg_enabled:
+        aggregate["delegation"] = {
+            "enabled": True,
+            "delegate_citation_rate": calculate_stats(
+                _collect_metric(scorecards, "delegation", "delegate_citation_rate")
+            ),
+            "delegate_artifacts_count": calculate_stats(
+                _collect_metric(scorecards, "delegation", "delegate_artifacts_count")
+            ),
+        }
+
+    return aggregate
 
 
 def aggregate_target_runs(target_dir: Path) -> Optional[Dict[str, Any]]:
@@ -179,12 +271,39 @@ def aggregate_version(version_dir: Path) -> Optional[Dict[str, Any]]:
     meta = _load_json(version_dir / "meta.json") or {}
     targets = {}
 
+    # Group target dirs by normalized slug so e.g. bfloat16 and bf16 merge
+    slug_groups: Dict[str, List[Path]] = {}
     for td in sorted(target_dirs, key=lambda d: d.name):
-        agg = aggregate_target_runs(td)
+        canonical = _normalize_slug(td.name)
+        slug_groups.setdefault(canonical, []).append(td)
+
+    for canonical_slug, dirs in sorted(slug_groups.items()):
+        # Collect all run dirs across slug variants
+        all_run_dirs = []
+        for td in dirs:
+            all_run_dirs.extend(
+                d for d in td.iterdir()
+                if d.is_dir() and d.name.startswith("run_")
+            )
+        if not all_run_dirs:
+            continue
+
+        # Load scorecards from all runs
+        scorecards = []
+        for rd in sorted(all_run_dirs, key=lambda d: d.name):
+            sc = _load_json(rd / "scorecard.json")
+            if sc:
+                scorecards.append(sc)
+        if not scorecards:
+            continue
+
+        # Build aggregate using the same logic as aggregate_target_runs
+        # but across merged slug variants
+        agg = _aggregate_scorecards(canonical_slug, scorecards)
         if agg:
-            targets[td.name] = agg
-            # Write per-target aggregate
-            (td / "aggregate.json").write_text(
+            targets[canonical_slug] = agg
+            # Write per-target aggregate into first dir
+            (dirs[0] / "aggregate.json").write_text(
                 json.dumps(agg, indent=2) + "\n", encoding="utf-8"
             )
 
@@ -214,9 +333,16 @@ def rebuild_index(repository: Path) -> Dict[str, Any]:
     if not versions_dir.exists():
         versions_dir.mkdir(parents=True, exist_ok=True)
 
+    def _version_sort_key(d: Path) -> str:
+        """Sort version dirs by created_at from meta.json, falling back to name."""
+        meta = _load_json(d / "meta.json")
+        if meta and meta.get("created_at"):
+            return meta["created_at"]
+        return d.name
+
     version_dirs = sorted(
         [d for d in versions_dir.iterdir() if d.is_dir()],
-        key=lambda d: d.name,
+        key=_version_sort_key,
     )
 
     versions = []

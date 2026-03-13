@@ -190,28 +190,74 @@ Every section is required unless marked optional.
 
 ## Chart Generation
 
-Use the bundled script to generate all charts. Pass hardware specs if not L40S:
+There is no static chart generation script. You write a small bespoke Python script for each
+chart, tailored to whatever data is actually available in this campaign's artifacts. This
+approach works for any model and any profiling setup because you — the agent — understand the
+data and can adapt.
 
-```bash
-python .claude/skills/ammo/report/scripts/generate_charts.py \
-  --artifact-dir {artifact_dir} \
-  --output-dir {artifact_dir}/report_assets \
-  --hw-bw-gbps {peak_hbm_bw} \
-  --hw-tflops {peak_bf16_tflops}
+### Workflow
+
+For each chart:
+1. Inspect the available artifacts (see Data Sources below)
+2. Decide the best data source for this specific chart
+3. Write a minimal Python script (~50-100 lines) that extracts the data and renders the chart
+4. Save the script to `{artifact_dir}/report_assets/` alongside the PNG (for reproducibility)
+5. Run the script, verify the PNG looks correct
+
+### Required Charts
+
+Produce these 5 PNGs in `{artifact_dir}/report_assets/`:
+
+| PNG filename | Purpose |
+|-------------|---------|
+| `kernel_breakdown_pie.png` | GPU time breakdown by kernel category (GEMM, attention, normalization, etc.) |
+| `bw_utilization_bar.png` | Per-GEMM HBM bandwidth utilization showing how close each operation is to peak |
+| `e2e_results_bar.png` | Before/after E2E latency comparison across batch sizes, with improvement % |
+| `roofline_plot.png` | Arithmetic intensity vs throughput for decode GEMM operations |
+| `nsys_timeline_synthetic.png` | Kernel execution sequence for one decode step showing relative durations |
+
+### Data Sources
+
+Pick the best source for each chart based on what's available. The artifacts directory may
+contain any combination of these:
+
+**Structured (prefer these when available):**
+- `e2e_latency_*/nsys/baseline_profile.sqlite` — nsys sqlite export with per-kernel timing
+- `e2e_latency/json/baseline_bs*.json` — E2E benchmark results as JSON
+- `state.json` — campaign metadata, shipped optimizations, target config
+- `target.json` — workload config (batch sizes, model ID, hardware)
+
+**Semi-structured (agent-written markdown from Stage 2):**
+- `bottleneck_analysis.md` — kernel breakdown, GEMM shapes, BW utilization analysis
+- `constraints.md` — model architecture, hardware specs, baseline latency tables
+
+The nsys sqlite is the most accurate source for kernel timing data. Its schema:
+
+```
+CUPTI_ACTIVITY_KIND_KERNEL:
+  start, end          — kernel timestamps in nanoseconds
+  demangledName       — INTEGER foreign key into StringIds(id, value)
+  gridX, gridY, gridZ — grid dimensions
+  graphId             — CUDA graph ID (non-null when CUDA graphs are used)
+  gridId              — unique node ID within a CUDA graph
+
+StringIds:
+  id    — INTEGER PRIMARY KEY
+  value — TEXT (demangled kernel name)
 ```
 
-Hardware specs can be extracted from constraints.md (look for "GB/s" and "TFLOPS" in the
-target envelope section). The script defaults to L40S values (864 GB/s, 362 TFLOPS).
+To query kernel names: `JOIN StringIds s ON k.demangledName = s.id`, then use `s.value`.
+To find the sqlite: look for `e2e_latency_20*Z/nsys/baseline_profile.sqlite` (timestamp-
+named directories are the baseline; avoid `e2e_latency_op*/` which are optimization runs).
 
-It produces 5 PNGs:
-1. `kernel_breakdown_pie.png` — GPU time by kernel category
-2. `bw_utilization_bar.png` — Per-component bandwidth utilization
-3. `e2e_results_bar.png` — Before/after latency + improvement %
-4. `roofline_plot.png` — Arithmetic intensity vs throughput
-5. `nsys_timeline_synthetic.png` — One decode step kernel sequence (uses hardcoded fallback data from constraints.md's code-block timeline; model-specific but representative)
+### Script Guidelines
 
-If matplotlib is not available, the script prints a warning and the report should describe the
-charts in text tables instead.
+- Use `matplotlib` for plotting. Import check: `try: import matplotlib...`
+- Each script should be self-contained and runnable independently
+- Read data, compute what's needed, render one chart, save PNG. No fallback logic — you
+  already know what data is available before writing the script
+- Name scripts descriptively: `gen_kernel_pie.py`, `gen_bw_bar.py`, etc.
+- If a data source doesn't exist for a chart, note it in the report and skip that chart
 
 ## Callout Box Format
 
@@ -224,19 +270,19 @@ Use GitHub-flavored blockquote admonitions for lessons:
 > Include specific numbers and measured data where possible.
 ```
 
-## Mermaid Diagrams
+## Diagrams
 
-Use mermaid syntax for flow diagrams. Use `<br/>` for multi-line nodes, `-->|label|` for
-edge labels, and `{Node}` for decision diamonds:
+Diagrams (decision flows, architecture overviews) must be rendered as PNG images, not
+inline mermaid code blocks. Mermaid only renders in specific viewers — the report should
+work in any markdown renderer.
 
-```mermaid
-graph TD
-    A[Profiling<br/>nsys + E2E sweep] -->|bottlenecks| B{Multiple<br/>candidates?}
-    B -->|yes| C[Structured Evaluation]
-    B -->|no| D[Direct Implementation]
-    C -->|winners| E[Parallel Implementation]
-    E -.->|deferred| F[Remaining Opportunities]
-```
+Approach: write a small Python script using matplotlib to draw the diagram (boxes, arrows,
+labels) and save it as a PNG in `report_assets/`. Reference the image in the report with
+`![Decision Flow](report_assets/decision_flow.png)`.
+
+For simple flows, `matplotlib.patches.FancyBboxPatch` + `matplotlib.patches.FancyArrowPatch`
+work well. Keep the visual style consistent with the other charts (same font, dark backgrounds
+optional).
 
 ## Quality Checklist
 
