@@ -151,7 +151,7 @@ python scripts/run_vllm_bench_latency_sweep.py \
   --nsys-profile
 ```
 
-This produces **one `.nsys-rep` per bucket** in `{artifact_dir}/e2e_latency/nsys/`. Uses `--capture-range=cudaProfilerApi --capture-range-end=repeat:N` with `torch.cuda.synchronize()` barriers to prevent cross-bucket kernel bleed. Works with TP > 1 (sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` and `--trace-fork-before-exec=true`). Requires `--execution-mode inproc_sweep` (default).
+This produces **one `.nsys-rep` per bucket** in `{artifact_dir}/e2e_latency/nsys/`. Uses `--capture-range=cudaProfilerApi --capture-range-end=repeat:N` with `torch.cuda.synchronize()` barriers to prevent cross-bucket kernel bleed. Works with TP > 1 (sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` and `--trace-fork-before-exec=true`). Uses the inproc_sweep execution mode.
 
 ### 3.6 Export the minimum useful CSV reports
 

@@ -44,11 +44,10 @@ Guardrails / anti-thrash
 - Fails fast if required fields are missing or still placeholders.
 - Records full commands + env vars + stdout/stderr logs per bucket.
 - Optional fast-path evidence checks: require/forbid regex patterns per run.
-- Avoids model reload thrash by default: uses an in-process sweep runner that
-  loads the model once per label (baseline/opt) and benchmarks all batch sizes
-  in that process. This reduces end-to-end sweep time without changing
-  per-iteration latency measurement. Use `--execution-mode cli_per_bs` for
-  strict per-bucket process isolation.
+- Avoids model reload thrash: uses an in-process sweep runner that loads the
+  model once per label (baseline/opt) and benchmarks all batch sizes in that
+  process. This reduces end-to-end sweep time without changing per-iteration
+  latency measurement.
 - Supports vLLM's dotted "json-style" CLI flags in `inproc_sweep` (e.g.
   `-cc.pass_config.enable_sp=false`), because it uses vLLM's
   `FlexibleArgumentParser` for argument parsing.
@@ -381,15 +380,17 @@ def _prepare_out_root(
     return out_root
 
 
-def _acquire_gpu_lock(*, artifact_dir: Path, enabled: bool) -> Optional[Any]:
+def _acquire_gpu_lock(*, artifact_dir: Path, is_child: bool) -> Optional[Any]:
     """System-wide inter-process lock keyed by visible GPUs.
 
     Uses /tmp/ammo_gpu_locks/ (not artifact_dir) so that locks work across
     different agents using different artifact directories on the same machine.
     This prevents running multiple sweeps concurrently on the same GPUs, which
     makes measurements meaningless due to contention.
+
+    Child processes (spawned by a lock-holding parent) skip acquisition.
     """
-    if not enabled:
+    if is_child:
         return None
 
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -1002,35 +1003,16 @@ def main() -> None:
     p.add_argument("--timeout-s", type=int, default=1800, help="Timeout per bucket (seconds)")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing output dir instead of archiving it")
     p.add_argument("--require-fastpath", action="store_true", help="Fail if opt fast-path evidence patterns do not pass")
-    p.add_argument(
-        "--execution-mode",
-        type=str,
-        default="inproc_sweep",
-        choices=["inproc_sweep", "cli_per_bs"],
-        help=(
-            "How to execute the sweep. "
-            "'inproc_sweep' loads the model once per label and benchmarks all batch sizes (faster). "
-            "'cli_per_bs' shells out to `vllm bench latency` per batch size (slower, legacy)."
-        ),
-    )
-    p.add_argument("--gpu-lock", action="store_true", default=True, help="Prevent concurrent sweeps on same GPUs (default)")
-    p.add_argument("--no-gpu-lock", action="store_false", dest="gpu_lock", help=argparse.SUPPRESS)
     p.add_argument("--heartbeat-s", type=int, default=30, help="Heartbeat interval while a subprocess is quiet")
     p.add_argument(
         "--labels",
         type=str,
-        default="baseline,opt",
+        default="baseline",
         help=(
-            "Comma-separated labels to run: 'baseline', 'opt', or 'baseline,opt' (default). "
+            "Comma-separated labels to run: 'baseline' (default), 'opt', or 'baseline,opt'. "
             "Use '--labels baseline' for Stage 1 baseline-only sweeps (no opt). "
             "Use '--labels opt' for Stage 5 validation (opt only, compare against Stage 1 baseline)."
         ),
-    )
-    p.add_argument(
-        "--allow-identical-config",
-        action="store_true",
-        default=False,
-        help="Allow running when baseline and opt configs are identical (for variance testing)",
     )
     p.add_argument(
         "--nsys-profile",
@@ -1056,12 +1038,6 @@ def main() -> None:
 
     # Validate --nsys-profile constraints early.
     if args.nsys_profile:
-        if args.execution_mode != "inproc_sweep":
-            raise SystemExit(
-                "--nsys-profile requires --execution-mode inproc_sweep (got "
-                f"{args.execution_mode!r}). nsys wraps the child process which "
-                "loads the model once — cli_per_bs is incompatible."
-            )
         if not shutil.which("nsys"):
             raise SystemExit(
                 "nsys not found on PATH. Install Nsight Systems CLI or remove --nsys-profile."
@@ -1226,19 +1202,11 @@ def main() -> None:
     # Config identity check: warn or fail when baseline and opt are identical.
     if "baseline" in selected_labels and "opt" in selected_labels:
         if not opt_env and opt_extra_args == baseline_extra_args:
-            if args.allow_identical_config:
-                print(
-                    "WARNING: baseline and opt configs are identical "
-                    "(--allow-identical-config set).",
-                    file=sys.stderr,
-                )
-            else:
-                raise SystemExit(
-                    "baseline and opt configs are identical — opt would produce the "
-                    "same results as baseline.\n"
-                    "Update opt_env in target.json, or use --allow-identical-config "
-                    "for variance testing, or use --labels baseline to skip opt."
-                )
+            raise SystemExit(
+                "baseline and opt configs are identical — opt would produce the "
+                "same results as baseline.\n"
+                "Update opt_env in target.json, or use --labels baseline to skip opt."
+            )
 
     # Validate all buckets fit within max_model_len at plan time.
     _validate_buckets_model_len(buckets, max_model_len)
@@ -1256,8 +1224,6 @@ def main() -> None:
         print(f"workload: input_len={input_len}, output_len={output_len}, num_iters={num_iters}")
         print(f"batch_sizes: {batch_sizes}")
     print(f"baseline_label: {baseline_label}, opt_label: {opt_label}")
-    print(f"execution_mode: {args.execution_mode}")
-    print(f"gpu_lock: {args.gpu_lock}")
 
     if ep != 1:
         print(
@@ -1272,7 +1238,7 @@ def main() -> None:
         "target_json": str(target_path),
         "out_dir": str(out_root),
         "out_name": args.out_name,
-        "execution_mode": args.execution_mode,
+        "execution_mode": "inproc_sweep",
         "model_id": model_id,
         "tp": tp,
         "ep": ep,
@@ -1299,10 +1265,11 @@ def main() -> None:
     }
 
     # Acquire GPU lock for the entire run (prevents meaningless contention).
-    lock_handle = _acquire_gpu_lock(artifact_dir=artifact_dir, enabled=bool(args.gpu_lock))
+    is_child = bool(args._child_label)
+    lock_handle = _acquire_gpu_lock(artifact_dir=artifact_dir, is_child=is_child)
 
     # Advisory check: warn if other GPU processes are running.
-    if args.gpu_lock:
+    if not is_child:
         _check_gpu_idle()
 
     # Record the per-bucket plan deterministically (for stable paths + repro commands).
@@ -1437,324 +1404,199 @@ def main() -> None:
     baseline_patterns_configured = bool(baseline_run.require_patterns or baseline_run.forbid_patterns)
     opt_patterns_configured = bool(opt_run.require_patterns or opt_run.forbid_patterns)
 
-    if args.execution_mode == "inproc_sweep":
-        script_path = Path(__file__).resolve()
-        child_timeout = int(args.timeout_s) * max(1, len(buckets)) + 1800
+    script_path = Path(__file__).resolve()
+    child_timeout = int(args.timeout_s) * max(1, len(buckets)) + 1800
 
-        # Set up nsys output directory if profiling.
-        nsys_dir: Optional[Path] = None
+    # Set up nsys output directory if profiling.
+    nsys_dir: Optional[Path] = None
+    if args.nsys_profile:
+        nsys_dir = out_root / "nsys"
+        nsys_dir.mkdir(parents=True, exist_ok=True)
+
+    runs_to_execute = []
+    if "baseline" in selected_labels:
+        runs_to_execute.append(baseline_run)
+    if "opt" in selected_labels:
+        runs_to_execute.append(opt_run)
+
+    for run in runs_to_execute:
+        child_cmd = [
+            sys.executable,
+            str(script_path),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--target-json",
+            str(target_path),
+            "--timeout-s",
+            str(args.timeout_s),
+            "--out-name",
+            args.out_name,
+            "--_out-root",
+            str(out_root),
+            "--_child-label",
+            run.label,
+        ]
         if args.nsys_profile:
-            nsys_dir = out_root / "nsys"
-            nsys_dir.mkdir(parents=True, exist_ok=True)
+            child_cmd.append("--_nsys-profile")
 
-        runs_to_execute = []
-        if "baseline" in selected_labels:
-            runs_to_execute.append(baseline_run)
-        if "opt" in selected_labels:
-            runs_to_execute.append(opt_run)
-
-        for run in runs_to_execute:
-            child_cmd = [
-                sys.executable,
-                str(script_path),
-                "--artifact-dir",
-                str(artifact_dir),
-                "--target-json",
-                str(target_path),
-                "--execution-mode",
-                "inproc_sweep",
-                "--timeout-s",
-                str(args.timeout_s),
-                "--out-name",
-                args.out_name,
-                "--_out-root",
-                str(out_root),
-                "--no-gpu-lock",
-                "--_child-label",
-                run.label,
+        # Prepend nsys wrapper when profiling.
+        child_env = dict(run.env) if run.env else dict(os.environ)
+        if args.nsys_profile:
+            assert nsys_dir is not None
+            child_env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+            nsys_prefix = [
+                "nsys", "profile",
+                "--trace=cuda,nvtx",
+                "--sample=none",
+                "--capture-range=cudaProfilerApi",
+                f"--capture-range-end=repeat:{len(buckets)}",
+                "--cuda-graph-trace=node",
+                "--trace-fork-before-exec=true",
+                "--force-overwrite=true",
+                "-o", str(nsys_dir / f"{run.label}_profile"),
             ]
-            if args.nsys_profile:
-                child_cmd.append("--_nsys-profile")
+            if args.nsys_extra_flags:
+                import shlex as _shlex
+                nsys_prefix.extend(_shlex.split(args.nsys_extra_flags))
+            child_cmd = nsys_prefix + child_cmd
 
-            # Prepend nsys wrapper when profiling.
-            child_env = dict(run.env) if run.env else dict(os.environ)
-            if args.nsys_profile:
-                assert nsys_dir is not None
-                child_env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-                nsys_prefix = [
-                    "nsys", "profile",
-                    "--trace=cuda,nvtx",
-                    "--sample=none",
-                    "--capture-range=cudaProfilerApi",
-                    f"--capture-range-end=repeat:{len(buckets)}",
-                    "--cuda-graph-trace=node",
-                    "--trace-fork-before-exec=true",
-                    "--force-overwrite=true",
-                    "-o", str(nsys_dir / f"{run.label}_profile"),
-                ]
-                if args.nsys_extra_flags:
-                    import shlex as _shlex
-                    nsys_prefix.extend(_shlex.split(args.nsys_extra_flags))
-                child_cmd = nsys_prefix + child_cmd
-
-            print(f"\n=== Running inproc sweep for {run.label} ===")
-            print(f"Child cmd: {_format_cmd_for_md(child_cmd, {})}")
-            child_log = logs_dir / f"{run.label}_supervisor.log"
-            child_status = status_dir / f"{run.label}.json"
-            child_res = _run_cmd_streaming(
-                child_cmd,
-                env=child_env,
-                cwd=None,
-                timeout_s=child_timeout,
-                log_path=child_log,
-                heartbeat_s=int(args.heartbeat_s),
-                status_path=child_status,
+        print(f"\n=== Running inproc sweep for {run.label} ===")
+        print(f"Child cmd: {_format_cmd_for_md(child_cmd, {})}")
+        child_log = logs_dir / f"{run.label}_supervisor.log"
+        child_status = status_dir / f"{run.label}.json"
+        child_res = _run_cmd_streaming(
+            child_cmd,
+            env=child_env,
+            cwd=None,
+            timeout_s=child_timeout,
+            log_path=child_log,
+            heartbeat_s=int(args.heartbeat_s),
+            status_path=child_status,
+        )
+        if not child_res.get("ok"):
+            raise SystemExit(
+                f"Inproc sweep child failed for {run.label}: returncode={child_res.get('returncode')}. "
+                f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
             )
-            if not child_res.get("ok"):
-                raise SystemExit(
-                    f"Inproc sweep child failed for {run.label}: returncode={child_res.get('returncode')}. "
-                    f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
+
+        # Rename nsys output files to match bucket tags.
+        if nsys_dir is not None:
+            renamed = 0
+            for i, bucket in enumerate(buckets, 1):
+                src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
+                tag = _bucket_file_tag(bucket, buckets)
+                dst = nsys_dir / f"{run.label}_{tag}.nsys-rep"
+                if src.exists():
+                    src.rename(dst)
+                    print(f"  nsys: {src.name} -> {dst.name}")
+                    renamed += 1
+            if renamed < len(buckets):
+                print(
+                    f"  WARNING: nsys produced {renamed} of {len(buckets)} "
+                    f"expected profile files for {run.label}"
                 )
 
-            # Rename nsys output files to match bucket tags.
-            if nsys_dir is not None:
-                renamed = 0
-                for i, bucket in enumerate(buckets, 1):
-                    src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
-                    tag = _bucket_file_tag(bucket, buckets)
-                    dst = nsys_dir / f"{run.label}_{tag}.nsys-rep"
-                    if src.exists():
-                        src.rename(dst)
-                        print(f"  nsys: {src.name} -> {dst.name}")
-                        renamed += 1
-                if renamed < len(buckets):
-                    print(
-                        f"  WARNING: nsys produced {renamed} of {len(buckets)} "
-                        f"expected profile files for {run.label}"
-                    )
+    # Populate per-bucket entries from artifacts written by children.
+    new_rows: List[Dict[str, Any]] = []
+    for p in planned:
+        bs = int(p["batch_size"])
+        b_il = int(p["input_len"])
+        b_ol = int(p["output_len"])
+        tag = p["tag"]
+        baseline_log = Path(p["baseline_log"])
+        opt_log = Path(p["opt_log"])
+        baseline_json = Path(p["baseline_json"])
+        opt_json = Path(p["opt_json"])
 
-        # Populate per-bucket entries from artifacts written by children.
-        new_rows: List[Dict[str, Any]] = []
-        for p, row in zip(planned, all_runs["results"]):
-            bs = int(p["batch_size"])
-            b_il = int(p["input_len"])
-            b_ol = int(p["output_len"])
-            tag = p["tag"]
-            baseline_log = Path(p["baseline_log"])
-            opt_log = Path(p["opt_log"])
-            baseline_json = Path(p["baseline_json"])
-            opt_json = Path(p["opt_json"])
+        baseline_runner_json = json_dir / f"{baseline_label}_{tag}.runner.json"
+        opt_runner_json = json_dir / f"{opt_label}_{tag}.runner.json"
 
-            baseline_runner_json = json_dir / f"{baseline_label}_{tag}.runner.json"
-            opt_runner_json = json_dir / f"{opt_label}_{tag}.runner.json"
+        baseline_text = ""
+        opt_text = ""
+        if baseline_log.exists():
+            baseline_text = baseline_log.read_text(encoding="utf-8", errors="replace")
+        if opt_log.exists():
+            opt_text = opt_log.read_text(encoding="utf-8", errors="replace")
 
-            baseline_text = ""
-            opt_text = ""
-            if baseline_log.exists():
-                baseline_text = baseline_log.read_text(encoding="utf-8", errors="replace")
-            if opt_log.exists():
-                opt_text = opt_log.read_text(encoding="utf-8", errors="replace")
+        baseline_raw = _read_json(baseline_json) if baseline_json.exists() else {}
+        opt_raw = _read_json(opt_json) if opt_json.exists() else {}
 
-            baseline_raw = _read_json(baseline_json) if baseline_json.exists() else {}
-            opt_raw = _read_json(opt_json) if opt_json.exists() else {}
+        baseline_metrics = _metrics_from_vllm_latency_json(baseline_raw) or _parse_latency_metrics(baseline_text)
+        opt_metrics = _metrics_from_vllm_latency_json(opt_raw) or _parse_latency_metrics(opt_text)
 
-            baseline_metrics = _metrics_from_vllm_latency_json(baseline_raw) or _parse_latency_metrics(baseline_text)
-            opt_metrics = _metrics_from_vllm_latency_json(opt_raw) or _parse_latency_metrics(opt_text)
+        baseline_evidence = _check_patterns(baseline_text, baseline_run.require_patterns, baseline_run.forbid_patterns)
+        opt_evidence = _check_patterns(opt_text, opt_run.require_patterns, opt_run.forbid_patterns)
 
-            baseline_evidence = _check_patterns(baseline_text, baseline_run.require_patterns, baseline_run.forbid_patterns)
-            opt_evidence = _check_patterns(opt_text, opt_run.require_patterns, opt_run.forbid_patterns)
+        baseline_status = _read_json(baseline_runner_json) if baseline_runner_json.exists() else {"ok": None}
+        opt_status = _read_json(opt_runner_json) if opt_runner_json.exists() else {"ok": None}
 
-            baseline_status = _read_json(baseline_runner_json) if baseline_runner_json.exists() else {"ok": None}
-            opt_status = _read_json(opt_runner_json) if opt_runner_json.exists() else {"ok": None}
+        baseline_entry = {
+            "ok": baseline_status.get("ok"),
+            "returncode": 0 if baseline_status.get("ok") else 1,
+            "cmd": p["baseline_cmd"],
+            "env_overrides": baseline_env,
+            "metrics": baseline_metrics,
+            "avg_s": baseline_metrics.get("avg_s"),
+            "fastpath_evidence": {
+                **baseline_evidence,
+                "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
+            },
+            "log": str(baseline_log.relative_to(out_root)),
+            "output_json": str(baseline_json.relative_to(out_root)),
+            "runner_json": str(baseline_runner_json.relative_to(out_root)),
+            "timing": {
+                "start_time": baseline_status.get("start_time"),
+                "end_time": baseline_status.get("end_time"),
+                "duration_s": baseline_status.get("duration_s"),
+            },
+        }
+        opt_entry = {
+            "ok": opt_status.get("ok"),
+            "returncode": 0 if opt_status.get("ok") else 1,
+            "cmd": p["opt_cmd"],
+            "env_overrides": {**baseline_env, **opt_env},
+            "metrics": opt_metrics,
+            "avg_s": opt_metrics.get("avg_s"),
+            "fastpath_evidence": {
+                **opt_evidence,
+                "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
+            },
+            "log": str(opt_log.relative_to(out_root)),
+            "output_json": str(opt_json.relative_to(out_root)),
+            "runner_json": str(opt_runner_json.relative_to(out_root)),
+            "timing": {
+                "start_time": opt_status.get("start_time"),
+                "end_time": opt_status.get("end_time"),
+                "duration_s": opt_status.get("duration_s"),
+            },
+        }
 
-            baseline_entry = {
-                "ok": baseline_status.get("ok"),
-                "returncode": 0 if baseline_status.get("ok") else 1,
-                "cmd": p["baseline_cmd"],
-                "env_overrides": baseline_env,
-                "metrics": baseline_metrics,
-                "avg_s": baseline_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **baseline_evidence,
-                    "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
-                },
-                "log": str(baseline_log.relative_to(out_root)),
-                "output_json": str(baseline_json.relative_to(out_root)),
-                "runner_json": str(baseline_runner_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": baseline_status.get("start_time"),
-                    "end_time": baseline_status.get("end_time"),
-                    "duration_s": baseline_status.get("duration_s"),
-                },
-            }
-            opt_entry = {
-                "ok": opt_status.get("ok"),
-                "returncode": 0 if opt_status.get("ok") else 1,
-                "cmd": p["opt_cmd"],
-                "env_overrides": {**baseline_env, **opt_env},
-                "metrics": opt_metrics,
-                "avg_s": opt_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **opt_evidence,
-                    "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
-                },
-                "log": str(opt_log.relative_to(out_root)),
-                "output_json": str(opt_json.relative_to(out_root)),
-                "runner_json": str(opt_runner_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": opt_status.get("start_time"),
-                    "end_time": opt_status.get("end_time"),
-                    "duration_s": opt_status.get("duration_s"),
-                },
-            }
+        new_row: Dict[str, Any] = {
+            "batch_size": bs,
+            "input_len": b_il,
+            "output_len": b_ol,
+            baseline_label: baseline_entry,
+            opt_label: opt_entry,
+        }
 
-            new_row: Dict[str, Any] = {
-                "batch_size": bs,
-                "input_len": b_il,
-                "output_len": b_ol,
-                baseline_label: baseline_entry,
-                opt_label: opt_entry,
-            }
+        b_avg = baseline_entry.get("avg_s")
+        o_avg = opt_entry.get("avg_s")
+        if isinstance(b_avg, (int, float)) and isinstance(o_avg, (int, float)) and o_avg > 0:
+            speedup = b_avg / o_avg
+            improvement_pct = (b_avg - o_avg) / b_avg * 100.0 if b_avg != 0 else None
+            new_row["speedup"] = speedup
+            new_row["improvement_pct"] = improvement_pct
 
-            b_avg = baseline_entry.get("avg_s")
-            o_avg = opt_entry.get("avg_s")
-            if isinstance(b_avg, (int, float)) and isinstance(o_avg, (int, float)) and o_avg > 0:
-                speedup = b_avg / o_avg
-                improvement_pct = (b_avg - o_avg) / b_avg * 100.0 if b_avg != 0 else None
-                new_row["speedup"] = speedup
-                new_row["improvement_pct"] = improvement_pct
+        new_rows.append(new_row)
 
-            new_rows.append(new_row)
+        if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
+            raise SystemExit(
+                f"Fast-path evidence FAILED for opt at {tag}. "
+                f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
+                f"See {opt_log}"
+            )
 
-            if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
-                raise SystemExit(
-                    f"Fast-path evidence FAILED for opt at {tag}. "
-                    f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
-                    f"See {opt_log}"
-                )
-
-        all_runs["results"] = new_rows
-
-    else:
-        # Legacy mode: shell out per batch size.
-        new_rows: List[Dict[str, Any]] = []
-        for p in planned:
-            bs = int(p["batch_size"])
-            baseline_cmd = p["baseline_cmd"]
-            opt_cmd = p["opt_cmd"]
-            baseline_log = Path(p["baseline_log"])
-            opt_log = Path(p["opt_log"])
-            baseline_json = Path(p["baseline_json"])
-            opt_json = Path(p["opt_json"])
-
-            # Run baseline (if selected).
-            if "baseline" in selected_labels:
-                baseline_res = _run_cmd_streaming(
-                    baseline_cmd,
-                    env=baseline_run.env,
-                    cwd=None,
-                    timeout_s=args.timeout_s,
-                    log_path=baseline_log,
-                    heartbeat_s=int(args.heartbeat_s),
-                )
-            else:
-                baseline_res = {"ok": None, "skipped": True}
-
-            # Run opt (if selected).
-            if "opt" in selected_labels:
-                opt_res = _run_cmd_streaming(
-                    opt_cmd,
-                    env=opt_run.env,
-                    cwd=None,
-                    timeout_s=args.timeout_s,
-                    log_path=opt_log,
-                    heartbeat_s=int(args.heartbeat_s),
-                )
-            else:
-                opt_res = {"ok": None, "skipped": True}
-
-            baseline_text = baseline_log.read_text(encoding="utf-8", errors="replace") if baseline_log.exists() else ""
-            opt_text = opt_log.read_text(encoding="utf-8", errors="replace") if opt_log.exists() else ""
-
-            baseline_raw = _read_json(baseline_json) if baseline_json.exists() else {}
-            opt_raw = _read_json(opt_json) if opt_json.exists() else {}
-
-            baseline_metrics = _metrics_from_vllm_latency_json(baseline_raw) or _parse_latency_metrics(baseline_text)
-            opt_metrics = _metrics_from_vllm_latency_json(opt_raw) or _parse_latency_metrics(opt_text)
-
-            baseline_evidence = _check_patterns(baseline_text, baseline_run.require_patterns, baseline_run.forbid_patterns)
-            opt_evidence = _check_patterns(opt_text, opt_run.require_patterns, opt_run.forbid_patterns)
-
-            baseline_entry: Dict[str, Any] = {
-                "ok": baseline_res.get("ok"),
-                "returncode": baseline_res.get("returncode"),
-                "cmd": baseline_cmd,
-                "env_overrides": baseline_env,
-                "metrics": baseline_metrics,
-                "avg_s": baseline_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **baseline_evidence,
-                    "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
-                },
-                "log": str(baseline_log.relative_to(out_root)),
-                "output_json": str(baseline_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": baseline_res.get("start_time"),
-                    "end_time": baseline_res.get("end_time"),
-                    "duration_s": baseline_res.get("duration_s"),
-                },
-            }
-
-            opt_entry: Dict[str, Any] = {
-                "ok": opt_res.get("ok"),
-                "returncode": opt_res.get("returncode"),
-                "cmd": opt_cmd,
-                "env_overrides": {**baseline_env, **opt_env},
-                "metrics": opt_metrics,
-                "avg_s": opt_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **opt_evidence,
-                    "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
-                },
-                "log": str(opt_log.relative_to(out_root)),
-                "output_json": str(opt_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": opt_res.get("start_time"),
-                    "end_time": opt_res.get("end_time"),
-                    "duration_s": opt_res.get("duration_s"),
-                },
-            }
-
-            b_il = int(p["input_len"])
-            b_ol = int(p["output_len"])
-            tag = p["tag"]
-
-            row: Dict[str, Any] = {
-                "batch_size": bs,
-                "input_len": b_il,
-                "output_len": b_ol,
-                baseline_label: baseline_entry,
-                opt_label: opt_entry,
-            }
-
-            # Compute deltas.
-            b_avg = baseline_entry.get("avg_s")
-            o_avg = opt_entry.get("avg_s")
-            if isinstance(b_avg, (int, float)) and isinstance(o_avg, (int, float)) and o_avg > 0:
-                speedup = b_avg / o_avg
-                improvement_pct = (b_avg - o_avg) / b_avg * 100.0 if b_avg != 0 else None
-                row["speedup"] = speedup
-                row["improvement_pct"] = improvement_pct
-
-            new_rows.append(row)
-
-            if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
-                raise SystemExit(
-                    f"Fast-path evidence FAILED for opt at {tag}. "
-                    f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
-                    f"See {opt_log}"
-                )
-        all_runs["results"] = new_rows
+    all_runs["results"] = new_rows
 
     # Write outputs.
     _write_json(out_json_path, all_runs)

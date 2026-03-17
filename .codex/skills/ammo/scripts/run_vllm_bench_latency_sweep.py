@@ -44,11 +44,10 @@ Guardrails / anti-thrash
 - Fails fast if required fields are missing or still placeholders.
 - Records full commands + env vars + stdout/stderr logs per bucket.
 - Optional fast-path evidence checks: require/forbid regex patterns per run.
-- Avoids model reload thrash by default: uses an in-process sweep runner that
-  loads the model once per label (baseline/opt) and benchmarks all batch sizes
-  in that process. This reduces end-to-end sweep time without changing
-  per-iteration latency measurement. Use `--execution-mode cli_per_bs` for
-  strict per-bucket process isolation.
+- Avoids model reload thrash: uses an in-process sweep runner that loads the
+  model once per label (baseline/opt) and benchmarks all batch sizes in that
+  process. This reduces end-to-end sweep time without changing per-iteration
+  latency measurement.
 - Supports vLLM's dotted "json-style" CLI flags in `inproc_sweep` (e.g.
   `-cc.pass_config.enable_sp=false`), because it uses vLLM's
   `FlexibleArgumentParser` for argument parsing.
@@ -153,6 +152,76 @@ def _maybe_list_str(obj: Dict[str, Any], key: str) -> List[str]:
     return val
 
 
+def _expand_workload_to_buckets(workload: Dict[str, Any]) -> List[Dict[str, int]]:
+    """Normalize workload spec into a list of {input_len, output_len, batch_size} dicts.
+
+    Supports two formats:
+    1. New ``workload_matrix`` (list of dicts) — used when present, flat fields ignored.
+    2. Legacy flat ``{input_len, output_len, batch_sizes}`` — expanded into matrix internally.
+    """
+    matrix = workload.get("workload_matrix")
+    if matrix is not None:
+        if not isinstance(matrix, list) or len(matrix) == 0:
+            raise SystemExit("workload.workload_matrix must be a non-empty list")
+        required_keys = {"input_len", "output_len", "batch_size"}
+        buckets: List[Dict[str, int]] = []
+        seen: set = set()
+        for i, entry in enumerate(matrix):
+            if not isinstance(entry, dict):
+                raise SystemExit(f"workload.workload_matrix[{i}] must be a dict, got {type(entry).__name__}")
+            missing = required_keys - set(entry.keys())
+            if missing:
+                raise SystemExit(f"workload.workload_matrix[{i}] missing keys: {missing}")
+            bucket = {
+                "input_len": int(entry["input_len"]),
+                "output_len": int(entry["output_len"]),
+                "batch_size": int(entry["batch_size"]),
+            }
+            key = (bucket["input_len"], bucket["output_len"], bucket["batch_size"])
+            if key in seen:
+                raise SystemExit(
+                    f"Duplicate bucket in workload.workload_matrix: "
+                    f"input_len={bucket['input_len']}, output_len={bucket['output_len']}, batch_size={bucket['batch_size']}"
+                )
+            seen.add(key)
+            buckets.append(bucket)
+        return buckets
+    else:
+        # Legacy flat format.
+        input_len = workload.get("input_len")
+        output_len = workload.get("output_len")
+        batch_sizes = workload.get("batch_sizes")
+        if input_len is None or output_len is None or batch_sizes is None:
+            raise SystemExit("workload must have input_len, output_len, and batch_sizes (or workload_matrix)")
+        return [
+            {"input_len": int(input_len), "output_len": int(output_len), "batch_size": int(bs)}
+            for bs in batch_sizes
+        ]
+
+
+def _bucket_file_tag(bucket: Dict[str, int], all_buckets: List[Dict[str, int]]) -> str:
+    """Return a file-name tag for *bucket*.
+
+    Returns ``bs{BS}`` when all buckets share the same (input_len, output_len)
+    (homogeneous), otherwise ``il{IL}_ol{OL}_bs{BS}`` (heterogeneous).
+    """
+    il_ol_set = {(b["input_len"], b["output_len"]) for b in all_buckets}
+    if len(il_ol_set) <= 1:
+        return f"bs{bucket['batch_size']}"
+    return f"il{bucket['input_len']}_ol{bucket['output_len']}_bs{bucket['batch_size']}"
+
+
+def _validate_buckets_model_len(buckets: List[Dict[str, int]], max_model_len: int) -> None:
+    """Raise SystemExit if any bucket exceeds max_model_len."""
+    for b in buckets:
+        total = b["input_len"] + b["output_len"]
+        if total > max_model_len:
+            raise SystemExit(
+                f"Bucket (input_len={b['input_len']}, output_len={b['output_len']}, batch_size={b['batch_size']}) "
+                f"requires {total} tokens but max_model_len={max_model_len}"
+            )
+
+
 def _bench_exe_tokens(vllm_cmd: Any) -> List[str]:
     if isinstance(vllm_cmd, list):
         if not all(isinstance(x, str) for x in vllm_cmd):
@@ -217,110 +286,6 @@ def _check_patterns(text: str, require: List[str], forbid: List[str]) -> Dict[st
         "require_miss": req_miss,
         "forbid_hits": forb_hits,
     }
-
-
-def _load_optional_json(path_value: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not path_value:
-        return None
-    path = Path(path_value).expanduser().resolve()
-    if not path.exists():
-        raise SystemExit(f"Configured JSON file does not exist: {path}")
-    return _read_json(path)
-
-
-def _classify_admissibility(*, ok: bool, text: str) -> Dict[str, Any]:
-    issues: List[str] = []
-    lowered = text.lower()
-    if "unknown vllm environment variable" in lowered:
-        issues.append("unknown_vllm_environment_variable")
-    if "valueerror: free memory" in lowered:
-        issues.append("gpu_memory_guard_failure")
-    if "traceback" in lowered and not ok:
-        issues.append("runtime_traceback")
-    return {
-        "status": "PASS" if ok and not issues else "FAIL",
-        "issues": issues,
-    }
-
-
-def _extract_runtime_fastpath_proof(
-    *,
-    runtime_payload: Optional[Dict[str, Any]],
-    runtime_cfg: Dict[str, Any],
-    run_purpose: str,
-) -> Dict[str, Any]:
-    hits_key = str(runtime_cfg.get("hits_key", "fastpath_hits"))
-    min_hits = int(runtime_cfg.get("min_hits", 1))
-    required_for_opt = bool(runtime_cfg.get("required_for_opt", False))
-    if runtime_payload is None:
-        return {
-            "status": "FAIL" if required_for_opt and run_purpose == "official" else "unknown",
-            "source": "missing_json",
-            "hits": 0,
-        }
-
-    hits = runtime_payload.get(hits_key, 0)
-    if not isinstance(hits, int):
-        try:
-            hits = int(hits)
-        except (TypeError, ValueError):
-            hits = 0
-    status = "PASS" if hits >= min_hits else "FAIL"
-    source_json = runtime_cfg.get("json_path") or runtime_payload.get("_source_json")
-    return {
-        "status": status,
-        "source": "explicit_json",
-        "hits": hits,
-        "hits_key": hits_key,
-        "min_hits": min_hits,
-        "source_json": source_json,
-    }
-
-
-def _run_cmd(cmd: List[str], env: Dict[str, str], *, cwd: Optional[Path], timeout_s: int) -> Dict[str, Any]:
-    start = datetime.now(timezone.utc)
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        end = datetime.now(timezone.utc)
-        return {
-            "ok": proc.returncode == 0,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-            "start_time": start.isoformat(),
-            "end_time": end.isoformat(),
-            "duration_s": (end - start).total_seconds(),
-        }
-    except FileNotFoundError as e:
-        end = datetime.now(timezone.utc)
-        return {
-            "ok": False,
-            "error": f"FileNotFoundError: {e}",
-            "stdout": "",
-            "stderr": "",
-            "start_time": start.isoformat(),
-            "end_time": end.isoformat(),
-            "duration_s": (end - start).total_seconds(),
-        }
-    except subprocess.TimeoutExpired as e:
-        end = datetime.now(timezone.utc)
-        return {
-            "ok": False,
-            "error": f"TimeoutExpired: {e}",
-            "stdout": e.stdout or "",
-            "stderr": e.stderr or "",
-            "start_time": start.isoformat(),
-            "end_time": end.isoformat(),
-            "duration_s": (end - start).total_seconds(),
-        }
 
 
 def _format_cmd_for_md(cmd: List[str], env_overrides: Dict[str, str]) -> str:
@@ -415,15 +380,17 @@ def _prepare_out_root(
     return out_root
 
 
-def _acquire_gpu_lock(*, artifact_dir: Path, enabled: bool) -> Optional[Any]:
+def _acquire_gpu_lock(*, artifact_dir: Path, is_child: bool) -> Optional[Any]:
     """System-wide inter-process lock keyed by visible GPUs.
 
     Uses /tmp/ammo_gpu_locks/ (not artifact_dir) so that locks work across
     different agents using different artifact directories on the same machine.
     This prevents running multiple sweeps concurrently on the same GPUs, which
     makes measurements meaningless due to contention.
+
+    Child processes (spawned by a lock-holding parent) skip acquisition.
     """
-    if not enabled:
+    if is_child:
         return None
 
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -606,7 +573,7 @@ def _build_vllm_bench_cmd(
     output_json: Path,
     extra_args: List[str],
 ) -> List[str]:
-    # Command template based on references/e2e-latency-guide.md
+    # Command template based on validation/E2E_LATENCY_GUIDE.md
     cmd = (
         vllm_exe
         + [
@@ -675,20 +642,22 @@ def _run_inproc_latency_sweep_child(
     model_id: str,
     tp: int,
     max_model_len: int,
-    input_len: int,
-    output_len: int,
-    batch_sizes: List[int],
+    buckets: List[Dict[str, int]],
     num_iters: int,
     extra_args: List[str],
     out_root: Path,
     timeout_s_per_bucket: int,
+    nsys_profile: bool = False,
 ) -> int:
-    """Child-mode runner: load model once, benchmark all batch sizes.
+    """Child-mode runner: load model once, benchmark all buckets.
 
-    Writes per-bucket artifacts to the same locations the parent expects:
-      logs/{label}_bs{BS}.log
-      json/{label}_bs{BS}.json          (raw vllm bench latency format)
-      json/{label}_bs{BS}.runner.json   (runner status + timing + errors)
+    Each bucket is a dict with ``input_len``, ``output_len``, ``batch_size``.
+    SamplingParams are reconstructed per-bucket (output_len may vary).
+
+    Writes per-bucket artifacts using ``_bucket_file_tag`` for naming:
+      logs/{label}_{tag}.log
+      json/{label}_{tag}.json          (raw vllm bench latency format)
+      json/{label}_{tag}.runner.json   (runner status + timing + errors)
     """
     logs_dir = out_root / "logs"
     json_dir = out_root / "json"
@@ -743,29 +712,31 @@ def _run_inproc_latency_sweep_child(
             child_log.write(traceback.format_exc() + "\n")
         return 2
 
-    # Parse CLI-equivalent args once (using the first batch size), then override per-bucket.
+    # Parse CLI-equivalent args once (using the first bucket), then override per-bucket.
     # This ensures we honor bench.extra_args using vLLM's own argparse schema.
     # Use vLLM's FlexibleArgumentParser so we support dotted "json-style" flags
     # like `-cc.pass_config.enable_sp=false` (CompilationConfig), etc.
+    seed = buckets[0] if buckets else {"input_len": 64, "output_len": 512, "batch_size": 1}
     parser = FlexibleArgumentParser(add_help=False, add_json_tip=False)
     vllm_latency.add_cli_args(parser)
-    seed_bs = batch_sizes[0] if batch_sizes else 1
-    seed_out = json_dir / f"{label}_bs{seed_bs}.json"
+    seed_tag = _bucket_file_tag(seed, buckets)
+    seed_out = json_dir / f"{label}_{seed_tag}.json"
     seed_argv = _build_cli_equivalent_args_for_inproc(
         model_id=model_id,
         tp=tp,
         max_model_len=max_model_len,
-        input_len=input_len,
-        output_len=output_len,
-        batch_size=seed_bs,
+        input_len=seed["input_len"],
+        output_len=seed["output_len"],
+        batch_size=seed["batch_size"],
         num_iters=num_iters,
         output_json=seed_out,
         extra_args=extra_args,
     )
     args = parser.parse_args(seed_argv)
 
-    if getattr(args, "profile", False):
+    if getattr(args, "profile", False) and not nsys_profile:
         # vllm bench latency --profile is a single-run action; sweeping doesn't make sense.
+        # (When nsys_profile is active, we handle profiler start/stop per-bucket ourselves.)
         _write_text(out_root / f"child_{label}_error.log", "Refusing to sweep with --profile enabled.\n")
         _update_status("error", extra={"error": "Refusing to sweep with --profile enabled."})
         return 2
@@ -775,33 +746,39 @@ def _run_inproc_latency_sweep_child(
     llm = LLM(**_dataclasses.asdict(engine_args))
     _update_status("model_loaded")
 
-    # Same invariant as vllm.benchmarks.latency.main
-    if llm.llm_engine.model_config.max_model_len < (input_len + output_len):
-        _write_text(
-            out_root / f"child_{label}_error.log",
-            "max_model_len is smaller than input_len + output_len; adjust target.json.\n",
+    for bucket in buckets:
+        b_input_len = bucket["input_len"]
+        b_output_len = bucket["output_len"]
+        bs = bucket["batch_size"]
+        tag = _bucket_file_tag(bucket, buckets)
+
+        # Validate per-bucket model len constraint.
+        if llm.llm_engine.model_config.max_model_len < (b_input_len + b_output_len):
+            _write_text(
+                out_root / f"child_{label}_error.log",
+                f"max_model_len is smaller than input_len + output_len for bucket {tag}; adjust target.json.\n",
+            )
+            _update_status("error", extra={"error": f"max_model_len < input_len + output_len for bucket {tag}"})
+            return 2
+
+        # Reconstruct SamplingParams per-bucket (output_len may vary).
+        sampling_params = SamplingParams(
+            n=int(getattr(args, "n", 1)),
+            temperature=1.0,
+            top_p=1.0,
+            ignore_eos=True,
+            max_tokens=b_output_len,
+            detokenize=not bool(getattr(args, "disable_detokenize", False)),
         )
-        _update_status("error", extra={"error": "max_model_len < input_len + output_len"})
-        return 2
 
-    sampling_params = SamplingParams(
-        n=int(getattr(args, "n", 1)),
-        temperature=1.0,
-        top_p=1.0,
-        ignore_eos=True,
-        max_tokens=output_len,
-        detokenize=not bool(getattr(args, "disable_detokenize", False)),
-    )
-
-    for bs in batch_sizes:
-        raw_json = json_dir / f"{label}_bs{bs}.json"
-        runner_json = json_dir / f"{label}_bs{bs}.runner.json"
-        log_path = logs_dir / f"{label}_bs{bs}.log"
+        raw_json = json_dir / f"{label}_{tag}.json"
+        runner_json = json_dir / f"{label}_{tag}.runner.json"
+        log_path = logs_dir / f"{label}_{tag}.log"
 
         # Override per-bucket args that should affect only prompt construction / output paths.
         setattr(args, "batch_size", int(bs))
-        setattr(args, "input_len", int(input_len))
-        setattr(args, "output_len", int(output_len))
+        setattr(args, "input_len", int(b_input_len))
+        setattr(args, "output_len", int(b_output_len))
         setattr(args, "num_iters", int(num_iters))
         setattr(args, "output_json", str(raw_json))
 
@@ -810,6 +787,8 @@ def _run_inproc_latency_sweep_child(
             "ok": False,
             "label": label,
             "batch_size": bs,
+            "input_len": b_input_len,
+            "output_len": b_output_len,
             "start_time": start.isoformat(),
         }
 
@@ -826,7 +805,7 @@ def _run_inproc_latency_sweep_child(
 
             try:
                 _update_status("bucket_start", batch_size=bs)
-                _log(f"=== inproc vllm bench latency sweep ({label}) bs={bs} ===")
+                _log(f"=== inproc vllm bench latency sweep ({label}) {tag} ===")
                 _log(
                     _format_cmd_for_md(
                         ["vllm", "bench", "latency"]
@@ -834,8 +813,8 @@ def _run_inproc_latency_sweep_child(
                             model_id=model_id,
                             tp=tp,
                             max_model_len=max_model_len,
-                            input_len=input_len,
-                            output_len=output_len,
+                            input_len=b_input_len,
+                            output_len=b_output_len,
                             batch_size=bs,
                             num_iters=num_iters,
                             output_json=raw_json,
@@ -845,7 +824,7 @@ def _run_inproc_latency_sweep_child(
                     )
                 )
 
-                dummy_prompt_token_ids = np.random.randint(10000, size=(bs, input_len))
+                dummy_prompt_token_ids = np.random.randint(10000, size=(bs, b_input_len))
                 dummy_prompts: list[PromptType] = [
                     {"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()
                 ]
@@ -858,7 +837,7 @@ def _run_inproc_latency_sweep_child(
                             dummy_prompts,
                             BeamSearchParams(
                                 beam_width=int(getattr(args, "n", 1)),
-                                max_tokens=output_len,
+                                max_tokens=b_output_len,
                                 ignore_eos=True,
                             ),
                         )
@@ -887,6 +866,23 @@ def _run_inproc_latency_sweep_child(
                 latencies: List[float] = []
                 last_status_t = _time.monotonic()
                 num_iters_eff = int(getattr(args, "num_iters", 30))
+
+                # Start nsys capture for this bucket (if enabled).
+                # NOTE: We call cudaProfilerStart/Stop directly instead of
+                # llm.start_profile() because the latter injects --profile
+                # semantics (single-iteration capture) and propagates via
+                # vLLM's executor RPC.  Direct cudaProfilerStart() works with
+                # nsys because nsys's --capture-range=cudaProfilerApi captures
+                # ALL traced processes (including TP workers followed via
+                # --trace-fork-before-exec) when ANY process triggers the
+                # capture range — this is an nsys-level mechanism, not CUDA
+                # profiler propagation.
+                if nsys_profile:
+                    import torch as _torch_prof
+                    _torch_prof.cuda.synchronize()
+                    _torch_prof.cuda.cudart().cudaProfilerStart()
+                    _log(f"[nsys] cudaProfilerStart for {tag}")
+
                 for i in range(num_iters_eff):
                     if _time.monotonic() > deadline:
                         raise TimeoutError(f"Bucket timeout exceeded ({timeout_s_per_bucket}s)")
@@ -894,6 +890,12 @@ def _run_inproc_latency_sweep_child(
                     if (_time.monotonic() - last_status_t) > 5.0:
                         _update_status("benchmark", batch_size=bs, extra={"iter": i + 1})
                         last_status_t = _time.monotonic()
+
+                # Stop nsys capture for this bucket.
+                if nsys_profile:
+                    _torch_prof.cuda.synchronize()
+                    _torch_prof.cuda.cudart().cudaProfilerStop()
+                    _log(f"[nsys] cudaProfilerStop for {tag}")
 
                 # Match vLLM bench JSON schema.
                 arr = np.array(latencies, dtype=np.float64)
@@ -946,8 +948,22 @@ def _run_inproc_latency_sweep_child(
 
 
 def _render_md_table(rows: List[Dict[str, Any]], baseline_label: str, opt_label: str) -> str:
-    header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
-    sep = "|---:|---:|---:|---:|---:|---|"
+    # Determine if rows are heterogeneous (mixed IL/OL values).
+    il_ol_set: set = set()
+    for r in rows:
+        il = r.get("input_len")
+        ol = r.get("output_len")
+        if il is not None and ol is not None:
+            il_ol_set.add((il, ol))
+    heterogeneous = len(il_ol_set) > 1
+
+    if heterogeneous:
+        header = f"| Input Len | Output Len | Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
+        sep = "|---:|---:|---:|---:|---:|---:|---:|---|"
+    else:
+        header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
+        sep = "|---:|---:|---:|---:|---:|---|"
+
     lines = [header, sep]
     for r in rows:
         bs = r["batch_size"]
@@ -966,9 +982,16 @@ def _render_md_table(rows: List[Dict[str, Any]], baseline_label: str, opt_label:
                 return f"{x:.6g}"
             return str(x)
 
-        lines.append(
-            f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
-        )
+        if heterogeneous:
+            il = r.get("input_len", "")
+            ol = r.get("output_len", "")
+            lines.append(
+                f"| {il} | {ol} | {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
+            )
+        else:
+            lines.append(
+                f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -980,27 +1003,56 @@ def main() -> None:
     p.add_argument("--timeout-s", type=int, default=1800, help="Timeout per bucket (seconds)")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing output dir instead of archiving it")
     p.add_argument("--require-fastpath", action="store_true", help="Fail if opt fast-path evidence patterns do not pass")
-    p.add_argument("--run-purpose", type=str, default="official", choices=["official", "anti_contamination", "diagnostic"], help="How this sweep should be classified in downstream evidence.")
-    p.add_argument("--candidate-id", type=str, default=None, help="Optional AMMO candidate id for downstream evidence.")
-    p.add_argument("--fastpath-proof-json", type=str, default=None, help="Optional JSON file with explicit fast-path hit evidence for the optimized run.")
+    p.add_argument("--heartbeat-s", type=int, default=30, help="Heartbeat interval while a subprocess is quiet")
     p.add_argument(
-        "--execution-mode",
+        "--labels",
         type=str,
-        default="inproc_sweep",
-        choices=["inproc_sweep", "cli_per_bs"],
+        default="baseline",
         help=(
-            "How to execute the sweep. "
-            "'inproc_sweep' loads the model once per label and benchmarks all batch sizes (faster). "
-            "'cli_per_bs' shells out to `vllm bench latency` per batch size (slower, legacy)."
+            "Comma-separated labels to run: 'baseline' (default), 'opt', or 'baseline,opt'. "
+            "Use '--labels baseline' for Stage 1 baseline-only sweeps (no opt). "
+            "Use '--labels opt' for Stage 5 validation (opt only, compare against Stage 1 baseline)."
         ),
     )
-    p.add_argument("--gpu-lock", action="store_true", default=True, help="Prevent concurrent sweeps on same GPUs (default)")
-    p.add_argument("--no-gpu-lock", action="store_false", dest="gpu_lock", help=argparse.SUPPRESS)
-    p.add_argument("--heartbeat-s", type=int, default=30, help="Heartbeat interval while a subprocess is quiet")
+    p.add_argument(
+        "--nsys-profile",
+        action="store_true",
+        default=False,
+        help=(
+            "Capture per-bucket nsys profiles during inproc_sweep. "
+            "Produces one .nsys-rep per bucket in {out}/nsys/. "
+            "Uses --capture-range=cudaProfilerApi with repeat mode."
+        ),
+    )
+    p.add_argument(
+        "--nsys-extra-flags",
+        type=str,
+        default="",
+        help="Extra flags to pass to nsys profile (e.g. '--stats=true')",
+    )
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
 
     args = p.parse_args()
+
+    # Validate --nsys-profile constraints early.
+    if args.nsys_profile:
+        if not shutil.which("nsys"):
+            raise SystemExit(
+                "nsys not found on PATH. Install Nsight Systems CLI or remove --nsys-profile."
+            )
+
+    # Parse and validate --labels.
+    selected_labels = {s.strip() for s in args.labels.split(",")}
+    invalid_labels = selected_labels - {"baseline", "opt"}
+    if invalid_labels:
+        raise SystemExit(
+            f"Invalid --labels value(s): {invalid_labels}. "
+            "Accepted: 'baseline', 'opt', or 'baseline,opt'."
+        )
+    if not selected_labels:
+        raise SystemExit("--labels must specify at least one label.")
 
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
     target_path = Path(args.target_json).expanduser().resolve() if args.target_json else (artifact_dir / "target.json")
@@ -1028,10 +1080,22 @@ def main() -> None:
     if not isinstance(workload, dict):
         raise SystemExit("root.workload must be an object")
 
-    input_len = _require_int(workload, "input_len", "workload")
-    output_len = _require_int(workload, "output_len", "workload")
-    batch_sizes = _require_list_int(workload, "batch_sizes", "workload")
+    # Expand workload into buckets (supports both legacy flat and new matrix format).
+    # Legacy flat fields are still required when workload_matrix is absent.
+    has_matrix = "workload_matrix" in workload
+    if not has_matrix:
+        # Validate legacy required fields.
+        _require_int(workload, "input_len", "workload")
+        _require_int(workload, "output_len", "workload")
+        _require_list_int(workload, "batch_sizes", "workload")
+
+    buckets = _expand_workload_to_buckets(workload)
     num_iters = _require_int(workload, "num_iters", "workload")
+
+    # Legacy convenience vars (for backward-compat in console output and workload JSON).
+    input_len = workload.get("input_len")
+    output_len = workload.get("output_len")
+    batch_sizes = workload.get("batch_sizes")
 
     bench = _require(spec, "bench", "root")
     if not isinstance(bench, dict):
@@ -1062,17 +1126,23 @@ def main() -> None:
     if not isinstance(opt_env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in opt_env.items()):
         raise SystemExit("bench.opt_env must be a dict[str,str]")
 
+    # Validate env dict keys and values are not placeholders.
+    for env_name, env_dict in [("baseline_env", baseline_env), ("opt_env", opt_env)]:
+        for k, v in env_dict.items():
+            if _is_placeholder(k):
+                raise SystemExit(
+                    f"bench.{env_name} key is still a placeholder: {k!r}. "
+                    "Replace it with the actual environment variable name (e.g., VLLM_MY_OPT=1)."
+                )
+            if _is_placeholder(v):
+                raise SystemExit(f"bench.{env_name}[{k!r}] value is still a placeholder: {v!r}")
+
     baseline_label = bench.get("baseline_label", "baseline")
     opt_label = bench.get("opt_label", "opt")
 
     fpe = bench.get("fastpath_evidence", {})
     if not isinstance(fpe, dict):
         fpe = {}
-    runtime_proof_cfg = bench.get("runtime_proof", {})
-    if not isinstance(runtime_proof_cfg, dict):
-        runtime_proof_cfg = {}
-    if args.fastpath_proof_json:
-        runtime_proof_cfg = {**runtime_proof_cfg, "json_path": args.fastpath_proof_json}
 
     def _read_evidence(label: str) -> Tuple[List[str], List[str]]:
         cfg = fpe.get(label, {})
@@ -1129,18 +1199,31 @@ def main() -> None:
         forbid_patterns=opt_forb,
     )
 
+    # Config identity check: warn or fail when baseline and opt are identical.
+    if "baseline" in selected_labels and "opt" in selected_labels:
+        if not opt_env and opt_extra_args == baseline_extra_args:
+            raise SystemExit(
+                "baseline and opt configs are identical — opt would produce the "
+                "same results as baseline.\n"
+                "Update opt_env in target.json, or use --labels baseline to skip opt."
+            )
+
+    # Validate all buckets fit within max_model_len at plan time.
+    _validate_buckets_model_len(buckets, max_model_len)
+
     print("=== Target ===")
     print(f"artifact_dir: {artifact_dir}")
     print(f"out_dir: {out_root}")
     print(f"model_id: {model_id}")
     print(f"tp: {tp}, ep: {ep}, max_model_len: {max_model_len}")
-    print(f"workload: input_len={input_len}, output_len={output_len}, num_iters={num_iters}")
-    print(f"batch_sizes: {batch_sizes}")
+    if has_matrix:
+        print(f"workload: {len(buckets)} buckets (workload_matrix), num_iters={num_iters}")
+        for i, b in enumerate(buckets):
+            print(f"  [{i}] input_len={b['input_len']}, output_len={b['output_len']}, batch_size={b['batch_size']}")
+    else:
+        print(f"workload: input_len={input_len}, output_len={output_len}, num_iters={num_iters}")
+        print(f"batch_sizes: {batch_sizes}")
     print(f"baseline_label: {baseline_label}, opt_label: {opt_label}")
-    print(f"execution_mode: {args.execution_mode}")
-    print(f"gpu_lock: {args.gpu_lock}")
-    print(f"run_purpose: {args.run_purpose}")
-    print(f"candidate_id: {args.candidate_id}")
 
     if ep != 1:
         print(
@@ -1151,12 +1234,11 @@ def main() -> None:
         )
 
     all_runs: Dict[str, Any] = {
-        "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target_json": str(target_path),
         "out_dir": str(out_root),
         "out_name": args.out_name,
-        "execution_mode": args.execution_mode,
+        "execution_mode": "inproc_sweep",
         "model_id": model_id,
         "tp": tp,
         "ep": ep,
@@ -1166,6 +1248,7 @@ def main() -> None:
             "output_len": output_len,
             "num_iters": num_iters,
             "batch_sizes": batch_sizes,
+            "buckets": buckets,
         },
         "bench": {
             "vllm_exe": vllm_exe,
@@ -1177,39 +1260,41 @@ def main() -> None:
             "baseline_label": baseline_label,
             "opt_label": opt_label,
             "fastpath_evidence": fpe,
-            "runtime_proof": runtime_proof_cfg,
         },
-        "candidate_id": args.candidate_id or bench.get("run_metadata", {}).get("candidate_id"),
-        "run_purpose": args.run_purpose,
-        "runtime_fastpath_proof": None,
         "results": [],
     }
 
     # Acquire GPU lock for the entire run (prevents meaningless contention).
-    lock_handle = _acquire_gpu_lock(artifact_dir=artifact_dir, enabled=bool(args.gpu_lock))
+    is_child = bool(args._child_label)
+    lock_handle = _acquire_gpu_lock(artifact_dir=artifact_dir, is_child=is_child)
 
     # Advisory check: warn if other GPU processes are running.
-    if args.gpu_lock:
+    if not is_child:
         _check_gpu_idle()
 
     # Record the per-bucket plan deterministically (for stable paths + repro commands).
     planned: List[Dict[str, Any]] = []
-    for bs in batch_sizes:
-        baseline_json = json_dir / f"{baseline_label}_bs{bs}.json"
-        opt_json = json_dir / f"{opt_label}_bs{bs}.json"
-        baseline_log = logs_dir / f"{baseline_label}_bs{bs}.log"
-        opt_log = logs_dir / f"{opt_label}_bs{bs}.log"
+    for bucket in buckets:
+        b_input_len = bucket["input_len"]
+        b_output_len = bucket["output_len"]
+        bs = bucket["batch_size"]
+        tag = _bucket_file_tag(bucket, buckets)
+
+        baseline_json_p = json_dir / f"{baseline_label}_{tag}.json"
+        opt_json_p = json_dir / f"{opt_label}_{tag}.json"
+        baseline_log_p = logs_dir / f"{baseline_label}_{tag}.log"
+        opt_log_p = logs_dir / f"{opt_label}_{tag}.log"
 
         baseline_cmd = _build_vllm_bench_cmd(
             vllm_exe=vllm_exe,
             model_id=model_id,
             tp=tp,
             max_model_len=max_model_len,
-            input_len=input_len,
-            output_len=output_len,
+            input_len=b_input_len,
+            output_len=b_output_len,
             batch_size=bs,
             num_iters=num_iters,
-            output_json=baseline_json,
+            output_json=baseline_json_p,
             extra_args=baseline_args,
         )
         opt_cmd = _build_vllm_bench_cmd(
@@ -1217,43 +1302,48 @@ def main() -> None:
             model_id=model_id,
             tp=tp,
             max_model_len=max_model_len,
-            input_len=input_len,
-            output_len=output_len,
+            input_len=b_input_len,
+            output_len=b_output_len,
             batch_size=bs,
             num_iters=num_iters,
-            output_json=opt_json,
+            output_json=opt_json_p,
             extra_args=opt_args,
         )
 
-        print(f"\n=== batch_size={bs} ===")
+        print(f"\n=== {tag} (il={b_input_len}, ol={b_output_len}, bs={bs}) ===")
         print(f"Baseline cmd: {_format_cmd_for_md(baseline_cmd, baseline_env)}")
         print(f"Opt cmd: {_format_cmd_for_md(opt_cmd, {**baseline_env, **opt_env})}")
 
         planned.append({
             "batch_size": bs,
+            "input_len": b_input_len,
+            "output_len": b_output_len,
+            "tag": tag,
             "baseline_cmd": baseline_cmd,
             "opt_cmd": opt_cmd,
-            "baseline_log": baseline_log,
-            "opt_log": opt_log,
-            "baseline_json": baseline_json,
-            "opt_json": opt_json,
+            "baseline_log": baseline_log_p,
+            "opt_log": opt_log_p,
+            "baseline_json": baseline_json_p,
+            "opt_json": opt_json_p,
         })
 
         # Populate a minimal row deterministically (stable paths + repro commands).
         all_runs["results"].append({
             "batch_size": bs,
+            "input_len": b_input_len,
+            "output_len": b_output_len,
             baseline_label: {
                 "cmd": baseline_cmd,
                 "env_overrides": baseline_env,
-                "log": str(baseline_log.relative_to(out_root)),
-                "output_json": str(baseline_json.relative_to(out_root)),
+                "log": str(baseline_log_p.relative_to(out_root)),
+                "output_json": str(baseline_json_p.relative_to(out_root)),
                 "fastpath_evidence": {"status": "unknown"},
             },
             opt_label: {
                 "cmd": opt_cmd,
                 "env_overrides": {**baseline_env, **opt_env},
-                "log": str(opt_log.relative_to(out_root)),
-                "output_json": str(opt_json.relative_to(out_root)),
+                "log": str(opt_log_p.relative_to(out_root)),
+                "output_json": str(opt_json_p.relative_to(out_root)),
                 "fastpath_evidence": {"status": "unknown"},
             },
         })
@@ -1269,7 +1359,8 @@ def main() -> None:
                 )
 
     # Seed status files so supervisors can poll immediately.
-    for label in (baseline_label, opt_label):
+    for label in [l for l in (baseline_label, opt_label)
+                  if ("baseline" if l == baseline_label else "opt") in selected_labels]:
         st = status_dir / f"{label}.json"
         if not st.exists():
             _write_json_atomic(
@@ -1295,13 +1386,12 @@ def main() -> None:
             model_id=model_id,
             tp=tp,
             max_model_len=max_model_len,
-            input_len=input_len,
-            output_len=output_len,
-            batch_sizes=batch_sizes,
+            buckets=buckets,
             num_iters=num_iters,
             extra_args=label_args,
             out_root=out_root,
             timeout_s_per_bucket=args.timeout_s,
+            nsys_profile=getattr(args, "_nsys_profile", False),
         )
         raise SystemExit(returncode)
 
@@ -1313,282 +1403,200 @@ def main() -> None:
 
     baseline_patterns_configured = bool(baseline_run.require_patterns or baseline_run.forbid_patterns)
     opt_patterns_configured = bool(opt_run.require_patterns or opt_run.forbid_patterns)
-    runtime_payload = _load_optional_json(runtime_proof_cfg.get("json_path")) if runtime_proof_cfg.get("json_path") else None
-    if runtime_payload is not None:
-        runtime_payload = dict(runtime_payload)
-        runtime_payload["_source_json"] = str(Path(str(runtime_proof_cfg.get("json_path"))).expanduser().resolve())
-    all_runs["runtime_fastpath_proof"] = _extract_runtime_fastpath_proof(
-        runtime_payload=runtime_payload,
-        runtime_cfg=runtime_proof_cfg,
-        run_purpose=args.run_purpose,
-    )
-    if args.run_purpose == "official" and bool(runtime_proof_cfg.get("required_for_opt", False)):
-        if all_runs["runtime_fastpath_proof"].get("status") != "PASS":
-            raise SystemExit(
-                "Official optimized runs require explicit fast-path proof with hits >= min_hits. "
-                f"Observed proof: {all_runs['runtime_fastpath_proof']}"
-            )
 
-    if args.execution_mode == "inproc_sweep":
-        script_path = Path(__file__).resolve()
-        child_timeout = int(args.timeout_s) * max(1, len(batch_sizes)) + 1800
+    script_path = Path(__file__).resolve()
+    child_timeout = int(args.timeout_s) * max(1, len(buckets)) + 1800
 
-        for run in (baseline_run, opt_run):
-            child_cmd = [
-                sys.executable,
-                str(script_path),
-                "--artifact-dir",
-                str(artifact_dir),
-                "--target-json",
-                str(target_path),
-                "--execution-mode",
-                "inproc_sweep",
-                "--timeout-s",
-                str(args.timeout_s),
-                "--out-name",
-                args.out_name,
-                "--_out-root",
-                str(out_root),
-                "--no-gpu-lock",
-                "--_child-label",
-                run.label,
+    # Set up nsys output directory if profiling.
+    nsys_dir: Optional[Path] = None
+    if args.nsys_profile:
+        nsys_dir = out_root / "nsys"
+        nsys_dir.mkdir(parents=True, exist_ok=True)
+
+    runs_to_execute = []
+    if "baseline" in selected_labels:
+        runs_to_execute.append(baseline_run)
+    if "opt" in selected_labels:
+        runs_to_execute.append(opt_run)
+
+    for run in runs_to_execute:
+        child_cmd = [
+            sys.executable,
+            str(script_path),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--target-json",
+            str(target_path),
+            "--timeout-s",
+            str(args.timeout_s),
+            "--out-name",
+            args.out_name,
+            "--_out-root",
+            str(out_root),
+            "--_child-label",
+            run.label,
+        ]
+        if args.nsys_profile:
+            child_cmd.append("--_nsys-profile")
+
+        # Prepend nsys wrapper when profiling.
+        child_env = dict(run.env) if run.env else dict(os.environ)
+        if args.nsys_profile:
+            assert nsys_dir is not None
+            child_env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+            nsys_prefix = [
+                "nsys", "profile",
+                "--trace=cuda,nvtx",
+                "--sample=none",
+                "--capture-range=cudaProfilerApi",
+                f"--capture-range-end=repeat:{len(buckets)}",
+                "--cuda-graph-trace=node",
+                "--trace-fork-before-exec=true",
+                "--force-overwrite=true",
+                "-o", str(nsys_dir / f"{run.label}_profile"),
             ]
-            print(f"\n=== Running inproc sweep for {run.label} ===")
-            print(f"Child cmd: {_format_cmd_for_md(child_cmd, {})}")
-            child_log = logs_dir / f"{run.label}_supervisor.log"
-            child_status = status_dir / f"{run.label}.json"
-            child_res = _run_cmd_streaming(
-                child_cmd,
-                env=run.env,
-                cwd=None,
-                timeout_s=child_timeout,
-                log_path=child_log,
-                heartbeat_s=int(args.heartbeat_s),
-                status_path=child_status,
-            )
-            if not child_res.get("ok"):
-                raise SystemExit(
-                    f"Inproc sweep child failed for {run.label}: returncode={child_res.get('returncode')}. "
-                    f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
-                )
+            if args.nsys_extra_flags:
+                import shlex as _shlex
+                nsys_prefix.extend(_shlex.split(args.nsys_extra_flags))
+            child_cmd = nsys_prefix + child_cmd
 
-        # Populate per-bucket entries from artifacts written by children.
-        new_rows: List[Dict[str, Any]] = []
-        for p, row in zip(planned, all_runs["results"]):
-            bs = int(p["batch_size"])
-            baseline_log = Path(p["baseline_log"])
-            opt_log = Path(p["opt_log"])
-            baseline_json = Path(p["baseline_json"])
-            opt_json = Path(p["opt_json"])
-
-            baseline_runner_json = json_dir / f"{baseline_label}_bs{bs}.runner.json"
-            opt_runner_json = json_dir / f"{opt_label}_bs{bs}.runner.json"
-
-            baseline_text = ""
-            opt_text = ""
-            if baseline_log.exists():
-                baseline_text = baseline_log.read_text(encoding="utf-8", errors="replace")
-            if opt_log.exists():
-                opt_text = opt_log.read_text(encoding="utf-8", errors="replace")
-
-            baseline_raw = _read_json(baseline_json) if baseline_json.exists() else {}
-            opt_raw = _read_json(opt_json) if opt_json.exists() else {}
-
-            baseline_metrics = _metrics_from_vllm_latency_json(baseline_raw) or _parse_latency_metrics(baseline_text)
-            opt_metrics = _metrics_from_vllm_latency_json(opt_raw) or _parse_latency_metrics(opt_text)
-
-            baseline_evidence = _check_patterns(baseline_text, baseline_run.require_patterns, baseline_run.forbid_patterns)
-            opt_evidence = _check_patterns(opt_text, opt_run.require_patterns, opt_run.forbid_patterns)
-
-            baseline_status = _read_json(baseline_runner_json) if baseline_runner_json.exists() else {"ok": None}
-            opt_status = _read_json(opt_runner_json) if opt_runner_json.exists() else {"ok": None}
-
-            baseline_entry = {
-                "ok": baseline_status.get("ok"),
-                "returncode": 0 if baseline_status.get("ok") else 1,
-                "cmd": p["baseline_cmd"],
-                "env_overrides": baseline_env,
-                "metrics": baseline_metrics,
-                "avg_s": baseline_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **baseline_evidence,
-                    "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
-                },
-                "runtime_fastpath_proof": {
-                    "status": "unknown",
-                    "source": "not_applicable",
-                    "hits": 0,
-                },
-                "admissibility": _classify_admissibility(ok=bool(baseline_status.get("ok")), text=baseline_text),
-                "log": str(baseline_log.relative_to(out_root)),
-                "output_json": str(baseline_json.relative_to(out_root)),
-                "runner_json": str(baseline_runner_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": baseline_status.get("start_time"),
-                    "end_time": baseline_status.get("end_time"),
-                    "duration_s": baseline_status.get("duration_s"),
-                },
-            }
-            opt_entry = {
-                "ok": opt_status.get("ok"),
-                "returncode": 0 if opt_status.get("ok") else 1,
-                "cmd": p["opt_cmd"],
-                "env_overrides": {**baseline_env, **opt_env},
-                "metrics": opt_metrics,
-                "avg_s": opt_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **opt_evidence,
-                    "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
-                },
-                "runtime_fastpath_proof": all_runs["runtime_fastpath_proof"],
-                "admissibility": _classify_admissibility(ok=bool(opt_status.get("ok")), text=opt_text),
-                "log": str(opt_log.relative_to(out_root)),
-                "output_json": str(opt_json.relative_to(out_root)),
-                "runner_json": str(opt_runner_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": opt_status.get("start_time"),
-                    "end_time": opt_status.get("end_time"),
-                    "duration_s": opt_status.get("duration_s"),
-                },
-            }
-
-            new_row = {"batch_size": bs, baseline_label: baseline_entry, opt_label: opt_entry}
-
-            b_avg = baseline_entry.get("avg_s")
-            o_avg = opt_entry.get("avg_s")
-            if isinstance(b_avg, (int, float)) and isinstance(o_avg, (int, float)) and o_avg > 0:
-                speedup = b_avg / o_avg
-                improvement_pct = (b_avg - o_avg) / b_avg * 100.0 if b_avg != 0 else None
-                new_row["speedup"] = speedup
-                new_row["improvement_pct"] = improvement_pct
-
-            new_rows.append(new_row)
-
-            if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
-                raise SystemExit(
-                    f"Fast-path evidence FAILED for opt at BS={bs}. "
-                    f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
-                    f"See {opt_log}"
-                )
-
-        all_runs["results"] = new_rows
-
-    else:
-        # Legacy mode: shell out per batch size.
-        new_rows: List[Dict[str, Any]] = []
-        for p in planned:
-            bs = int(p["batch_size"])
-            baseline_cmd = p["baseline_cmd"]
-            opt_cmd = p["opt_cmd"]
-            baseline_log = Path(p["baseline_log"])
-            opt_log = Path(p["opt_log"])
-            baseline_json = Path(p["baseline_json"])
-            opt_json = Path(p["opt_json"])
-
-            # Run baseline.
-            baseline_res = _run_cmd_streaming(
-                baseline_cmd,
-                env=baseline_run.env,
-                cwd=None,
-                timeout_s=args.timeout_s,
-                log_path=baseline_log,
-                heartbeat_s=int(args.heartbeat_s),
+        print(f"\n=== Running inproc sweep for {run.label} ===")
+        print(f"Child cmd: {_format_cmd_for_md(child_cmd, {})}")
+        child_log = logs_dir / f"{run.label}_supervisor.log"
+        child_status = status_dir / f"{run.label}.json"
+        child_res = _run_cmd_streaming(
+            child_cmd,
+            env=child_env,
+            cwd=None,
+            timeout_s=child_timeout,
+            log_path=child_log,
+            heartbeat_s=int(args.heartbeat_s),
+            status_path=child_status,
+        )
+        if not child_res.get("ok"):
+            raise SystemExit(
+                f"Inproc sweep child failed for {run.label}: returncode={child_res.get('returncode')}. "
+                f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
             )
 
-            # Run opt.
-            opt_res = _run_cmd_streaming(
-                opt_cmd,
-                env=opt_run.env,
-                cwd=None,
-                timeout_s=args.timeout_s,
-                log_path=opt_log,
-                heartbeat_s=int(args.heartbeat_s),
+        # Rename nsys output files to match bucket tags.
+        if nsys_dir is not None:
+            renamed = 0
+            for i, bucket in enumerate(buckets, 1):
+                src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
+                tag = _bucket_file_tag(bucket, buckets)
+                dst = nsys_dir / f"{run.label}_{tag}.nsys-rep"
+                if src.exists():
+                    src.rename(dst)
+                    print(f"  nsys: {src.name} -> {dst.name}")
+                    renamed += 1
+            if renamed < len(buckets):
+                print(
+                    f"  WARNING: nsys produced {renamed} of {len(buckets)} "
+                    f"expected profile files for {run.label}"
+                )
+
+    # Populate per-bucket entries from artifacts written by children.
+    new_rows: List[Dict[str, Any]] = []
+    for p in planned:
+        bs = int(p["batch_size"])
+        b_il = int(p["input_len"])
+        b_ol = int(p["output_len"])
+        tag = p["tag"]
+        baseline_log = Path(p["baseline_log"])
+        opt_log = Path(p["opt_log"])
+        baseline_json = Path(p["baseline_json"])
+        opt_json = Path(p["opt_json"])
+
+        baseline_runner_json = json_dir / f"{baseline_label}_{tag}.runner.json"
+        opt_runner_json = json_dir / f"{opt_label}_{tag}.runner.json"
+
+        baseline_text = ""
+        opt_text = ""
+        if baseline_log.exists():
+            baseline_text = baseline_log.read_text(encoding="utf-8", errors="replace")
+        if opt_log.exists():
+            opt_text = opt_log.read_text(encoding="utf-8", errors="replace")
+
+        baseline_raw = _read_json(baseline_json) if baseline_json.exists() else {}
+        opt_raw = _read_json(opt_json) if opt_json.exists() else {}
+
+        baseline_metrics = _metrics_from_vllm_latency_json(baseline_raw) or _parse_latency_metrics(baseline_text)
+        opt_metrics = _metrics_from_vllm_latency_json(opt_raw) or _parse_latency_metrics(opt_text)
+
+        baseline_evidence = _check_patterns(baseline_text, baseline_run.require_patterns, baseline_run.forbid_patterns)
+        opt_evidence = _check_patterns(opt_text, opt_run.require_patterns, opt_run.forbid_patterns)
+
+        baseline_status = _read_json(baseline_runner_json) if baseline_runner_json.exists() else {"ok": None}
+        opt_status = _read_json(opt_runner_json) if opt_runner_json.exists() else {"ok": None}
+
+        baseline_entry = {
+            "ok": baseline_status.get("ok"),
+            "returncode": 0 if baseline_status.get("ok") else 1,
+            "cmd": p["baseline_cmd"],
+            "env_overrides": baseline_env,
+            "metrics": baseline_metrics,
+            "avg_s": baseline_metrics.get("avg_s"),
+            "fastpath_evidence": {
+                **baseline_evidence,
+                "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
+            },
+            "log": str(baseline_log.relative_to(out_root)),
+            "output_json": str(baseline_json.relative_to(out_root)),
+            "runner_json": str(baseline_runner_json.relative_to(out_root)),
+            "timing": {
+                "start_time": baseline_status.get("start_time"),
+                "end_time": baseline_status.get("end_time"),
+                "duration_s": baseline_status.get("duration_s"),
+            },
+        }
+        opt_entry = {
+            "ok": opt_status.get("ok"),
+            "returncode": 0 if opt_status.get("ok") else 1,
+            "cmd": p["opt_cmd"],
+            "env_overrides": {**baseline_env, **opt_env},
+            "metrics": opt_metrics,
+            "avg_s": opt_metrics.get("avg_s"),
+            "fastpath_evidence": {
+                **opt_evidence,
+                "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
+            },
+            "log": str(opt_log.relative_to(out_root)),
+            "output_json": str(opt_json.relative_to(out_root)),
+            "runner_json": str(opt_runner_json.relative_to(out_root)),
+            "timing": {
+                "start_time": opt_status.get("start_time"),
+                "end_time": opt_status.get("end_time"),
+                "duration_s": opt_status.get("duration_s"),
+            },
+        }
+
+        new_row: Dict[str, Any] = {
+            "batch_size": bs,
+            "input_len": b_il,
+            "output_len": b_ol,
+            baseline_label: baseline_entry,
+            opt_label: opt_entry,
+        }
+
+        b_avg = baseline_entry.get("avg_s")
+        o_avg = opt_entry.get("avg_s")
+        if isinstance(b_avg, (int, float)) and isinstance(o_avg, (int, float)) and o_avg > 0:
+            speedup = b_avg / o_avg
+            improvement_pct = (b_avg - o_avg) / b_avg * 100.0 if b_avg != 0 else None
+            new_row["speedup"] = speedup
+            new_row["improvement_pct"] = improvement_pct
+
+        new_rows.append(new_row)
+
+        if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
+            raise SystemExit(
+                f"Fast-path evidence FAILED for opt at {tag}. "
+                f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
+                f"See {opt_log}"
             )
 
-            baseline_text = baseline_log.read_text(encoding="utf-8", errors="replace") if baseline_log.exists() else ""
-            opt_text = opt_log.read_text(encoding="utf-8", errors="replace") if opt_log.exists() else ""
-
-            baseline_raw = _read_json(baseline_json) if baseline_json.exists() else {}
-            opt_raw = _read_json(opt_json) if opt_json.exists() else {}
-
-            baseline_metrics = _metrics_from_vllm_latency_json(baseline_raw) or _parse_latency_metrics(baseline_text)
-            opt_metrics = _metrics_from_vllm_latency_json(opt_raw) or _parse_latency_metrics(opt_text)
-
-            baseline_evidence = _check_patterns(baseline_text, baseline_run.require_patterns, baseline_run.forbid_patterns)
-            opt_evidence = _check_patterns(opt_text, opt_run.require_patterns, opt_run.forbid_patterns)
-
-            baseline_entry: Dict[str, Any] = {
-                "ok": baseline_res.get("ok"),
-                "returncode": baseline_res.get("returncode"),
-                "cmd": baseline_cmd,
-                "env_overrides": baseline_env,
-                "metrics": baseline_metrics,
-                "avg_s": baseline_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **baseline_evidence,
-                    "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
-                },
-                "runtime_fastpath_proof": {
-                    "status": "unknown",
-                    "source": "not_applicable",
-                    "hits": 0,
-                },
-                "admissibility": _classify_admissibility(ok=bool(baseline_res.get("ok")), text=baseline_text),
-                "log": str(baseline_log.relative_to(out_root)),
-                "output_json": str(baseline_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": baseline_res.get("start_time"),
-                    "end_time": baseline_res.get("end_time"),
-                    "duration_s": baseline_res.get("duration_s"),
-                },
-            }
-
-            opt_entry: Dict[str, Any] = {
-                "ok": opt_res.get("ok"),
-                "returncode": opt_res.get("returncode"),
-                "cmd": opt_cmd,
-                "env_overrides": {**baseline_env, **opt_env},
-                "metrics": opt_metrics,
-                "avg_s": opt_metrics.get("avg_s"),
-                "fastpath_evidence": {
-                    **opt_evidence,
-                    "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
-                },
-                "runtime_fastpath_proof": all_runs["runtime_fastpath_proof"],
-                "admissibility": _classify_admissibility(ok=bool(opt_res.get("ok")), text=opt_text),
-                "log": str(opt_log.relative_to(out_root)),
-                "output_json": str(opt_json.relative_to(out_root)),
-                "timing": {
-                    "start_time": opt_res.get("start_time"),
-                    "end_time": opt_res.get("end_time"),
-                    "duration_s": opt_res.get("duration_s"),
-                },
-            }
-
-            row: Dict[str, Any] = {
-                "batch_size": bs,
-                baseline_label: baseline_entry,
-                opt_label: opt_entry,
-            }
-
-            # Compute deltas.
-            b_avg = baseline_entry.get("avg_s")
-            o_avg = opt_entry.get("avg_s")
-            if isinstance(b_avg, (int, float)) and isinstance(o_avg, (int, float)) and o_avg > 0:
-                speedup = b_avg / o_avg
-                improvement_pct = (b_avg - o_avg) / b_avg * 100.0 if b_avg != 0 else None
-                row["speedup"] = speedup
-                row["improvement_pct"] = improvement_pct
-
-            new_rows.append(row)
-
-            if args.require_fastpath and opt_patterns_configured and not opt_evidence.get("ok"):
-                raise SystemExit(
-                    f"Fast-path evidence FAILED for opt at BS={bs}. "
-                    f"Missing={opt_evidence.get('require_miss')}, forbidden_hits={opt_evidence.get('forbid_hits')}. "
-                    f"See {opt_log}"
-                )
-        all_runs["results"] = new_rows
+    all_runs["results"] = new_rows
 
     # Write outputs.
     _write_json(out_json_path, all_runs)
@@ -1601,7 +1609,12 @@ def main() -> None:
     md_lines.append("## Workload")
     md_lines.append("")
     md_lines.append(f"- model_id: {model_id}")
-    md_lines.append(f"- input_len: {input_len}, output_len: {output_len}")
+    if has_matrix:
+        md_lines.append(f"- buckets: {len(buckets)} (workload_matrix)")
+        for i, b in enumerate(buckets):
+            md_lines.append(f"  - [{i}] input_len={b['input_len']}, output_len={b['output_len']}, batch_size={b['batch_size']}")
+    else:
+        md_lines.append(f"- input_len: {input_len}, output_len: {output_len}")
     md_lines.append(f"- tp: {tp}, max_model_len: {max_model_len}")
     md_lines.append(f"- num_iters: {num_iters}")
     md_lines.append("")
