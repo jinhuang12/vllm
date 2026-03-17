@@ -28,10 +28,13 @@ User provides: model_id, hardware, dtype, tp.
 
 Lead (you) scaffolds artifact directory, orchestrates the **campaign loop** — an iterative pipeline of 7 stages that repeats until diminishing returns. Each iteration (round) discovers, debates, and implements optimizations against the current bottleneck landscape.
 
+Before calling `new_target.py`, determine target batch sizes. If the user specified batch sizes, pass them via `--batch-sizes`. If not, use the default `[1, 8, 32]`. Batch sizes define the decode buckets for all profiling and validation throughout the campaign.
+
 ```bash
 python .claude/skills/ammo/scripts/new_target.py \
   --artifact-dir kernel_opt_artifacts/{model}_{hardware}_{dtype}_tp{tp} \
-  --model-id <MODEL_ID> --hardware <HW> --dtype <DTYPE> --tp <TP>
+  --model-id <MODEL_ID> --hardware <HW> --dtype <DTYPE> --tp <TP> \
+  [--batch-sizes 1 8 32]
 ```
 
 ## Campaign Workflow
@@ -129,6 +132,8 @@ When a candidate ships and triggers re-profiling, other tracks from the same rou
 **Profiling strategy selection (lead decides BEFORE dispatching researcher)**:
 For TP > 1 or models > 10B params, the lead should instruct the researcher to use two-step delimited capture. The researcher handles this automatically when using the sweep script with `--nsys-profile` (it sets `VLLM_WORKER_MULTIPROC_METHOD=spawn`, `--trace-fork-before-exec=true`, and `--capture-range=cudaProfilerApi`). See `references/nsys-profiling-guide.md` §3.1B for background on why full-run capture hangs on multi-GPU models.
 
+When `--nsys-profile` is used, the sweep script automatically restricts `cudagraph_capture_sizes` to match `workload.batch_sizes` from target.json. This reduces the CUDA graph capture surface from ~50 default sizes to only the profiled batch sizes, mitigating `--cuda-graph-trace=node` replay hangs. This is NOT a parity violation — the profiled sizes are exact matches in vLLM's default capture list, so the graphs are identical to production.
+
 ### Stage 3: Candidate Proposal + Adversarial Debate
 
 - **TeamCreate**: `ammo-debate-{model_short}-{hardware}`
@@ -222,7 +227,7 @@ T_async: Next-round debate                                [main + debate team]  
 
 These are NOT advisory. Violation blocks stage progression.
 
-1. **Production parity**: CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `TORCH_COMPILE_DISABLE=1`, `--enforce-eager`, `VLLM_TORCH_COMPILE_LEVEL=0`. *(Enforced by `ammo-pretool-guard.sh` PreToolUse hook)*
+1. **Production parity**: CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `TORCH_COMPILE_DISABLE=1`, `--enforce-eager`, `VLLM_TORCH_COMPILE_LEVEL=0`. *(Enforced by `ammo-pretool-guard.sh` PreToolUse hook)* Note: restricting `cudagraph_capture_sizes` to match profiled batch sizes during nsys capture is acceptable and does not violate production parity — these sizes are exact matches in the default capture list.
 2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
 4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Enforced by `ammo-pretool-guard.sh` — raw `vllm bench latency` blocked)*

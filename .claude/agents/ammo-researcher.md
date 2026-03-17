@@ -25,7 +25,7 @@ You may be invoked as a standalone subagent (no team context) for Stages 1-2, or
 
 ## Responsibilities
 
-- **Baseline capture**: Run nsys profiling under production parity (CUDA graphs + torch.compile), capture environment, extract kernel timings. Default: batch size 8 only
+- **Baseline capture**: Run E2E baseline and nsys profiling for all batch sizes defined in `target.json` (under `workload.batch_sizes`, default: [1, 8, 32]).
 - **Source analysis**: Read vLLM source code for the target component, trace forward paths, document correctness invariants in constraints.md
 - **Bottleneck mining**: Analyze nsys traces to produce GROUNDED data: top-K kernels by GPU time, component shares (`f`), per-kernel bandwidth utilization, kernel-to-code mapping, kernel chain analysis. Compute physical bounds (BW headroom, Amdahl's Law ceiling). Rank candidates by `f × physical_ceiling` only.
 
@@ -58,6 +58,8 @@ python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
 ```
 
 This loads the model ONCE per label, benchmarks all batch sizes from target.json, AND captures per-bucket nsys traces in `{artifact_dir}/e2e_latency/nsys/`. The target.json in the artifact dir controls model, workload, and env config.
+
+Batch sizes are defined in `{artifact_dir}/target.json` under `workload.batch_sizes`. The sweep script reads these automatically — you do not need to specify them on the command line.
 
 **E2E baseline only (no nsys)**:
 ```bash

@@ -39,6 +39,7 @@ Before starting implementation, read the debate artifacts for your assigned cand
 1. Your champion's proposal in `{artifact_dir}/debate/proposals/` (specified in your spawn prompt)
 2. `{artifact_dir}/debate/summary.md` for the full debate context, including critiques and conceded weaknesses
 3. Any delegate research files cited in the proposal (look for `[Source: delegate-*]` references pointing to `{artifact_dir}/debate/delegate_work/`). These contain hardware specs, integration patterns, and pitfall analysis that inform implementation decisions.
+4. `{artifact_dir}/target.json` — read `workload.batch_sizes` to find the target batch sizes. All kernel correctness tests (Gate 5.1) and kernel benchmarks (Gate 5.2) must cover these sizes. E2E benchmarks (Gate 5.3) use the sweep script which reads them automatically.
 
 ### Phase 1: Implementation
 - Implement kernel optimization per the approved optimization_plan.md
@@ -98,7 +99,7 @@ Before starting implementation, read the debate artifacts for your assigned cand
 
 ### Gate 5.3: E2E Latency
 - Meet kill criteria from optimization_plan.md
-- Default: ≥3% improvement on target batch sizes, no regression on non-target sizes
+- Default: ≥3% improvement on target batch sizes, no regression on non-target sizes. Target batch sizes are defined in `{artifact_dir}/target.json` under `workload.batch_sizes`.
 - If regressions on non-target BS: proceed only if optimization can be gated to improved BS
 - FORBIDDEN: Do not use raw `vllm bench latency` commands. Use ONLY the sweep script (`scripts/run_vllm_bench_latency_sweep.py`) for all E2E measurements. This ensures GPU locking, structured output, and production parity checks.
 
