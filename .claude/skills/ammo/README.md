@@ -1,94 +1,128 @@
 # AMMO - Automated Model Micro-Optimizer
 
-A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment target (model, hardware, dtype, TP), AMMO profiles the inference pipeline, identifies bottlenecks, debates optimization strategies adversarially, implements and validates candidates in parallel worktrees, and ships the ones that pass.
+A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment target (model, hardware, dtype, TP), AMMO profiles the inference pipeline, identifies bottlenecks, debates optimization strategies adversarially, implements and validates candidates in parallel worktrees, and ships the ones that pass. The campaign loops until diminishing returns.
 
-## Workflow Diagram
+## Campaign Workflow
 
 ```
-                              AMMO 6-Stage Pipeline
- ============================================================================
+                            AMMO Campaign Pipeline
+ ================================================================================
 
- Stage 1: Baseline Capture                    Stage 2: Bottleneck Mining
- ┌─────────────────────────┐                  ┌──────────────────────────────┐
- │  Lead scaffolds target   │                  │  ammo-researcher subagent    │
- │  ammo-researcher profiles│─── GATE ────────>│  Grounded data only:         │
- │  under production parity │  verify_phase1   │  - Top-K kernels by GPU time │
- │  (CUDA graphs + compile) │  _baseline.py    │  - Component share f         │
- │                          │                  │  - Bandwidth utilization     │
- │  Output: constraints.md  │                  │  - Physical ceilings         │
- └─────────────────────────┘                  │  NO estimates, NO projections│
-                                               │                              │
-                                               │  Output: bottleneck_analysis │
-                                               └──────────┬───────────────────┘
-                                                          │
-                                                    GATE: no ungrounded
-                                                    estimates allowed
-                                                          │
-                                                          v
- Stage 3: Adversarial Debate
- ┌────────────────────────────────────────────────────────────────────────────┐
- │  TeamCreate: ammo-debate-{component}-{model}-{hw}                         │
- │                                                                            │
- │  ┌──────────┐  ┌──────────┐  ┌──────────┐                                │
- │  │Champion 1│  │Champion 2│  │Champion 3│  (2-4 ammo-champion agents)     │
- │  └────┬─────┘  └────┬─────┘  └────┬─────┘                                │
- │       │              │              │                                      │
- │  Phase 0: Independent proposals + micro-experiments                       │
- │       │              │              │                                      │
- │  Rounds 1-2: Evidence ──> Critique ──> Rebuttal                           │
- │       │              │              │                                      │
- │       └──────────────┼──────────────┘                                     │
- │                      v                                                     │
- │  Lead scores via rubric ──> Select 2-3 winners ──> TeamDelete             │
- │                                                                            │
- │  Output: debate/summary.md                                                │
- └────────────────────────────────────────────────────┬───────────────────────┘
-                                                      │
-                                                      v
- Stages 4-5: Parallel Worktree Tracks
- ┌────────────────────────────────────────────────────────────────────────────┐
- │                                                                            │
- │  Track A (worktree)              Track B (worktree)                       │
- │  ┌─────────────────────┐         ┌─────────────────────┐                  │
- │  │ ammo-implementer    │         │ ammo-implementer    │                  │
- │  │ - Write kernel code │         │ - Write kernel code │                  │
- │  │ - Correctness tests │         │ - Correctness tests │                  │
- │  │ - Kernel benchmarks │         │ - Kernel benchmarks │   GPU isolated   │
- │  │ - E2E benchmarks    │         │ - E2E benchmarks    │   E2E via flock  │
- │  └─────────┬───────────┘         └─────────┬───────────┘                  │
- │     Stop hook (DA):                Stop hook (DA):                        │
- │     Amdahl's check,               Amdahl's check,                        │
- │     baseline, parity              baseline, parity                        │
- │       GATE: compiles?                 GATE: compiles?                     │
- │            │                               │                              │
- │            v                               v                              │
- │  tracks/OP-001/                  tracks/OP-002/                           │
- │  validation_results.md           validation_results.md                    │
- └────────────────────────────────────────────────────┬───────────────────────┘
-                                                      │
-                                                      v
- Stage 6: Integration Validation
- ┌────────────────────────────────────────────────────────────────────────────┐
- │                                                                            │
- │  Disjoint files?  ──yes──>  Cherry-pick both, re-run E2E ──>  SHIP       │
- │       │                                                                    │
- │       no (overlapping)                                                     │
- │       │                                                                    │
- │       └──> Pick best E2E single candidate ──>  SHIP                       │
- │                                                                            │
- │  None pass?  ──>  EXHAUSTED                                               │
- └────────────────────────────────────────────────────────────────────────────┘
+ The campaign is an iterative loop of 7 stages. Each iteration (round) discovers,
+ debates, and implements optimizations. The loop repeats until the top bottleneck
+ falls below the diminishing returns threshold (default 3%).
+
+ ┌─────────────────────────────────────────────────────────────────────────────────┐
+ │                          ROUND N (Stages 1-7)                                  │
+ │                                                                                │
+ │  Stage 1: Baseline Capture               Stage 2: Bottleneck Mining            │
+ │  ┌──────────────────────────┐             ┌───────────────────────────────┐     │
+ │  │  Lead scaffolds target    │             │  ammo-researcher subagent     │     │
+ │  │  ammo-researcher profiles │── GATE ───>│  Grounded data only:          │     │
+ │  │  under production parity  │ verify_    │  - Top-K kernels by GPU time  │     │
+ │  │  (CUDA graphs + compile)  │ phase1_    │  - Component share f          │     │
+ │  │                           │ baseline   │  - Bandwidth utilization      │     │
+ │  │  Output: constraints.md   │ .py        │  - Physical ceilings          │     │
+ │  └──────────────────────────┘             │  NO estimates, NO projections │     │
+ │                                            │                               │     │
+ │                                            │  Output: bottleneck_analysis  │     │
+ │                                            └──────────────┬────────────────┘     │
+ │                                                           │                      │
+ │                                                     GATE: no ungrounded          │
+ │                                                     estimates allowed             │
+ │                                                           │                      │
+ │                                                           v                      │
+ │  Stage 3: Adversarial Debate                                                     │
+ │  ┌──────────────────────────────────────────────────────────────────────────┐    │
+ │  │  TeamCreate: ammo-debate-{component}-{model}-{hw}                       │    │
+ │  │                                                                          │    │
+ │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                              │    │
+ │  │  │Champion 1│  │Champion 2│  │Champion 3│  (2-4 ammo-champion agents)   │    │
+ │  │  └────┬─────┘  └────┬─────┘  └────┬─────┘                              │    │
+ │  │       │              │              │                                    │    │
+ │  │  Phase 0: Independent proposals + micro-experiments                     │    │
+ │  │       │  GATE: Custom Kernel Mandate (config-only → reject)             │    │
+ │  │  Rounds 1-2: Evidence ──> Critique ──> Rebuttal                         │    │
+ │  │       │              │              │                                    │    │
+ │  │       └──────────────┼──────────────┘                                   │    │
+ │  │                      v                                                   │    │
+ │  │  Lead scores via rubric ──> Select 2-3 winners ──> TeamDelete           │    │
+ │  │  Output: debate/summary.md                                              │    │
+ │  └──────────────────────────────────────────────────────────┬───────────────┘    │
+ │                                                              │                   │
+ │                                                              v                   │
+ │  Stages 4-5: Parallel Worktree Tracks (3 steps, in order)                       │
+ │  ┌──────────────────────────────────────────────────────────────────────────┐    │
+ │  │                                                                          │    │
+ │  │  STEP 1: Spawn implementers                                             │    │
+ │  │  ┌─────────────────────────┐       ┌─────────────────────────┐          │    │
+ │  │  │ Track A (worktree)      │       │ Track B (worktree)      │          │    │
+ │  │  │ ammo-implementer        │       │ ammo-implementer        │          │    │
+ │  │  │ - Write kernel code     │       │ - Write kernel code     │          │    │
+ │  │  │ - Correctness tests     │       │ - Correctness tests     │          │    │
+ │  │  │ - Kernel benchmarks     │       │ - Kernel benchmarks     │  GPU     │    │
+ │  │  │ - E2E via sweep script  │       │ - E2E via sweep script  │ isolated │    │
+ │  │  └─────────┬───────────────┘       └─────────┬───────────────┘          │    │
+ │  │            │                                  │                          │    │
+ │  │  STEP 2: Launch async debate (MANDATORY round 2+, skip round 1)         │    │
+ │  │  ╔═══════════════════════════════════════════════════════════╗           │    │
+ │  │  ║  New debate team from EXISTING bottleneck data            ║           │    │
+ │  │  ║  Full adversarial protocol (same as Stage 3)              ║           │    │
+ │  │  ║  Winners → campaign.pending_queue (NOT implementation)    ║           │    │
+ │  │  ║  Set debate.async_round_started = true                    ║           │    │
+ │  │  ╚═══════════════════════════════════════════════════════════╝           │    │
+ │  │                                                                          │    │
+ │  │  STEP 3: Monitor and gate (do NOT stop until ALL complete)              │    │
+ │  │  - Gate each implementer (T9: compilation check, T10: state update)     │    │
+ │  │  - Moderate async debate concurrently                                    │    │
+ │  │  - Wait for ALL implementers AND async debate before Stage 6            │    │
+ │  │                                                                          │    │
+ │  └──────────────────────────────────────────────────────────┬───────────────┘    │
+ │                                                              │                   │
+ │                                                              v                   │
+ │  Stage 6: Integration Validation                                                 │
+ │  ┌──────────────────────────────────────────────────────────────────────────┐    │
+ │  │  Disjoint files?  ──yes──>  Cherry-pick both, re-run E2E ──>  SHIP     │    │
+ │  │       │                                                                  │    │
+ │  │       no (overlapping)                                                   │    │
+ │  │       └──> Pick best E2E single candidate ──>  SHIP                     │    │
+ │  │                                                                          │    │
+ │  │  None pass?  ──>  round EXHAUSTED (not campaign-level)                  │    │
+ │  └──────────────────────────────────────────────────────────┬───────────────┘    │
+ │                                                              │                   │
+ └──────────────────────────────────────────────────────────────┼───────────────────┘
+                                                                │
+                                                                v
+ Stage 7: Campaign Evaluation
+ ┌─────────────────────────────────────────────────────────────────────────────────┐
+ │                                                                                 │
+ │  IF SHIP:                              IF round EXHAUSTED:                      │
+ │    1. Record shipped candidates          1. Record failed round                 │
+ │    2. Update cumulative speedup          2. Check diminishing returns           │
+ │    3. Re-profile (new baseline)             on EXISTING profile (no re-profile) │
+ │    4. Bottleneck mining on new baseline     │                                   │
+ │    5. Invalidate stale pending_queue        │                                   │
+ │    6. Check diminishing returns             │                                   │
+ │       │                                     │                                   │
+ │       v                                     v                                   │
+ │  top bottleneck < 3%?                  top bottleneck < 3%?                     │
+ │    YES → campaign_complete               YES → campaign_exhausted               │
+ │    NO  → next round (Stage 3)            NO  → new debate from existing data    │
+ │                                                                                 │
+ │  On campaign_complete or campaign_exhausted:                                    │
+ │    → Spawn report subagent (background) → REPORT.md                            │
+ └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## File Structure
 
 ```
 .claude/skills/ammo/
-├── SKILL.md                              # Main orchestration (6-stage pipeline, task graph, non-negotiables)
-├── README.md                             # This file
+├── SKILL.md                              # Main orchestration (campaign loop, task graph, non-negotiables)
+├── README.md                             # This file (workflow diagram, test suite)
 ├── orchestration/
 │   ├── debate-protocol.md                # Stage 3: team setup, phases, convergence criteria
-│   ├── parallel-tracks.md                # Stages 4-5: worktree creation, GPU assignment, pass criteria
+│   ├── parallel-tracks.md                # Stages 4-5: worktree creation, GPU assignment, async debate, pass criteria
 │   └── integration-logic.md              # Stage 6: conflict detection, cherry-pick, decision matrix
 ├── references/
 │   ├── debate-scoring-rubric.md          # 6-criterion weighted scoring (min 5.0 to advance)
@@ -103,6 +137,10 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 │   ├── gpu-configs.md                    # Hardware specs (SMEM, registers, TMA availability)
 │   ├── optimization-techniques.md        # Technique catalog T1-T14
 │   └── code-templates.md                 # GPU kernel patterns (token-major, expert-major)
+├── eval/                                 # Skill evaluation pipeline
+│   └── ...
+├── report/
+│   └── SKILL.md                          # Report generation skill (for T20 subagent)
 └── scripts/
     ├── new_target.py                     # Scaffold artifact directory + state.json
     ├── collect_env.py                    # Capture environment snapshot
@@ -114,7 +152,8 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 .claude/agents/
 ├── ammo-researcher.md      # Profiling + bottleneck mining (grounded data only, NO estimates)
 ├── ammo-champion.md        # Debate: proposes candidates, runs micro-experiments, argues with data
-└── ammo-implementer.md     # Implements kernel + runs full validation (correctness, kernel bench, E2E) in isolated worktree
+├── ammo-delegate.md        # Research assistant for champions during debate (Sonnet model)
+└── ammo-implementer.md     # Implements kernel + runs full validation in isolated worktree
 ```
 
 ## Specialized Agents
@@ -123,20 +162,66 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 |-------|------|----------------|
 | **ammo-researcher** | Profiles baseline, mines bottlenecks | Cannot make feasibility estimates or E2E projections |
 | **ammo-champion** | Proposes optimizations, argues in debate | Must back claims with micro-experiments |
+| **ammo-delegate** | Research assistant for champions (optional) | No GPU benchmarks, no source modifications, 15-min timeout |
 | **ammo-implementer** | Implements kernel + runs full validation (correctness, kernel bench, E2E) | Works in isolated worktree; frontmatter Stop hook (DA) enforces validation + Amdahl's sanity |
 
-The **lead** (main Claude session) orchestrates all stages, manages `state.json`, owns all gates, spawns DA audit agents after each implementer completes, and never writes kernel code directly.
+The **lead** (main Claude session) orchestrates all stages, manages `state.json`, owns all gates, and never writes kernel code directly.
 
 ## Non-Negotiables
 
-1. **Production parity** - CUDA graphs + torch.compile in ALL measurements
+1. **Production parity** - CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, `VLLM_TORCH_COMPILE_LEVEL=0`
 2. **vLLM baseline** - Compare against production kernel, not naive PyTorch
 3. **Numerical correctness** - `torch.allclose()` mandatory in every test
-4. **GPU sequencing** - E2E benchmarks sequential via flock
+4. **GPU sequencing** - E2E benchmarks sequential via flock. Must use `run_vllm_bench_latency_sweep.py` — raw `vllm bench latency` is FORBIDDEN
 5. **Full-model E2E** - Download weights, never skip
 6. **E2E delta math** - `improvement = f x kernel_speedup` (small `f` = small E2E, not a bug)
+7. **Custom kernel mandate** - Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected at Phase 0.
 
-> **Note**: The example below predates the **Custom Kernel Mandate** (Non-Negotiables #7). Under current rules, OP-001 (Triton config autotuning — config-only, zero code changes) would be rejected at the Phase 0 eligibility gate. Only OP-002 (new fused CUDA kernel) would advance to debate rounds. The example is retained for workflow illustration.
+## Hook Enforcement
+
+| Hook Event | Script | Purpose |
+|------------|--------|---------|
+| **Stop** | `ammo-stop-guard.sh` | Blocks session end if campaign is active (file-based circuit breaker: blocks once, then allows) |
+| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Blocks `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` |
+| **PreCompact** | `ammo-precompact.sh` | Saves campaign state checkpoint before compaction |
+| **SessionStart** | `ammo-postcompact.sh` | Injects resume context after compaction |
+
+---
+
+## Conformance Test Suite
+
+47 scenarios across 4 test files verify that the orchestrator and all subagents correctly understand and follow the AMMO workflow.
+
+| Test File | Agent | Scenarios | Baseline |
+|-----------|-------|-----------|----------|
+| [`tests/agents/test-orchestrator.md`](tests/agents/test-orchestrator.md) | Lead orchestrator | 19 (workflow, async debate, resume, campaign eval, integration, violations) | 19/19 |
+| [`tests/agents/test-researcher.md`](tests/agents/test-researcher.md) | ammo-researcher | 8 (grounded data, profiling strategy, production parity, steady-state) | 8/8 |
+| [`tests/agents/test-champion.md`](tests/agents/test-champion.md) | ammo-champion | 10 (kernel mandate, micro-experiments, CUDA graphs, cache, delegation, debate) | 10/10 |
+| [`tests/agents/test-implementer.md`](tests/agents/test-implementer.md) | ammo-implementer | 10 (baseline reuse, sweep script, parity, scope, Amdahl, build, contamination) | 10/10 |
+
+### Run All Tests
+
+```
+Run the AMMO conformance test suite. Execute each test file in
+.claude/skills/ammo/tests/agents/ (test-orchestrator.md, test-researcher.md,
+test-champion.md, test-implementer.md). For each file, spawn a Sonnet subagent
+that reads the referenced agent definitions, role-plays as the target agent,
+and answers each scenario. Grade responses against "Expected Behavior".
+Report pass/fail per scenario and overall.
+```
+
+### Run a Single Agent's Tests
+
+```
+Run the AMMO orchestrator conformance tests from
+.claude/skills/ammo/tests/agents/test-orchestrator.md
+```
+
+Each test file is self-contained with: scenario descriptions, expected behavior, reference outputs from baseline runs (in `<details>` blocks), and grading criteria.
+
+---
+
+> **Note on the example below**: It predates the **Custom Kernel Mandate** (Non-Negotiables #7). Under current rules, OP-001 (Triton config autotuning — config-only, zero code changes) would be rejected at the Phase 0 eligibility gate. Only OP-002 (new fused CUDA kernel) would advance to debate rounds. The example is retained for workflow illustration.
 
 ## Example Session: Qwen3.5-35B-A3B-FP8 on L40S (TP=2)
 
@@ -238,166 +323,3 @@ kernel_opt_artifacts/auto_Qwen3.5-35B-A3B-FP8_L40S_fp8_tp2/
     └── OP-002/                   # SiLU+quant fusion track
         └── validation_results.md
 ```
-
----
-
-## Changes from Deprecated Version (ammo-old)
-
-The skill was rewritten from the ground up. Here is what changed:
-
-### Scope: MoE-only -> General GPU Kernels
-
-| | Old | New |
-|---|---|---|
-| **Name** | Automated **MoE** Model Optimizer | Automated Model **Micro**-Optimizer |
-| **Scope** | MoE kernel fusion only (fused_moe, monokernels) | Any GPU kernel bottleneck (matmul, attention, activation, quantization, ...) |
-| **Target** | Fixed fusion boundary decision tree (cooperative monokernel / hybrid / split) | Bottleneck-driven — profiles first, decides technique from data |
-
-### Architecture: Monolithic -> Specialized Agents
-
-| | Old | New |
-|---|---|---|
-| **Agents** | Generic `general-purpose` Task subagents | 3 specialized types: `ammo-researcher`, `ammo-champion`, `ammo-implementer` + orchestrator-spawned DA audit |
-| **Roles** | Subagent does entire phase | Each agent has strict role boundaries (researcher can't estimate, implementer implements + validates, DA audits methodology) |
-| **Context** | All context passed via task prompts | Agents have dedicated `.claude/agents/` definitions with built-in guardrails |
-
-### Decision Making: LLM Council -> Adversarial Debate
-
-| | Old | New |
-|---|---|---|
-| **Candidate selection** | Orchestrator picks optimization route via decision tree | 2-4 champion agents propose independently, debate with micro-experiments, scored by rubric |
-| **De-risking** | Optional LLM Council for high-risk decisions | Mandatory adversarial debate with evidence requirements |
-| **Estimates** | Champions and researcher could both estimate | Strict separation: researcher provides grounded data only, champions derive estimates from their own micro-experiments |
-
-### Execution: Sequential -> Parallel Worktrees
-
-| | Old | New |
-|---|---|---|
-| **Tracks** | Single optimization attempt, sequential phases | 2-3 candidates implemented in parallel git worktrees |
-| **Isolation** | Shared codebase | Each track gets `git worktree add .claude/worktrees/ammo-track-{id}` |
-| **GPU management** | Manual | Kernel benchmarks on separate GPUs, E2E sequential via `flock` |
-| **Integration** | Manual merge | Automated conflict detection + cherry-pick + re-validation |
-
-### Workflow: 5 Phases -> 6 Stages
-
-| Old (5 phases) | New (6 stages) |
-|---|---|
-| Phase 1: Constraints | Stage 1: Baseline Capture |
-| Phase 2: Planning | Stage 2: Bottleneck Mining (grounded data only) |
-| *(no equivalent)* | **Stage 3: Adversarial Debate** (new) |
-| Phase 3: Implementation | Stage 4: Parallel Implementation (in worktrees) |
-| Phase 4: Validation | Stage 5: Parallel Validation (per-track) |
-| Phase 5: Integration | Stage 6: Integration Validation |
-
-### Removed
-
-- **MoE-specific references**: `route-selection-decision-tree.md`, `architecture-pattern.md`, `algorithmic-branching.md`, `tiling-config.md`, `expert-grouping.md`, `hybrid-large-grid-fusion.md`, `router-design.md`, `moe-parameters-template.md`, `profiling-launch-vs-kernel.md`, `scope-and-support.md`, `state-schema.md`
-- **Hardcoded examples**: `LLAMA4_MONOKERNEL_PATCH.md`, `MOE_MONOKERNEL_OPTIMIZATION_GUIDE.md`, `QWEN3_BASELINE.md`, `MODELS_COMPARISON.md`, `W1_EPILOGUE_FUSION.md`
-- **LLM Council**: Replaced by adversarial debate
-- **Task prompts file**: `orchestration/task-prompts.md` replaced by agent definitions in `.claude/agents/`
-- **Verification commands**: `orchestration/verification-commands.md` replaced by gate scripts
-
-### Added
-
-- **Debate infrastructure**: `orchestration/debate-protocol.md`, `references/debate-scoring-rubric.md`, debate artifact structure
-- **Parallel execution**: `orchestration/parallel-tracks.md`, `orchestration/integration-logic.md`
-- **New references**: `e2e-latency-guide.md`, `validator-troubleshooting.md`
-- **New scripts**: `verify_validation_gates.py` (per-track), `generate_validation_report.py`
-- **Agent definitions**: 3 specialized agents in `.claude/agents/ammo-*.md` (implementer now includes validation; DA audit spawned by orchestrator)
-- **Lead rules**: Merged into `SKILL.md` Lead Role section (prohibits lead from writing kernel code)
-
----
-
-## Known Bug: SubagentStop Hook Matcher Bypass (Claude Code)
-
-**Severity**: Critical — causes infinite hook cascade, process freeze, 100%+ CPU
-**Affected versions**: 2.1.63, 2.1.68, 2.1.69 (all tested; likely all versions)
-**Status**: Unfixed upstream — file at https://github.com/anthropics/claude-code/issues
-**Discovered**: 2026-03-05 during AMMO session `bd4b9a66`
-
-### Summary
-
-The `SubagentStop` hook `matcher` field in `settings.local.json` is **never evaluated**. All `SubagentStop` hooks fire on every subagent stop, regardless of the matcher value. When the hook itself spawns a subagent (e.g., `type: "agent"`) and that subagent fails, its stop re-triggers the same hook, creating an infinite cascade.
-
-### Root Cause
-
-In the Claude Code hook matching function (extracted from binary via `strings`):
-
-```javascript
-// The query for SubagentStop is set from agent_type
-case "SubagentStop": I = L.agent_type; break;
-
-// Filtering logic:
-let K = (I
-  ? f.filter((J) => !J.matcher || matchFn(I, J.matcher))  // query truthy → filter by matcher
-  : f                                                        // query falsy → return ALL hooks
-).flatMap(...)
-```
-
-`L.agent_type` is **always an empty string** `""` for `SubagentStop` events (even though `SubagentStart` correctly populates it). Since `""` is falsy in JavaScript, the ternary skips the `.filter()` branch and returns all hooks unfiltered. The matcher `"ammo-implementer"` is never checked.
-
-### Cascade Mechanism
-
-1. `ammo-implementer` subagent stops → `SubagentStop` fires
-2. Hook spawns agent to verify validation → agent calls API with invalid Bedrock model ID → 400 error
-3. Hook agent stops → triggers `SubagentStop` again (matcher bypassed)
-4. New hook agent spawned → same error → stops → triggers hook → **infinite loop**
-5. Each iteration accumulates V8 heap objects → RSS grows to 5+ GB → GC thrashing → 100%+ CPU → terminal freezes
-
-In the observed incident: **14,319 hook agents** were spawned over 2 hours before the process was killed.
-
-### Workaround
-
-Since the matcher doesn't work, add a guard **inside the hook prompt** to break the cycle:
-
-```json
-{
-  "SubagentStop": [{
-    "matcher": "ammo-implementer",
-    "hooks": [{
-      "type": "agent",
-      "prompt": "FIRST: Check the agent_id in $ARGUMENTS. If it starts with 'hook-agent-', return {\"ok\": true} immediately — do NOT proceed. Only verify validation for real implementer agents.\n\n... (rest of prompt)",
-      "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-      "timeout": 600
-    }]
-  }]
-}
-```
-
-Also ensure the `model` field uses a valid Bedrock model ARN (not `claude-sonnet-4-6`) to prevent the 400 error that amplifies the cascade.
-
-### Detection
-
-Signs of an active cascade:
-- Claude Code terminal frozen, high CPU (`ps aux | grep claude` shows 100%+ CPU)
-- Debug log growing rapidly: `tail -f ~/.claude/debug/<session-id>.txt` shows repeating `SubagentStop` + `hook-agent-*` entries
-- RSS oscillating wildly (GC thrashing): `watch -n1 'grep VmRSS /proc/<pid>/status'`
-
-Recovery: `kill -9 <pid>` (SIGTERM may not work due to blocked event loop)
-
-### Adversarial Verification
-
-An independent adversarial review (120 tool calls across the Claude Code binary and debug logs) confirmed all findings:
-
-**Why `agent_type` is empty — asymmetric design:**
-- `SubagentStart` has a **dedicated function** (`nmA`) that explicitly passes the agent name as `agent_type`:
-  ```javascript
-  async function* nmA(H, $, A, L) {
-      let D = {..., hook_event_name: "SubagentStart", agent_id: H, agent_type: $};
-      yield* rx({hookInput: D, matchQuery: $, ...});
-  }
-  ```
-- `SubagentStop` uses a **generic stop-hook function** (`$QA`) that reads `agentType` from the execution context — but the context's `agentType` is `undefined` by the time stop hooks fire, so `M ?? ""` coalesces to `""` (falsy), bypassing the filter.
-
-**Empirical evidence (exhaustive):**
-- **28,638 / 28,638** `SubagentStop` events in the incident debug log had empty `agent_type` — zero exceptions
-- Every single one matched `"Matched 1 unique hooks for query 'no match query'"` despite the `"matcher": "ammo-implementer"` filter
-- `SubagentStart` in the same session correctly showed `query: ammo-researcher`
-
-**Built-in vs custom agents:**
-- Built-in agent types (e.g., `claude-code-guide`) DO populate `agent_type` on stop — observed in a separate healthy session where `SubagentStop with query: claude-code-guide` appeared
-- Custom agents defined in `.claude/agents/` (e.g., `ammo-implementer`) do NOT — `agentType` is lost during context propagation from the agent definition to the stop-hook execution path
-
-**Matcher function (`QPM`) is never reached:**
-- The ternary `(I ? f.filter(...) : f)` short-circuits when `I` is falsy
-- Even if `QPM` were called with `QPM("", "ammo-implementer")`, it would correctly return `false` — the bug is upstream of the matcher, not in it

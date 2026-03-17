@@ -24,13 +24,13 @@ You are the **lead orchestrator**. You scaffold, delegate, and gate — you neve
 
 ## Invocation
 
-User provides: model_id, hardware, dtype, tp, component (or "auto").
+User provides: model_id, hardware, dtype, tp.
 
 Lead (you) scaffolds artifact directory, orchestrates the **campaign loop** — an iterative pipeline of 7 stages that repeats until diminishing returns. Each iteration (round) discovers, debates, and implements optimizations against the current bottleneck landscape.
 
 ```bash
 python .claude/skills/ammo/scripts/new_target.py \
-  --artifact-dir kernel_opt_artifacts/{component}_{model}_{hardware}_{dtype}_tp{tp} \
+  --artifact-dir kernel_opt_artifacts/{model}_{hardware}_{dtype}_tp{tp} \
   --model-id <MODEL_ID> --hardware <HW> --dtype <DTYPE> --tp <TP>
 ```
 
@@ -91,7 +91,7 @@ This is a feasibility recheck, NOT a full re-debate — only the f-value has cha
 After each round's integration:
 
 1. Read the top bottleneck's share of total decode latency from profiling data.
-2. Compare against `campaign.diminishing_returns_threshold_pct` (default: 3%).
+2. Compare against `campaign.diminishing_returns_threshold_pct` (default: 0.5%).
 3. If below threshold: no single kernel optimization can yield meaningful E2E gains → **stop**.
 
 **After SHIP**: Re-profile first (bottleneck landscape shifted), then check the NEW top bottleneck.
@@ -131,7 +131,7 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 
 ### Stage 3: Candidate Proposal + Adversarial Debate
 
-- **TeamCreate**: `ammo-debate-{component}-{model_short}-{hardware}`
+- **TeamCreate**: `ammo-debate-{model_short}-{hardware}`
 - Spawn 2-4 ammo-champion agents. Each reads the grounded bottleneck_analysis.md independently.
 - **Delegation**: If `state.json` has `debate.delegation.enabled: true`, also spawn Sonnet delegate agents alongside champions (1-N per champion, configurable via `delegates_per_champion`). Champions direct delegates via SendMessage for research and micro-experiments. See `orchestration/debate-protocol.md` § Delegation.
 - **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists. With delegation, champions may direct delegates to extract profiling data and run roofline calculations.
@@ -142,10 +142,15 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 
 ### Stages 4-5: Parallel Worktree Tracks
 
-- Per track: spawn ammo-implementer as a **subagent** with `isolation: worktree` (NOT as a teammate in a team). This ensures the Stop hook (DA) fires on completion. Do NOT use `team_name` when spawning implementers.
-- The implementer handles BOTH implementation AND validation (correctness, kernel benchmarks, E2E). No separate validator agent.
-- GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
-- See `orchestration/parallel-tracks.md`.
+Execute these steps **in order**:
+
+1. **Spawn implementers**: Per track, spawn ammo-implementer as a **subagent** with `isolation: worktree` (NOT as a teammate in a team). This ensures the Stop hook (DA) fires on completion. Do NOT use `team_name` when spawning implementers. The implementer handles BOTH implementation AND validation (correctness, kernel benchmarks, E2E). No separate validator agent. GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
+
+2. **Launch async debate for round N+1** (MANDATORY for round 2+, skip for round 1): Immediately after spawning implementers, create a new debate team from existing bottleneck data. Follow the full adversarial protocol (Stage 3). Winners go to `campaign.pending_queue` — do NOT send them to implementation yet. Set `debate.async_round_started: true` in state.json when you launch this.
+
+3. **Monitor and gate**: While implementers and async debate run, actively monitor progress. As each implementer completes, run its compilation gate (T9) and update state.json. Do NOT stop or go idle until all implementers have returned results AND the async debate (if launched) has completed.
+
+See `orchestration/parallel-tracks.md`.
 
 ### Stage 6: Integration Validation
 
@@ -253,7 +258,7 @@ Subagent-level hooks (frontmatter in agent definitions):
 
 ```json
 {
-  "target": {"model_id": "...", "hardware": "...", "dtype": "...", "tp": 1, "component": "auto"},
+  "target": {"model_id": "...", "hardware": "...", "dtype": "...", "tp": 1},
   "stage": "1_baseline",
   "summary": "Initialized.",
   "gpu_resources": {"gpu_count": 1, "gpu_model": "...", "memory_total_gib": 0, "cuda_visible_devices": "0"},
@@ -269,7 +274,8 @@ Subagent-level hooks (frontmatter in agent definitions):
       "delegates_per_champion": 1,
       "champion_delegate_mapping": {},
       "delegate_results": {}
-    }
+    },
+    "async_round_started": false
   },
   "stage_timestamps": {   /* lead records ISO timestamps at stage transitions */
     "1_baseline": {"started_at": null, "completed_at": null},
@@ -293,7 +299,7 @@ Subagent-level hooks (frontmatter in agent definitions):
   "campaign": {
     "status": "active",                          /* active | paused | campaign_complete | campaign_exhausted */
     "current_round": 1,
-    "diminishing_returns_threshold_pct": 3,      /* stop when top bottleneck < this % */
+    "diminishing_returns_threshold_pct": 0.5,    /* stop when top bottleneck < this % */
     "cumulative_e2e_speedup": 1.0,               /* multiplicative across shipped rounds */
     "rounds": [],                                /* per-round history (see schema below) */
     "shipped_optimizations": [],                 /* op_ids that shipped across all rounds */
@@ -388,7 +394,7 @@ After interruption or compaction:
 2. Read `state.json` from artifact directory.
 3. Check `campaign.status` and `stage` to determine where you are.
 4. If Stage 3 debate active: check debate artifacts in `debate/` or `debate/campaign_round_N/`.
-5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status.
+5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status. Also check `debate.async_round_started` — if `false` and round > 1, launch the async debate before resuming monitor/gate duties.
 6. Resume from last completed gate.
 7. Read `campaign.current_round`, `campaign.pending_queue`. Check if an async debate was in progress.
 8. If `campaign` key is missing (legacy state.json): treat as round 1 — initialize the campaign object.

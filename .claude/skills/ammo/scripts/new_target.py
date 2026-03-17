@@ -2,8 +2,7 @@
 """ammo v2: scaffold a new target artifact directory.
 
 Creates:
-  - constraints.md, optimization_plan.md, implementation_notes.md,
-    validation_results.md, integration.md
+  - constraints.md
   - state.json (simplified v2 schema)
   - target.json (input for run_vllm_bench_latency_sweep.py)
 
@@ -95,80 +94,6 @@ def _constraints_md(fields: TargetFields) -> str:
 
 """
 
-
-def _optimization_plan_md() -> str:
-    return """# Optimization Plan (Stage 3)
-
-## Optimization approach
-
-- Approach:
-- Rationale (with profiling evidence):
-
-## Feasibility math
-
-- Required savings (per bucket):
-- Upper bound savings (bytes/BW):
-- Kill criteria:
-
-## Implementation plan
-
-1.
-2.
-3.
-
-"""
-
-
-def _implementation_notes_md() -> str:
-    return """# Implementation Notes (Stage 4)
-
-Record:
-- kernel structure and specialization decisions
-- CUDA graphs safety decisions (stream, allocations, stable shapes)
-- how correctness is preserved (component semantics, reduction/accumulation invariants)
-
-"""
-
-
-def _validation_results_md() -> str:
-    return """# Validation Results (Stage 5)
-
-> Default gates + reporting checklist: `references/validation-defaults.md`.
-
-## Correctness
-
-- Status:
-- Tolerance (atol/rtol):
-- Max abs diff:
-
-## Kernel perf (CUDA graphs)
-
-- Bucket set:
-- Baseline vs optimized (µs):
-
-## E2E latency (vllm bench latency)
-
-- Workload:
-- Baseline vs optimized (s):
-
-## Decision
-
-- Ship / Restrict envelope / Pivot route / Stop
-
-"""
-
-
-def _integration_md() -> str:
-    return """# Integration
-
-Record:
-- fast-path enablement envelope (model id, dtype, TP/EP, dims, buckets)
-- fallback behavior
-- how to reproduce validation
-
-"""
-
-
 def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold: int = 3,
                 enable_delegation: bool = True, delegates_per_champion: int = 1) -> Dict[str, Any]:
     return {
@@ -201,6 +126,7 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
                 "champion_delegate_mapping": {},
                 "delegate_results": {},
             },
+            "async_round_started": False,
         },
         "parallel_tracks": {},
         "integration": {
@@ -292,8 +218,8 @@ def main() -> None:
 
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--ep", type=int, default=1)
-    p.add_argument("--diminishing-returns-threshold", type=int, default=3,
-                   help="Stop campaign when top bottleneck < this %% of total latency (default: 3)")
+    p.add_argument("--diminishing-returns-threshold", type=int, default=0.5,
+                   help="Stop campaign when top bottleneck < this %% of total latency (default: 0.5)")
 
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--input-len", type=int, default=64)
@@ -321,11 +247,6 @@ def main() -> None:
     (artifact_dir / "blockers").mkdir(exist_ok=True)
 
     _write_text(artifact_dir / "constraints.md", _constraints_md(fields), force=args.force)
-    _write_text(artifact_dir / "optimization_plan.md", _optimization_plan_md(), force=args.force)
-    _write_text(artifact_dir / "implementation_notes.md", _implementation_notes_md(), force=args.force)
-    _write_text(artifact_dir / "validation_results.md", _validation_results_md(), force=args.force)
-    _write_text(artifact_dir / "integration.md", _integration_md(), force=args.force)
-
     _write_json(artifact_dir / "state.json", _state_json(
         fields, artifact_dir, args.diminishing_returns_threshold,
         enable_delegation=args.enable_delegation,
@@ -334,7 +255,7 @@ def main() -> None:
     _write_json(artifact_dir / "target.json", _target_json(fields, artifact_dir), force=args.force)
 
     print(f"Initialized artifact directory: {artifact_dir}")
-    print("Created: constraints.md, optimization_plan.md, implementation_notes.md, validation_results.md, integration.md, state.json, target.json")
+    print("Created: constraints.md, state.json, target.json")
     print("Next: fill constraints.md (Phase 1) and run collect_env.py")
 
 

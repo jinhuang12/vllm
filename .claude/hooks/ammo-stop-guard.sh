@@ -7,17 +7,26 @@
 # generic prompt that asks the orchestrator to self-assess its workflow
 # state — the same pattern as the Resume Protocol in SKILL.md.
 #
-# Uses stop_hook_active as one-shot circuit breaker:
-#   1st stop attempt: nudge with self-assessment prompt
-#   2nd stop attempt: stop_hook_active=true → allow through
+# Uses file-based one-shot circuit breaker (keyed by session_id):
+#   1st stop attempt: create marker file, nudge with self-assessment prompt
+#   2nd stop attempt: marker file exists → allow through
 set -euo pipefail
 if ! command -v jq &>/dev/null; then exit 0; fi
 
 INPUT=$(cat)
 
-# Circuit breaker: if we already nudged once, let the orchestrator stop.
-STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
-if [ "$STOP_ACTIVE" = "true" ]; then exit 0; fi
+# Circuit breaker: file-based, scoped to session.
+# stop_hook_active only guards against immediate re-stop (no work in between).
+# Our nudge tells Claude to DO work, so the next stop is a new cycle with
+# stop_hook_active=false again — creating an infinite loop. A file marker
+# survives across stop cycles regardless of intervening work.
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
+MARKER="/tmp/ammo-stop-nudged-${SESSION_ID}"
+
+if [ -f "$MARKER" ]; then
+    rm -f "$MARKER"
+    exit 0
+fi
 
 # Find state.json — prefer active campaigns over completed ones.
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
@@ -34,6 +43,9 @@ done
 
 STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILE" 2>/dev/null)
 ROUND=$(jq -r '.campaign.current_round // 1' "$STATE_FILE" 2>/dev/null)
+
+# Drop the marker so the next stop attempt passes through.
+touch "$MARKER"
 
 cat >&2 <<EOF
 AMMO: Campaign is active (stage: $STAGE, round: $ROUND).

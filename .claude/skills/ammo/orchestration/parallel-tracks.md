@@ -128,6 +128,19 @@ Update `state.json` field `parallel_tracks.{op_id}.result` with:
 
 **Note**: The DA audit is embedded in the implementer's frontmatter Stop hook — if the implementer returned successfully, the DA already passed (Amdahl's check, baseline citation, production parity, cross-track awareness). No separate DA artifact is produced.
 
+## Async Debate (Round 2+ Only)
+
+**MANDATORY**: Immediately after spawning all implementer subagents, the orchestrator must also launch a new debate for round N+1 if this is round 2 or later (round 1 has no prior bottleneck data to debate from).
+
+1. Create a new debate team from the EXISTING `bottleneck_analysis.md` (do not re-profile).
+2. Follow the full adversarial protocol — same as Stage 3, no lighter screening.
+3. Winners go to `campaign.pending_queue` in state.json — NOT to implementation.
+4. Set `debate.async_round_started: true` in state.json when the debate team is created.
+
+The async debate runs concurrently with implementers. The orchestrator monitors both: gating implementer results as they complete while also moderating the debate team.
+
+If an implementer ships a candidate (triggering re-profiling later in Stage 7), the in-progress debate should still finish. Queued winners will be re-validated against new profiling data during stale queue handling (see `integration-logic.md` § Stale Queue Handling).
+
 ## Result Collection
 
 After all tracks complete, main reads each track's outputs:
