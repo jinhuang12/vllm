@@ -1030,9 +1030,19 @@ def main() -> None:
         default="",
         help="Extra flags to pass to nsys profile (e.g. '--stats=true')",
     )
+    p.add_argument(
+        "--nsys-timeout-s",
+        type=int,
+        default=600,
+        help=(
+            "Per-bucket timeout in seconds when --nsys-profile is active (default: 600). "
+            "Total timeout = nsys_timeout_s * num_buckets."
+        ),
+    )
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
+    p.add_argument("--_cudagraph-capture-sizes", nargs="+", type=int, default=None, help=argparse.SUPPRESS)
 
     args = p.parse_args()
 
@@ -1381,6 +1391,13 @@ def main() -> None:
         if label not in (baseline_label, opt_label):
             raise SystemExit(f"Invalid --_child-label: {label!r} (expected {baseline_label!r} or {opt_label!r})")
         label_args = baseline_args if label == baseline_label else opt_args
+        # Inject --cudagraph-capture-sizes if the parent passed it (nsys mode).
+        if args._cudagraph_capture_sizes:
+            label_args = (
+                label_args
+                + ["--cudagraph-capture-sizes"]
+                + [str(x) for x in args._cudagraph_capture_sizes]
+            )
         returncode = _run_inproc_latency_sweep_child(
             label=label,
             model_id=model_id,
@@ -1406,12 +1423,24 @@ def main() -> None:
 
     script_path = Path(__file__).resolve()
     child_timeout = int(args.timeout_s) * max(1, len(buckets)) + 1800
+    if args.nsys_profile:
+        child_timeout = args.nsys_timeout_s * max(1, len(buckets))
 
     # Set up nsys output directory if profiling.
     nsys_dir: Optional[Path] = None
+    nsys_capture_sizes: Optional[List[int]] = None
     if args.nsys_profile:
         nsys_dir = out_root / "nsys"
         nsys_dir.mkdir(parents=True, exist_ok=True)
+        # Restrict CUDA graph capture to only the batch sizes being profiled.
+        # Default vLLM captures ~50 sizes (~2,142 CUDAGraph objects); restricting
+        # to workload batch sizes reduces this to ~len(buckets), mitigating the
+        # memory pressure that causes nsys --cuda-graph-trace=node replay hangs.
+        nsys_capture_sizes = sorted(set(b["batch_size"] for b in buckets))
+        print(
+            f"nsys mode: restricting cudagraph_capture_sizes to {nsys_capture_sizes} "
+            f"(from workload batch_sizes)"
+        )
 
     runs_to_execute = []
     if "baseline" in selected_labels:
@@ -1438,6 +1467,10 @@ def main() -> None:
         ]
         if args.nsys_profile:
             child_cmd.append("--_nsys-profile")
+            if nsys_capture_sizes:
+                child_cmd.extend(
+                    ["--_cudagraph-capture-sizes"] + [str(bs) for bs in nsys_capture_sizes]
+                )
 
         # Prepend nsys wrapper when profiling.
         child_env = dict(run.env) if run.env else dict(os.environ)
@@ -1474,9 +1507,17 @@ def main() -> None:
             status_path=child_status,
         )
         if not child_res.get("ok"):
+            hint = ""
+            if args.nsys_profile and child_res.get("returncode") in (-9, 137, None):
+                hint = (
+                    " This is likely an nsys --cuda-graph-trace=node replay hang. "
+                    "Try reducing workload batch_sizes or increasing --nsys-timeout-s "
+                    f"(current: {args.nsys_timeout_s}s per bucket)."
+                )
             raise SystemExit(
                 f"Inproc sweep child failed for {run.label}: returncode={child_res.get('returncode')}. "
                 f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
+                f"{hint}"
             )
 
         # Rename nsys output files to match bucket tags.
