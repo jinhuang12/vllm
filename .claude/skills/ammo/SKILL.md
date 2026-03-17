@@ -227,10 +227,10 @@ T_async: Next-round debate                                [main + debate team]  
 
 These are NOT advisory. Violation blocks stage progression.
 
-1. **Production parity**: CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `TORCH_COMPILE_DISABLE=1`, `--enforce-eager`, `VLLM_TORCH_COMPILE_LEVEL=0`. *(Enforced by `ammo-pretool-guard.sh` PreToolUse hook)* Note: restricting `cudagraph_capture_sizes` to match profiled batch sizes during nsys capture is acceptable and does not violate production parity — these sizes are exact matches in the default capture list.
+1. **Production parity**: CUDA graphs + torch.compile in ALL measurements. FORBIDDEN: `TORCH_COMPILE_DISABLE=1`, `--enforce-eager`, `VLLM_TORCH_COMPILE_LEVEL=0`. *(Reminded by `ammo-pretool-guard.sh` PreToolUse hook — warns but does not block)* Note: restricting `cudagraph_capture_sizes` to match profiled batch sizes during nsys capture is acceptable and does not violate production parity — these sizes are exact matches in the default capture list.
 2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
-4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Enforced by `ammo-pretool-guard.sh` — raw `vllm bench latency` blocked)*
+4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Reminded by `ammo-pretool-guard.sh` — warns on raw `vllm bench latency`)*
 5. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
 6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug.
 7. **Custom kernel mandate**: Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected outright in the Phase 0 eligibility gate.
@@ -242,7 +242,7 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 | Hook Event | Script | Purpose |
 |------------|--------|---------|
 | **Stop** | `ammo-stop-guard.sh` | Blocks session end if campaign is active (one-shot: blocks once, then allows) |
-| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Blocks `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` |
+| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Warns on `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` (does not block) |
 | **PreCompact** | `ammo-precompact.sh` | Saves campaign state checkpoint before compaction |
 | **SessionStart** | `ammo-postcompact.sh` | Injects resume context after compaction |
 | **WorktreeCreate** | `worktree-create-with-build.sh` | Sets up build environment in new worktrees |
