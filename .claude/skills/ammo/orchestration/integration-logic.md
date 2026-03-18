@@ -129,13 +129,22 @@ After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orch
 ### If SHIP (one or more candidates passed)
 
 1. Record shipped candidates in `campaign.shipped_optimizations`.
-2. Update `campaign.cumulative_e2e_speedup` (multiplicative: `old × round_speedup`).
+2. Update `campaign.cumulative_e2e_speedup` (multiplicative: `old x round_speedup`).
 3. Record the round in `campaign.rounds` with all results.
 4. Trigger re-profiling: invoke `ammo-researcher` subagent for Stage 1 baseline capture on the patched codebase.
 5. After re-profile: run bottleneck mining (Stage 2) on the new baseline.
+5b. **Lazy invalidation of overlapped debate winners** (if `debate.next_round_overlap.selected_winners` is non-empty):
+   - For each winner in `debate.next_round_overlap.selected_winners`:
+     - Retrieve `f_old` from `debate.next_round_overlap.f_values_at_proposal[op_id]`.
+     - Compute `f_new` from the new bottleneck_analysis.md.
+     - If `f_old < 0.05`: skip invalidation for this candidate (kernel too small for reliable f-shift measurement).
+     - If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`: discard the candidate. Record as `{"event": "candidate_invalidated", "op_id": "...", "reason": "f_shift", "f_old": ..., "f_new": ...}`.
+     - Otherwise: retain the candidate.
+   - If any candidates survive invalidation: move them to `debate.selected_winners`. Clear `debate.next_round_overlap` to initial state. Skip Step 8 (debate) -- proceed directly to Stages 4-5.
+   - If all candidates are invalidated: clear `debate.next_round_overlap` to initial state. Proceed to Step 8 (fresh debate).
 6. Read the new top bottleneck's share of total decode latency.
 7. If `top_bottleneck_share < campaign.diminishing_returns_threshold_pct`: set `campaign.status = "campaign_complete"`. Done.
-8. Else: increment `campaign.current_round`, invalidate stale queue (see below), enter Stage 3 for the next round.
+8. Else: increment `campaign.current_round`, enter Stage 3 for the next round.
 
 ### If EXHAUSTED (no candidates passed this round)
 
@@ -144,16 +153,48 @@ After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orch
    - If `top_bottleneck_share < threshold`: set `campaign.status = "campaign_exhausted"`. Done.
    - Else: start a new debate round from existing bottleneck data (skip re-profiling, skip Stage 2).
 
-### Stale Queue Handling (after re-profile)
-
-If an async debate completed during this round's implementation and placed winners in `campaign.pending_queue`:
-
-1. For each candidate in the queue: check if its target kernel still appears in the new top bottleneck list.
-2. Recalculate expected E2E impact using new f-values from the updated `bottleneck_analysis.md`.
-3. Discard candidates where `new_f × kernel_speedup < 1%` E2E improvement.
-4. Remaining candidates proceed to implementation in the next round (no re-debate needed).
-5. Clear `campaign.pending_queue` after processing.
-
 ### Hook Enforcement
 
 The Stop hook (`ammo-stop-guard.sh`) blocks the session from ending while the campaign is active. The orchestrator must either complete the current stage or set `campaign.status` to `"paused"` before the session can end.
+
+## Overlapped Debate and Implementation Interaction
+
+During overlapped operation, these interactions may occur:
+
+### A Track Ships While Debate Is Running
+
+When an implementation track passes all gates while the overlapped debate is still in progress:
+- Record the track result in `parallel_tracks` as usual.
+- Do NOT terminate the debate. Let it complete naturally.
+- The debate's winners will be validated against post-ship profiling data in the next round (lazy invalidation).
+
+### Debate Finishes While Tracks Are Running
+
+When the overlapped debate completes before all implementation tracks:
+- Score winners and shut down debate champions.
+- Record winners in `debate.next_round_overlap.selected_winners`.
+- Continue monitoring remaining implementation tracks.
+- Do NOT start the next round until all current-round tracks complete.
+
+### All Tracks Fail But Debate Produced Winners
+
+If all implementation tracks for round N fail (round EXHAUSTED), but the overlapped debate produced viable winners:
+- Record round N as EXHAUSTED.
+- The overlapped debate winners are still valid -- they were based on the same profiling data.
+- Skip lazy invalidation (no re-profiling occurred since nothing shipped).
+- Move overlapped debate winners directly to `debate.selected_winners` for round N+1 implementation.
+- Clear `debate.next_round_overlap` to initial state after moving winners.
+
+**However**: If round EXHAUSTED AND the diminishing returns threshold is met (campaign_exhausted), discard the overlapped debate winners and shut down debate champions. See "Campaign Terminates During Overlapped Debate" below.
+
+### Campaign Terminates During Overlapped Debate
+
+If the campaign transitions to `campaign_complete` or `campaign_exhausted` while `debate.next_round_overlap.active` is `true`:
+1. Shut down all overlapped debate champions (and delegates) via `shutdown_request`.
+2. Discard overlapped debate results -- they will never be used.
+3. Clear `debate.next_round_overlap` to initial state.
+4. Proceed with TeamDelete and campaign termination as normal.
+
+This can occur in two scenarios:
+- **SHIP + diminishing returns met**: A track shipped, re-profiling shows top bottleneck below threshold. The overlapped debate was running in parallel but its results are now irrelevant.
+- **All tracks EXHAUSTED + diminishing returns met**: No tracks shipped, existing profiling shows top bottleneck below threshold. The debate winners are technically valid but the campaign is ending.

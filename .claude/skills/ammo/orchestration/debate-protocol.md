@@ -4,12 +4,12 @@ Champions independently propose optimization candidates from grounded Stage 2 da
 
 ## Team Structure
 
-- **Team name**: `ammo-debate-{component}-{model_short}-{hardware}`
-  - Example: `ammo-debate-attention-llama70b-h100`
+- **Team name**: `ammo-round-{round_id}-{model_short}-{hardware}` -- this is the **round team**, created once per round and reused for both debate (Stage 3) and implementation (Stages 4-5). During overlapped debate (round 2+ only), debate champions for round N+1 are spawned into the EXISTING round team from round N, alongside implementation agents. The debate uses a distinct `round_id` in its artifact paths (`debate/campaign_round_{N+1}/`) to avoid collisions.
+  - Example: `ammo-round-1-llama70b-h100`
 - **Champions**: 2-4 `ammo-champion` agents. Each reads the grounded bottleneck_analysis.md independently.
 - Each champion is spawned with:
   - `name="champion-{N}"` (e.g., `champion-1`, `champion-2`)
-  - `team_name` set to the team name above
+  - `team_name` set to the round team name above
 
 ## Delegation
 
@@ -18,13 +18,27 @@ When `state.json` has `debate.delegation.enabled: true`, each champion is assign
 ### Team Composition with Delegates
 
 ```
-Team: ammo-debate-{component}-{model_short}-{hardware}
-├── champion-1 (Opus)
-│   └── delegate-1a (Sonnet)
-├── champion-2 (Opus)
-│   └── delegate-2a (Sonnet)
-└── champion-3 (Opus)
-    └── delegate-3a (Sonnet)
+Round Team: ammo-round-{round_id}-{model_short}-{hardware}
+|
+| ... debate champions for round N (Stage 3) ...
+| +-- champion-1 (Opus)          [Stage 3 debate -- shut down after selection]
+| |   +-- delegate-1a (Sonnet)   [Stage 3 debate -- shut down after selection]
+| +-- champion-2 (Opus)          [Stage 3 debate -- shut down after selection]
+| |   +-- delegate-2a (Sonnet)   [Stage 3 debate -- shut down after selection]
+| +-- champion-3 (Opus)          [Stage 3 debate -- shut down after selection]
+|     +-- delegate-3a (Sonnet)   [Stage 3 debate -- shut down after selection]
+|
+| ... after debate: shutdown round N champions ...
+|
+| ... implementation agents for round N (Stages 4-5) ...
+| +-- impl-champion-{op_id_1} (Opus)     [Stages 4-5]
+| +-- impl-validator-{op_id_1} (Sonnet)  [Stages 4-5]
+| +-- impl-champion-{op_id_2} (Opus)     [Stages 4-5]
+| +-- impl-validator-{op_id_2} (Sonnet)  [Stages 4-5]
+|
+| ... OVERLAPPED: debate champions for round N+1 (if round 2+) ...
+| +-- champion-r{N+1}-1 (Opus)    [next-round debate -- shut down after selection]
+| +-- champion-r{N+1}-2 (Opus)    [next-round debate -- shut down after selection]
 ```
 
 Naming convention: `delegate-{champion_number}{letter}` (e.g., `delegate-1a`, `delegate-1b` for champion-1's first and second delegates).
@@ -56,7 +70,7 @@ The mapping is stored in `state.json` at `debate.delegation.champion_delegate_ma
 
 ### Delegate Constraints
 
-- **No GPU kernel benchmarks**: Roofline calculations, codebase research, and `ncu --query-metrics` (static) only. No kernel benchmarks that require GPU allocation — this avoids GPU contention with the async pipeline.
+- **No GPU kernel benchmarks**: Roofline calculations, codebase research, and `ncu --query-metrics` (static) only. No kernel benchmarks that require GPU allocation — this avoids GPU contention with implementation tracks.
 - **No vLLM source modifications**: Research and analysis only.
 - **15-minute task timeout**: Champions should time-box delegate tasks. If a delegate exceeds the timeout, the champion proceeds with partial data.
 
@@ -80,9 +94,14 @@ If a delegate does not respond within the phase deadline:
 2. Champion notes in proposal: "Delegate research incomplete; used own analysis for [section]"
 3. This is NOT a debate failure — champions must be self-sufficient
 
-### Teardown
+### Teardown After Debate Selection
 
-On TeamDelete (after winner selection), ALL agents are shut down — both champions and delegates. No special delegate cleanup needed.
+After winner selection, shut down debate champions and delegates via `shutdown_request`. Do NOT call TeamDelete — the round team persists for Stages 4-5 implementation agents.
+
+- Send `shutdown_request` to each champion agent (they are no longer needed).
+- Delegates are shut down alongside their champions (or via explicit `shutdown_request`).
+- The team itself (`ammo-round-{round_id}-{model_short}-{hardware}`) remains alive.
+- TeamDelete happens later, after all implementation tracks complete (see `parallel-tracks.md`).
 
 ### Without Delegation
 
@@ -270,12 +289,13 @@ For proposals that fuse multiple kernels into one, the above requirements are ne
 2. **L2-busting methodology**: Test the fused kernel with chained distinct data totaling > 2.5x L2 cache size, forcing DRAM streaming. This simulates production L2 competition.
 3. **Report both**: Report speedup under (a) isolated warm-cache and (b) L2-busted cold conditions. If (a)/(b) > 1.5x, the E2E estimate MUST use the cold-cache speedup.
 
-## Teardown
+## Teardown (Post-Debate)
 
 After winner selection:
 
-1. Send `shutdown_request` to all champion agents.
-2. Execute `TeamDelete` to clean up the debate team.
+1. Send `shutdown_request` to all champion agents (and delegates, if delegation was enabled).
+2. Do NOT call TeamDelete. The round team persists for Stages 4-5 implementation.
+3. TeamDelete is called only after all implementation tracks complete (see `parallel-tracks.md` and `SKILL.md` Stage 4-5 section).
 
 ## Artifact Structure
 
@@ -326,13 +346,17 @@ The debate gate hook enforces this: round 2+ debates that use the legacy `debate
 
 Note: "round_1" inside the campaign round directory refers to **debate rounds** (argument/critique/rebuttal cycles). The outer "campaign_round_{N}" refers to **campaign rounds** (profiling cycles).
 
-## Re-validation After Re-profiling
+## Overlapped Debate Considerations
 
-When a debate completes while implementation is ongoing, winners are placed in `campaign.pending_queue`. After re-profiling (triggered by a shipped candidate), each queued winner must be re-validated before entering implementation:
+When running as an overlapped debate during Stages 4-5:
 
-1. Check if the target kernel still appears in the updated `bottleneck_analysis.md`.
-2. Recalculate expected E2E impact using new f-values from the updated profiling data.
-3. If `new_f × kernel_speedup < 1%` E2E improvement: discard (not worth implementing).
-4. If still viable: candidate proceeds to implementation in the next available slot.
+1. **Debate champions MUST NOT message implementation agents.** The orchestrator does not provide implementation agent names. If a champion receives an unexpected message from an unknown agent, ignore it and notify the orchestrator.
 
-This is a feasibility recheck, NOT a full re-debate. The debate evidence (micro-experiments, kernel analysis) remains valid — only the component share `f` has changed due to the shifted bottleneck landscape.
+2. **Artifact paths MUST use campaign-round scoping**: `debate/campaign_round_{N+1}/`. This is already enforced by the debate gate hook for round 2+, and remains enforced for overlapped debates.
+
+3. **Micro-experiments are CPU-only during overlap**: Since GPUs are allocated to implementation tracks, debate champions are limited to roofline calculations, ISA inspection, and `ncu --query-metrics` (static analysis). The existing delegate constraint (no GPU kernel benchmarks) already covers this.
+
+4. **Phase timing may be longer**: The orchestrator interleaves debate moderation with implementation monitoring. Debate phases may take longer to start because the orchestrator is busy gating implementation results. Champions should NOT assume a phase will start within any specific time window.
+
+5. **The orchestrator decides debate timing**: Debate champions should wait for phase-start broadcasts from the orchestrator. Do not self-advance to the next phase.
+

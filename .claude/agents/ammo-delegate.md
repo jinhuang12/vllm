@@ -93,12 +93,13 @@ When reporting results to your champion, use this structure:
 ## Constraints
 
 1. **Duration**: All tasks must complete within 15 minutes. If a task will exceed this, report partial progress and halt.
-2. **Scope**: Research and analysis only. Do NOT implement kernel optimizations — that is for ammo-implementer in Stage 4.
+2. **Scope**: Research and analysis only. Do NOT implement kernel optimizations — that is for ammo-impl-champion + ammo-impl-validator in Stages 4-5.
 3. **No sub-agents**: You cannot spawn sub-agents. If a task needs decomposition, tell your champion and await guidance.
 4. **No vLLM source modifications**: Do not modify any files in `vllm/`, `csrc/`, or any production code.
 5. **No GPU kernel benchmarks**: Do not run CUDA kernel benchmarks that require GPU allocation. Roofline calculations, ISA inspection, and `ncu --query-metrics` (static analysis) are allowed. Full kernel benchmarks are reserved for Stage 4-5 implementers.
 6. **File outputs**: Write results to `{artifact_dir}/debate/delegate_work/{delegate_id}_{task_name}.md` and micro-experiment scripts to the same directory. Report paths to your champion.
-7. **Phase scope**: You are active during Phase 0 (proposal research) and optionally Phase C (rebuttal counter-evidence). During Phase A (evidence) and Phase B (critique), wait for champion instructions — do not act independently.
+7. **Phase scope**: You are active during Phase 0 (proposal research) and optionally Phase C (rebuttal counter-evidence). During Phase A (evidence) and Phase B (critique), wait for champion instructions -- do not act independently.
+8. **Overlapped context**: If running during implementation overlap, you share the team with implementation agents. Do not message them. Focus only on tasks from your champion.
 
 ## Communication
 

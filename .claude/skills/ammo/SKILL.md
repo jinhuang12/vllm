@@ -42,14 +42,15 @@ python .claude/skills/ammo/scripts/new_target.py \
 ```
 Stage 1: Baseline Capture          [main session + ammo-researcher subagent]   → constraints.md
 Stage 2: Bottleneck Mining          [main session + ammo-researcher subagent]   → bottleneck_analysis.md (grounded data only)
-Stage 3: Candidate Proposal + Debate [ephemeral agent team: N ammo-champion agents] → debate/summary.md
-Stage 4+5: Parallel Tracks          [2-3 worktrees, each: ammo-implementer (implements + validates) + DA audit subagent]
+Stage 3: Candidate Proposal + Debate [round team: N ammo-champion agents]            → debate/summary.md
+Stage 4+5: Parallel Tracks          [round team reused: per-track impl-champion + impl-validator pairs + DA audit]
+  + Round N+1 Debate (overlapped)   [round team: N ammo-champion agents, if round 2+] → debate/campaign_round_{N+1}/summary.md
 Stage 6: Integration Validation     [main session direct]                       → SHIP or round-fail
 Stage 7: Campaign Evaluation        [main session direct]                       → next round, campaign_complete, or campaign_exhausted
 Stage 7b: Report Generation          [general-purpose subagent, background]       → REPORT.md (on campaign_complete or campaign_exhausted)
 ```
 
-Stages 1-6 form the **inner loop** of a round. Stage 7 decides whether to iterate. No persistent team across stages. Agents spawn when needed and terminate when done.
+Stages 1-6 form the **inner loop** of a round. Stage 7 decides whether to iterate. A single round-scoped team persists from Stage 3 through Stage 5; it is created at debate start and deleted after all implementation tracks complete. During Stages 4-5 (round 2+), the orchestrator may launch the next round's debate concurrently -- debate champions are spawned into the same round team alongside implementation agents (see Overlapped Debate below).
 
 The campaign continues until the **diminishing returns threshold** is met (see Campaign Loop below).
 
@@ -60,34 +61,12 @@ Each round of the campaign follows this structure:
 ```
 Round N:
   1. Profile (Stages 1-2) — re-profile against patched baseline (skip for round 1)
-  2. Debate (Stage 3) — full adversarial debate; may overlap with round N-1 implementation
+  2. Debate (Stage 3) — full adversarial debate
   3. Implement + Validate (Stages 4-5) — parallel worktree tracks
+     + Overlapped: Round N+1 debate starts during implementation (round 2+, same team)
   4. Integrate (Stage 6) — ship or round-fail
   5. Campaign Evaluation (Stage 7) — diminishing returns check → next round or stop
 ```
-
-### Async Pipeline: Debate Overlaps Implementation
-
-While round N implementers work on debate winners:
-
-1. Orchestrator starts round N+1 debate from existing bottleneck data.
-2. New debate follows the full adversarial protocol — no lighter screening.
-3. Debate winners go to `campaign.pending_queue`, NOT to implementation yet.
-
-**If a round N candidate ships** (triggers re-profile): Let the in-progress debate finish. Re-validate queued winners against new profiling data (see below). Discard stale candidates.
-
-**If round N completes without any ship**: Queued winners proceed to implementation immediately.
-
-### Re-validation After Re-profiling
-
-When the bottleneck landscape shifts (because a candidate shipped), queued candidates may be stale. For each candidate in `campaign.pending_queue`:
-
-1. Check if the target kernel still appears in the updated `bottleneck_analysis.md`.
-2. Recalculate expected E2E impact using the new f-values.
-3. If `new_f × kernel_speedup < 1%` E2E improvement: discard.
-4. If still viable: proceed to implementation in the next available slot.
-
-This is a feasibility recheck, NOT a full re-debate — only the f-value has changed.
 
 ### Diminishing Returns
 
@@ -99,6 +78,19 @@ After each round's integration:
 
 **After SHIP**: Re-profile first (bottleneck landscape shifted), then check the NEW top bottleneck.
 **After EXHAUSTED**: Check threshold against EXISTING profiling data (no re-profile needed).
+
+**After SHIP with overlapped debate winners**:
+1. Re-profile (as today).
+2. For each winner in `debate.next_round_overlap.selected_winners`:
+   - Read the winner's `f_values_at_proposal[op_id]` (the f-value when proposed).
+   - Read the new f-value from the re-profiling data.
+   - If `f_old < 0.05`: skip invalidation for this candidate (kernel too small for reliable f-shift measurement).
+   - If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`: discard the candidate (f-value shifted too much).
+   - Otherwise: retain the candidate for implementation.
+3. If any candidates survive: skip Stage 3 debate for the next round. Move surviving candidates directly to `debate.selected_winners` and proceed to Stages 4-5. **Clear `debate.next_round_overlap` to initial state** (`active: false, phase: null, selected_winners: [], profiling_basis: null, f_values_at_proposal: {}`).
+4. If all candidates are invalidated: **clear `debate.next_round_overlap` to initial state**. Run a fresh Stage 3 debate using the new profiling data.
+
+**IMPORTANT**: Always clear `debate.next_round_overlap` after consuming or discarding winners. Failure to clear will cause the stop guard, resume protocol, and precompact hook to see stale overlap state from a previous round.
 
 ### Campaign State Transitions
 
@@ -120,6 +112,38 @@ When a candidate ships and triggers re-profiling, other tracks from the same rou
 4. Record all results in the current round's `campaign.rounds` entry.
 5. Next round starts only after all current-round tracks complete.
 
+### Overlapped Debate (Round 2+ Only)
+
+During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round's debate concurrently with implementation. Debate champions are spawned into the **same round team** that contains implementation agents. This saves 35-70 minutes of wall-clock time per extra round.
+
+**When to launch**: Immediately after spawning all implementation agents for round N. The debate uses the EXISTING bottleneck_analysis.md (from the most recent profiling) -- it does NOT wait for re-profiling.
+
+**How it works**:
+1. Spawn 2-4 ammo-champion agents (+ delegates if enabled) into the existing round team.
+2. Moderate debate using the standard protocol (Phase 0 -> rounds -> selection).
+3. Interleave debate moderation with implementation monitoring: broadcast debate phase starts, then check for impl track completions, then wait for debate phase completions.
+4. When debate finishes: score winners, shut down debate champions via `shutdown_request`. Record winners in `debate.next_round_overlap.selected_winners`.
+5. When all implementation tracks complete: proceed to Stage 6 integration.
+6. After integration: winners from the overlapped debate become the implementation candidates for round N+1 (subject to lazy invalidation -- see Campaign Loop Transition above).
+
+**Communication boundaries** (ENFORCED):
+- Debate champions communicate with: each other (via file artifacts), orchestrator (via SendMessage), their delegates (via SendMessage).
+- Implementation agents communicate with: their paired validator (via SendMessage), orchestrator (via SendMessage).
+- Debate champions MUST NOT message implementation agents. Implementation agents MUST NOT message debate champions.
+- The orchestrator enforces this by not providing cross-workstream agent names in spawn prompts.
+
+**Lazy invalidation**: After re-profiling in the next round, the orchestrator checks each overlapped-debate winner's f-value against the new profiling data. If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`, the candidate is discarded (the target kernel's share shifted too much). If `f_old < 0.05`, skip invalidation for that candidate (the kernel is too small to measure f-shift reliably). Otherwise, the candidate proceeds to implementation. This replaces the old eager re-scoring protocol.
+
+**GPU allocation**: Debate micro-experiments are limited to CPU-based analysis (roofline calcs, ISA inspection, ncu --query-metrics static analysis). On multi-GPU systems (N >= 3), the last GPU is soft-reserved for debate micro-experiments. This avoids contention with implementation tracks.
+
+**If round N is round 1**: Do NOT launch overlapped debate. Round 1 has no prior profiling data for the next round's debate to use.
+
+**If all implementation tracks complete before debate finishes**: Wait for debate to complete before proceeding to Stage 6. Do not terminate the debate. Exception: if the debate has not completed within 90 minutes of launch, the orchestrator should: (1) collect any completed debate artifacts, (2) shut down all debate champions via `shutdown_request`, (3) mark `debate.next_round_overlap.phase` as `null` and `active` as `false`, (4) proceed to Stage 6 with only the implementation results.
+
+**If debate finishes before all implementation tracks complete**: Record winners. Continue monitoring implementation tracks.
+
+**If campaign terminates during overlapped debate**: If the campaign transitions to `campaign_complete` or `campaign_exhausted` while `debate.next_round_overlap.active` is `true`, the orchestrator must: (1) shut down all overlapped debate champions via `shutdown_request`, (2) discard overlapped debate results, (3) clear `debate.next_round_overlap` to initial state (`active: false, phase: null, selected_winners: [], profiling_basis: null, f_values_at_proposal: {}`).
+
 ## Orchestration Model
 
 ### Stages 1-2: Main Session + Subagents
@@ -136,26 +160,30 @@ When `--nsys-profile` is used, the sweep script automatically restricts `cudagra
 
 ### Stage 3: Candidate Proposal + Adversarial Debate
 
-- **TeamCreate**: `ammo-debate-{model_short}-{hardware}`
-- Spawn 2-4 ammo-champion agents. Each reads the grounded bottleneck_analysis.md independently.
+- **TeamCreate**: `ammo-round-{round_id}-{model_short}-{hardware}` — this is the **round team**, created once and reused through Stages 4-5.
+- Spawn 2-4 ammo-champion agents into the round team. Each reads the grounded bottleneck_analysis.md independently.
 - **Delegation**: If `state.json` has `debate.delegation.enabled: true`, also spawn Sonnet delegate agents alongside champions (1-N per champion, configurable via `delegates_per_champion`). Champions direct delegates via SendMessage for research and micro-experiments. See `orchestration/debate-protocol.md` § Delegation.
 - **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists. With delegation, champions may direct delegates to extract profiling data and run roofline calculations.
 - **Debate rounds**: Champions argue for their proposals, critique others, rebut. See `orchestration/debate-protocol.md`.
 - Main session selects 2-3 winners using scoring rubric (`references/debate-scoring-rubric.md`).
-- **TeamDelete** after selection (shuts down all champions AND delegates).
+- **After selection**: Shut down debate champions and delegates via `shutdown_request` (they are no longer needed). The **round team persists** — implementation agents will be spawned into it in Stages 4-5. Do NOT call TeamDelete here.
 - **Debate is always mandatory.** If all champions independently converge on the same candidate in Phase 0 with micro-experiment evidence, the lead may shorten to 1 debate round instead of 2.
 
-### Stages 4-5: Parallel Worktree Tracks
+### Stages 4-5: Parallel Worktree Tracks (Adversarial Validation)
+
+Each track uses a **champion + independent validator** pair to prevent reward hacking (observed: cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation). All implementation agents join the **existing round team** created in Stage 3 — no new TeamCreate calls.
 
 Execute these steps **in order**:
 
-1. **Spawn implementers**: Per track, spawn ammo-implementer as a **subagent** with `isolation: worktree` (NOT as a teammate in a team). This ensures the Stop hook (DA) fires on completion. Do NOT use `team_name` when spawning implementers. The implementer handles BOTH implementation AND validation (correctness, kernel benchmarks, E2E). No separate validator agent. GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
+1. **Spawn implementation agents into the round team**: Per winning candidate, spawn an `ammo-impl-champion` (Opus, `isolation: worktree`) and an `ammo-impl-validator` (Sonnet) into the existing round team (the same team used for debate). The champion implements; the validator independently writes its own correctness tests, benchmark scripts, and runs E2E sweeps. The DA TeammateIdle hook fires on the champion, who aggregates the validator's raw results into `validation_results.md`. GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
 
-2. **Launch async debate for round N+1** (MANDATORY for round 2+, skip for round 1): Immediately after spawning implementers, create a new debate team from existing bottleneck data. Follow the full adversarial protocol (Stage 3). Winners go to `campaign.pending_queue` — do NOT send them to implementation yet. Set `debate.async_round_started: true` in state.json when you launch this.
+2. **Launch overlapped debate (round 2+ only)**: If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents (+ delegates if enabled) into the same round team. Follow the standard debate protocol (Phase 0 -> rounds -> selection) while also monitoring implementation tracks. See "Overlapped Debate" section above. For round 1, skip this step.
 
-3. **Monitor and gate**: While implementers and async debate run, actively monitor progress. As each implementer completes, run its compilation gate (T9) and update state.json. Do NOT stop or go idle until all implementers have returned results AND the async debate (if launched) has completed.
+3. **Monitor and gate**: While implementation agents run, actively monitor progress. Interleave debate moderation (if active) with implementation gating. As each champion completes (DA Stop hook passed), run its compilation gate (T9) and update state.json. Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed.
 
-See `orchestration/parallel-tracks.md`.
+4. **TeamDelete after all tracks complete**: Once all implementation tracks have finished (passed or failed) and results are collected, AND the overlapped debate (if launched) has completed, call TeamDelete on the round team. This is the only TeamDelete in the round lifecycle.
+
+See `orchestration/parallel-tracks.md` for the full team structure, phase-transition protocol, and three-layer verification model.
 
 ### Stage 6: Integration Validation
 
@@ -186,18 +214,34 @@ T2:  Baseline capture + constraints.md                    [ammo-researcher subag
 T3:  GATE: verify_phase1_baseline.py                      [main]                        <- T2
 T4:  Bottleneck mining (grounded data only)                [ammo-researcher subagent]    <- T3
 T5:  GATE: Stage 2 review (no ungrounded estimates)       [main]                        <- T4
-T6:  Champion proposals + debate (TeamCreate -> Phase 0 [+delegates if enabled] -> rounds -> selection) [main + debate team] <- T5
+T6:  TeamCreate round team + champion proposals + debate (Phase 0 [+delegates if enabled] -> rounds -> selection -> shutdown champions) [main + round team] <- T5
 T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]                <- T6
 
-  +- Per winning candidate (parallel) -----------------------------------------+
-  | T8_{id}: Implement + validate (correctness+kernel+E2E) [ammo-implementer] <- T7   |
-  |          (frontmatter Stop hook = DA: Amdahl check, baseline, parity, cross-track) |
-  | T9_{id}: GATE: compilation check                       [main]              <- T8   |
-  | T10_{id}: State update                                 [main]              <- T9   |
-  +-----------------------------------------------------------------------------+
+  +- Per winning candidate (parallel, all in existing round team) ----------------------+
+  | Spawn impl-champion-{id} + impl-validator-{id} into round team                     |
+  | T8a_{id}: Research (validator) + plan reading (champion)   [round team]    <- T7   |
+  | T8b_{id}: Implement kernel (champion only)                 [round team]    <- T8a  |
+  | T8c_{id}: Independent validation Gates 5.1/5.2/5.3 (validator) [round team] <- T8b |
+  | T8d_{id}: Kill criteria evaluation + validation_results.md (champion) [round team] <- T8c |
+  |           (frontmatter Stop hook = DA: Amdahl, baseline, parity, independent validation) |
+  | T9_{id}: GATE: compilation check                           [main]          <- T8d  |
+  | T10_{id}: State update                                     [main]          <- T9   |
+  +---------------------------------------------------------------------------------+
 
-T11: GATE: All tracks have results                        [main]               <- all T10
-T12: Integration validation (if multiple pass)            [main]               <- T11
+  === Overlapped Debate (during Stages 4-5, round 2+ only) ===
+
+  T_overlap_start: Spawn debate champions into round team        [main + round team]   <- T7 (after impl agents spawned)
+  T_overlap_p0:    Phase 0 proposals + eligibility gate          [main + round team]   <- T_overlap_start
+  T_overlap_debate: Debate rounds (interleaved with impl monitoring) [main + round team] <- T_overlap_p0
+  T_overlap_select: Score and select winners                     [main]                <- T_overlap_debate
+  T_overlap_shutdown: Shutdown debate champions                  [main]                <- T_overlap_select
+
+  Note: T_overlap tasks interleave with per-track T8-T10 tasks. The orchestrator
+  alternates between debate moderation and implementation gating.
+
+T11: GATE: All tracks have results AND overlapped debate (if any) complete  [main]  <- all T10, T_overlap_shutdown
+T11b: TeamDelete round team                               [main]               <- T11
+T12: Integration validation (if multiple pass)            [main]               <- T11b
 T13: Round decision (SHIP / round-EXHAUSTED)              [main]               <- T12
 
 === Campaign Loop (Stage 7) ===
@@ -209,7 +253,7 @@ T15: Campaign evaluation                                  [main]               <
     T17: Bottleneck mining on new baseline                [ammo-researcher]    <- T16
     T18: Diminishing returns check                        [main]               <- T17
       IF below threshold: CAMPAIGN COMPLETE
-      ELSE: Invalidate stale queue → new Round (T6 debate → ...)
+      ELSE: new Round (T6 debate → ...)
   IF round-EXHAUSTED:
     T16b: Diminishing returns check (on existing profile) [main]               <- T15
       IF below threshold: CAMPAIGN EXHAUSTED
@@ -217,10 +261,6 @@ T15: Campaign evaluation                                  [main]               <
 T19: GATE: campaign evaluation                            [main]               <- T15..T18
 T20: Generate optimization report                         [general-purpose subagent, background] <- T19 (campaign_complete or campaign_exhausted)
 
-=== Async Pipeline (during Stages 4-5) ===
-
-T_async: Next-round debate                                [main + debate team]  <- T7
-         (MANDATORY after T7 completes; overlaps T8-T10)
 ```
 
 ## Non-Negotiables (BLOCKING)
@@ -250,7 +290,7 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 
 Subagent-level hooks (frontmatter in agent definitions):
 - **ammo-researcher** Stop → DA checks for ungrounded claims
-- **ammo-implementer** Stop → DA checks validation completeness, Amdahl's Law, baseline citation
+- **ammo-impl-champion** Stop → DA checks validation completeness, Amdahl's Law, baseline citation, independent validation existence, benchmark cross-check
 - **ammo-champion** TeammateIdle → DA checks custom kernel mandate, micro-experiment evidence
 
 ## State Management
@@ -268,7 +308,7 @@ Subagent-level hooks (frontmatter in agent definitions):
   "summary": "Initialized.",
   "gpu_resources": {"gpu_count": 1, "gpu_model": "...", "memory_total_gib": 0, "cuda_visible_devices": "0"},
   "debate": {
-    "team_name": null,
+    "team_name": null,       /* round-scoped: ammo-round-{round_id}-{model_short}-{hardware}; persists Stage 3 through Stage 5 */
     "candidates": [],
     "rounds_completed": 0,
     "max_rounds": 4,
@@ -280,7 +320,13 @@ Subagent-level hooks (frontmatter in agent definitions):
       "champion_delegate_mapping": {},
       "delegate_results": {}
     },
-    "async_round_started": false
+    "next_round_overlap": {
+      "active": false,       /* whether an overlapped debate is running during Stages 4-5 */
+      "phase": null,         /* "phase_0" | "debating" | "selecting" | "selection_complete" | null */
+      "selected_winners": [],
+      "profiling_basis": null,
+      "f_values_at_proposal": {}
+    }
   },
   "stage_timestamps": {   /* lead records ISO timestamps at stage transitions */
     "1_baseline": {"started_at": null, "completed_at": null},
@@ -307,8 +353,7 @@ Subagent-level hooks (frontmatter in agent definitions):
     "diminishing_returns_threshold_pct": 0.5,    /* stop when top bottleneck < this % */
     "cumulative_e2e_speedup": 1.0,               /* multiplicative across shipped rounds */
     "rounds": [],                                /* per-round history (see schema below) */
-    "shipped_optimizations": [],                 /* op_ids that shipped across all rounds */
-    "pending_queue": []                          /* candidates from async debate awaiting implementation */
+    "shipped_optimizations": []                  /* op_ids that shipped across all rounds */
   }
 }
 ```
@@ -319,7 +364,7 @@ Each entry in `campaign.rounds`:
   "round_id": 1,
   "profiling_baseline_path": "runs/baseline_round_1/",
   "top_bottleneck_share_pct": 15.2,
-  "debate_team_name": "ammo-debate-...",
+  "round_team_name": "ammo-round-1-...",
   "selected_candidates": ["op001", "op002"],
   "implementation_results": {
     "op001": {"status": "PASSED", "e2e_speedup": 1.12},
@@ -341,7 +386,9 @@ On `campaign_complete` or `campaign_exhausted`, report generation (T20) is spawn
 - **Blocker escalation**: Subagent returns error -> lead investigates.
 - **Debate moderation**: Lead broadcasts phase starts, champions message back on completion.
 - **Critical stop**: Lead broadcasts to halt debate team if needed.
-- **Shutdown**: Clean debate team termination via `shutdown_request` -> TeamDelete.
+- **Shutdown**: Debate champions terminated via `shutdown_request` after selection; round team persists until all implementation tracks complete, then TeamDelete.
+- **Cross-workstream isolation**: During overlapped debate, debate champions and implementation agents share the same team but MUST NOT communicate directly. The orchestrator enforces this by not providing cross-workstream agent names.
+- **Interleaved moderation**: During overlapped operation, the orchestrator alternates between debate phase broadcasts/waits and implementation completion checks. Pattern: broadcast debate phase start -> check for impl completions -> wait for debate phase completions -> repeat.
 
 ## Helper Scripts
 
@@ -399,9 +446,14 @@ After interruption or compaction:
 2. Read `state.json` from artifact directory.
 3. Check `campaign.status` and `stage` to determine where you are.
 4. If Stage 3 debate active: check debate artifacts in `debate/` or `debate/campaign_round_N/`.
-5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status. Also check `debate.async_round_started` — if `false` and round > 1, launch the async debate before resuming monitor/gate duties.
+4b. If Stages 4-5 active AND `debate.next_round_overlap.active` is `true`:
+   - Check `debate.next_round_overlap.phase` to determine debate progress.
+   - If `phase` is `"selection_complete"`: Winners already selected. No action needed for debate.
+   - If `phase` is non-null but not complete: Check debate artifacts in `debate/campaign_round_{N+1}/`. Restart debate from the last completed phase (debate is restartable -- champions are stateless, artifacts on disk capture progress).
+   - If `phase` is null but `active` is true: Debate was launched but no progress. Re-spawn debate champions and start from Phase 0.
+5. If Stages 4-5 active: check `parallel_tracks` in `state.json` for worktree paths and status. Resume monitoring and gating.
 6. Resume from last completed gate.
-7. Read `campaign.current_round`, `campaign.pending_queue`. Check if an async debate was in progress.
+7. Read `campaign.current_round` to determine which round is active.
 8. If `campaign` key is missing (legacy state.json): treat as round 1 — initialize the campaign object.
 9. The Stop hook will block session end while campaign is active — either complete the current stage or set `campaign.status` to `"paused"`.
 10. If `campaign.status` is `campaign_complete` or `campaign_exhausted` but no `REPORT.md` exists, spawn the report generation subagent (T20).
@@ -414,7 +466,7 @@ After interruption or compaction:
 2. Round 1: invoke ammo-researcher subagent for baseline + bottleneck mining.
 3. Run gates, spawn debate team for top candidates.
 4. Select winners, create parallel worktree tracks.
-5. Implement + validate in parallel. Start async debate for round 2.
+5. Implement + validate in parallel.
 6. Integration if multiple pass → SHIP or round-EXHAUSTED.
 7. Campaign evaluation: record round, check diminishing returns.
 8. If above threshold: re-profile → new round. Repeat until threshold met.

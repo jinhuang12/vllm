@@ -34,7 +34,7 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
  │                                                           v                      │
  │  Stage 3: Adversarial Debate                                                     │
  │  ┌──────────────────────────────────────────────────────────────────────────┐    │
- │  │  TeamCreate: ammo-debate-{component}-{model}-{hw}                       │    │
+ │  │  TeamCreate: ammo-round-{round_id}-{model_short}-{hardware}              │    │
  │  │                                                                          │    │
  │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                              │    │
  │  │  │Champion 1│  │Champion 2│  │Champion 3│  (2-4 ammo-champion agents)   │    │
@@ -46,36 +46,30 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
  │  │       │              │              │                                    │    │
  │  │       └──────────────┼──────────────┘                                   │    │
  │  │                      v                                                   │    │
- │  │  Lead scores via rubric ──> Select 2-3 winners ──> TeamDelete           │    │
- │  │  Output: debate/summary.md                                              │    │
+ │  │  Lead scores via rubric ──> Select 2-3 winners ──> shutdown champions   │    │
+ │  │  Output: debate/summary.md  (round team persists for Stages 4-5)       │    │
  │  └──────────────────────────────────────────────────────────┬───────────────┘    │
  │                                                              │                   │
  │                                                              v                   │
- │  Stages 4-5: Parallel Worktree Tracks (3 steps, in order)                       │
+ │  Stages 4-5: Parallel Worktree Tracks (Adversarial Validation)                  │
  │  ┌──────────────────────────────────────────────────────────────────────────┐    │
  │  │                                                                          │    │
- │  │  STEP 1: Spawn implementers                                             │    │
+ │  │  STEP 1: Spawn impl-champion + impl-validator pairs into round team     │    │
  │  │  ┌─────────────────────────┐       ┌─────────────────────────┐          │    │
  │  │  │ Track A (worktree)      │       │ Track B (worktree)      │          │    │
- │  │  │ ammo-implementer        │       │ ammo-implementer        │          │    │
+ │  │  │ ammo-impl-champion      │       │ ammo-impl-champion      │          │    │
+ │  │  │ + ammo-impl-validator   │       │ + ammo-impl-validator   │          │    │
  │  │  │ - Write kernel code     │       │ - Write kernel code     │          │    │
- │  │  │ - Correctness tests     │       │ - Correctness tests     │          │    │
- │  │  │ - Kernel benchmarks     │       │ - Kernel benchmarks     │  GPU     │    │
+ │  │  │ - Independent validation│       │ - Independent validation│  GPU     │    │
  │  │  │ - E2E via sweep script  │       │ - E2E via sweep script  │ isolated │    │
  │  │  └─────────┬───────────────┘       └─────────┬───────────────┘          │    │
  │  │            │                                  │                          │    │
- │  │  STEP 2: Launch async debate (MANDATORY round 2+, skip round 1)         │    │
- │  │  ╔═══════════════════════════════════════════════════════════╗           │    │
- │  │  ║  New debate team from EXISTING bottleneck data            ║           │    │
- │  │  ║  Full adversarial protocol (same as Stage 3)              ║           │    │
- │  │  ║  Winners → campaign.pending_queue (NOT implementation)    ║           │    │
- │  │  ║  Set debate.async_round_started = true                    ║           │    │
- │  │  ╚═══════════════════════════════════════════════════════════╝           │    │
- │  │                                                                          │    │
+ │  │  STEP 2: Launch overlapped debate (round 2+ only, same round team)     │    │
  │  │  STEP 3: Monitor and gate (do NOT stop until ALL complete)              │    │
- │  │  - Gate each implementer (T9: compilation check, T10: state update)     │    │
- │  │  - Moderate async debate concurrently                                    │    │
- │  │  - Wait for ALL implementers AND async debate before Stage 6            │    │
+ │  │  - Gate each impl-champion (T9: compilation check, T10: state update)   │    │
+ │  │  - Interleave debate moderation with impl gating                        │    │
+ │  │  - Wait for ALL impl tracks + overlapped debate before Stage 6          │    │
+ │  │  STEP 4: TeamDelete round team after all complete                       │    │
  │  │                                                                          │    │
  │  └──────────────────────────────────────────────────────────┬───────────────┘    │
  │                                                              │                   │
@@ -101,8 +95,7 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
  │    2. Update cumulative speedup          2. Check diminishing returns           │
  │    3. Re-profile (new baseline)             on EXISTING profile (no re-profile) │
  │    4. Bottleneck mining on new baseline     │                                   │
- │    5. Invalidate stale pending_queue        │                                   │
- │    6. Check diminishing returns             │                                   │
+ │    5. Check diminishing returns             │                                   │
  │       │                                     │                                   │
  │       v                                     v                                   │
  │  top bottleneck < 3%?                  top bottleneck < 3%?                     │
@@ -122,7 +115,7 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 ├── README.md                             # This file (workflow diagram, test suite)
 ├── orchestration/
 │   ├── debate-protocol.md                # Stage 3: team setup, phases, convergence criteria
-│   ├── parallel-tracks.md                # Stages 4-5: worktree creation, GPU assignment, async debate, pass criteria
+│   ├── parallel-tracks.md                # Stages 4-5: worktree creation, GPU assignment, pass criteria
 │   └── integration-logic.md              # Stage 6: conflict detection, cherry-pick, decision matrix
 ├── references/
 │   ├── debate-scoring-rubric.md          # 6-criterion weighted scoring (min 5.0 to advance)
@@ -153,7 +146,8 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 ├── ammo-researcher.md      # Profiling + bottleneck mining (grounded data only, NO estimates)
 ├── ammo-champion.md        # Debate: proposes candidates, runs micro-experiments, argues with data
 ├── ammo-delegate.md        # Research assistant for champions during debate (Sonnet model)
-└── ammo-implementer.md     # Implements kernel + runs full validation in isolated worktree
+├── ammo-impl-champion.md   # Implements kernel in isolated worktree, aggregates validation results
+└── ammo-impl-validator.md  # Independent validation: correctness tests, benchmarks, E2E sweeps
 ```
 
 ## Specialized Agents
@@ -163,7 +157,8 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 | **ammo-researcher** | Profiles baseline, mines bottlenecks | Cannot make feasibility estimates or E2E projections |
 | **ammo-champion** | Proposes optimizations, argues in debate | Must back claims with micro-experiments |
 | **ammo-delegate** | Research assistant for champions (optional) | No GPU benchmarks, no source modifications, 15-min timeout |
-| **ammo-implementer** | Implements kernel + runs full validation (correctness, kernel bench, E2E) | Works in isolated worktree; frontmatter Stop hook (DA) enforces validation + Amdahl's sanity |
+| **ammo-impl-champion** | Implements kernel in isolated worktree, aggregates validation results | Works in isolated worktree; frontmatter Stop hook (DA) enforces validation + Amdahl's sanity |
+| **ammo-impl-validator** | Independent validation: correctness tests, benchmarks, E2E sweeps | Paired with impl-champion; writes own tests independently to prevent reward hacking |
 
 The **lead** (main Claude session) orchestrates all stages, manages `state.json`, owns all gates, and never writes kernel code directly.
 
@@ -182,22 +177,24 @@ The **lead** (main Claude session) orchestrates all stages, manages `state.json`
 | Hook Event | Script | Purpose |
 |------------|--------|---------|
 | **Stop** | `ammo-stop-guard.sh` | Blocks session end if campaign is active (file-based circuit breaker: blocks once, then allows) |
-| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Blocks `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` |
+| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Warns on `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` (does not block) |
 | **PreCompact** | `ammo-precompact.sh` | Saves campaign state checkpoint before compaction |
 | **SessionStart** | `ammo-postcompact.sh` | Injects resume context after compaction |
+| **WorktreeCreate** | `worktree-create-with-build.sh` | Sets up build environment in new worktrees |
+| **WorktreeRemove** | `worktree-remove-cleanup.sh` | Cleans up worktree resources |
 
 ---
 
 ## Conformance Test Suite
 
-47 scenarios across 4 test files verify that the orchestrator and all subagents correctly understand and follow the AMMO workflow.
+48 scenarios across 4 test files verify that the orchestrator and all subagents correctly understand and follow the AMMO workflow.
 
-| Test File | Agent | Scenarios | Baseline |
-|-----------|-------|-----------|----------|
-| [`tests/agents/test-orchestrator.md`](tests/agents/test-orchestrator.md) | Lead orchestrator | 19 (workflow, async debate, resume, campaign eval, integration, violations) | 19/19 |
-| [`tests/agents/test-researcher.md`](tests/agents/test-researcher.md) | ammo-researcher | 8 (grounded data, profiling strategy, production parity, steady-state) | 8/8 |
-| [`tests/agents/test-champion.md`](tests/agents/test-champion.md) | ammo-champion | 10 (kernel mandate, micro-experiments, CUDA graphs, cache, delegation, debate) | 10/10 |
-| [`tests/agents/test-implementer.md`](tests/agents/test-implementer.md) | ammo-implementer | 10 (baseline reuse, sweep script, parity, scope, Amdahl, build, contamination) | 10/10 |
+| Test File | Agent | Scenarios | Count |
+|-----------|-------|-----------|-------|
+| [`tests/agents/test-orchestrator.md`](tests/agents/test-orchestrator.md) | Lead orchestrator | 20 (overlapped debate, resume, campaign eval, integration, violations) | 20 |
+| [`tests/agents/test-researcher.md`](tests/agents/test-researcher.md) | ammo-researcher | 8 (grounded data, profiling strategy, production parity, steady-state) | 8 |
+| [`tests/agents/test-champion.md`](tests/agents/test-champion.md) | ammo-champion | 10 (kernel mandate, micro-experiments, CUDA graphs, cache, delegation, debate) | 10 |
+| [`tests/agents/test-implementer.md`](tests/agents/test-implementer.md) | ammo-impl-champion + ammo-impl-validator | 10 (baseline reuse, sweep script, parity, scope, Amdahl, build, contamination) | 10 |
 
 ### Run All Tests
 

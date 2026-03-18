@@ -52,7 +52,6 @@ Cumulative gain:   $.campaign.cumulative_e2e_speedup       (e.g., 1.06)
 Candidate names:   $.debate.candidates[*].{id, name, score, status}
 Round results:     $.campaign.rounds[*].implementation_results.{OP-ID}.{status, e2e_speedup, reason}
 Worktree paths:    $.parallel_tracks.{OP-ID}.worktree_path (location of shipped code)
-Pending queue:     $.campaign.pending_queue[*].{id, name, e2e_estimate}
 Selection logic:   $.debate.selection_rationale
 ```
 
@@ -105,7 +104,6 @@ The report is for engineers who have never heard of AMMO. Translate ALL internal
 | f_decode | Component share of decode latency (define on first use) |
 | Ship / shipped | Merged / accepted / deployed |
 | Kill criteria / kill criterion | Acceptance threshold (minimum required improvement) |
-| Pending queue | Deferred candidates |
 | Stage 1 baseline | Original baseline measurement (do not re-run) |
 | Co-located baseline | Same-session baseline comparison |
 | Gate 5.1 / 5.2 / 5.3 | Correctness / kernel performance / E2E validation |

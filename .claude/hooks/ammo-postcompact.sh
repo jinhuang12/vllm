@@ -16,7 +16,6 @@ if [ -n "$CHECKPOINT_FILES" ]; then
     CAMPAIGN_ROUND=$(jq -r '.campaign_round // 0' "$CHECKPOINT_FILES" 2>/dev/null)
     CAMPAIGN_STATUS=$(jq -r '.campaign_status // ""' "$CHECKPOINT_FILES" 2>/dev/null)
     CUMULATIVE_SPEEDUP=$(jq -r '.cumulative_speedup // 1.0' "$CHECKPOINT_FILES" 2>/dev/null)
-    PENDING_QUEUE_SIZE=$(jq -r '.pending_queue_size // 0' "$CHECKPOINT_FILES" 2>/dev/null)
 
     # Read current state for more context
     if [ -f "$STATE_FILE" ]; then
@@ -36,7 +35,14 @@ if [ -n "$CHECKPOINT_FILES" ]; then
         EXTRA_CONTEXT="${EXTRA_CONTEXT}\n7. **Parallel tracks ($TRACK_COUNT active)**: Check parallel_tracks in state.json for worktree paths and GPU assignments."
     fi
     if [ -n "$CAMPAIGN_STATUS" ] && [ "$CAMPAIGN_STATUS" != "" ]; then
-        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n8. **Campaign loop active**: Round $CAMPAIGN_ROUND | Status: $CAMPAIGN_STATUS | Cumulative speedup: ${CUMULATIVE_SPEEDUP}x | Pending queue: $PENDING_QUEUE_SIZE candidates. See Campaign Loop section in SKILL.md."
+        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n8. **Campaign loop active**: Round $CAMPAIGN_ROUND | Status: $CAMPAIGN_STATUS | Cumulative speedup: ${CUMULATIVE_SPEEDUP}x. See Campaign Loop section in SKILL.md."
+    fi
+
+    OVERLAP_ACTIVE=$(jq -r '.overlap_active // false' "$CHECKPOINT_FILES" 2>/dev/null)
+    OVERLAP_PHASE=$(jq -r '.overlap_phase // ""' "$CHECKPOINT_FILES" 2>/dev/null)
+
+    if [ "$OVERLAP_ACTIVE" = "true" ]; then
+        EXTRA_CONTEXT="${EXTRA_CONTEXT}\n9. **Overlapped debate active**: Phase: $OVERLAP_PHASE. Check debate.next_round_overlap in state.json and debate artifacts on disk. Restart debate from last completed phase."
     fi
 
     # Clean up checkpoint

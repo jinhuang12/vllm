@@ -126,7 +126,13 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
                 "champion_delegate_mapping": {},
                 "delegate_results": {},
             },
-            "async_round_started": False,
+            "next_round_overlap": {
+                "active": False,
+                "phase": None,
+                "selected_winners": [],
+                "profiling_basis": None,
+                "f_values_at_proposal": {},
+            },
         },
         "parallel_tracks": {},
         "integration": {
@@ -154,7 +160,6 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
             "cumulative_e2e_speedup": 1.0,
             "rounds": [],
             "shipped_optimizations": [],
-            "pending_queue": [],
         },
     }
 
@@ -218,7 +223,7 @@ def main() -> None:
 
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--ep", type=int, default=1)
-    p.add_argument("--diminishing-returns-threshold", type=int, default=0.5,
+    p.add_argument("--diminishing-returns-threshold", type=float, default=0.5,
                    help="Stop campaign when top bottleneck < this %% of total latency (default: 0.5)")
 
     p.add_argument("--max-model-len", type=int, default=4096)

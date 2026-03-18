@@ -11,13 +11,14 @@ if [ -n "$STATE_FILES" ]; then
     MODEL=$(jq -r '.target.model_id // "unknown"' "$STATE_FILES" 2>/dev/null)
     STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILES" 2>/dev/null)
     STATUS=$(jq -r '.campaign.status // "unknown"' "$STATE_FILES" 2>/dev/null)
-    TEAM_NAME=$(jq -r '.team.name // "unknown"' "$STATE_FILES" 2>/dev/null)
+    TEAM_NAME=$(jq -r '.debate.team_name // "unknown"' "$STATE_FILES" 2>/dev/null)
     DEBATE_TEAM=$(jq -r '.debate.team_name // ""' "$STATE_FILES" 2>/dev/null)
     TRACK_COUNT=$(jq -r '.parallel_tracks | length // 0' "$STATE_FILES" 2>/dev/null)
     CAMPAIGN_ROUND=$(jq -r '.campaign.current_round // 0' "$STATE_FILES" 2>/dev/null)
     CAMPAIGN_STATUS=$(jq -r '.campaign.status // ""' "$STATE_FILES" 2>/dev/null)
     CUMULATIVE_SPEEDUP=$(jq -r '.campaign.cumulative_e2e_speedup // 1.0' "$STATE_FILES" 2>/dev/null)
-    PENDING_QUEUE_SIZE=$(jq '.campaign.pending_queue | length // 0' "$STATE_FILES" 2>/dev/null)
+    OVERLAP_ACTIVE=$(jq -r '.debate.next_round_overlap.active // false' "$STATE_FILES" 2>/dev/null)
+    OVERLAP_PHASE=$(jq -r '.debate.next_round_overlap.phase // ""' "$STATE_FILES" 2>/dev/null)
 
     # Create checkpoint for restoration
     CHECKPOINT_FILE="$STATE_DIR/compaction_checkpoint.json"
@@ -34,7 +35,8 @@ if [ -n "$STATE_FILES" ]; then
   "campaign_round": $CAMPAIGN_ROUND,
   "campaign_status": "$CAMPAIGN_STATUS",
   "cumulative_speedup": $CUMULATIVE_SPEEDUP,
-  "pending_queue_size": $PENDING_QUEUE_SIZE,
+  "overlap_active": $OVERLAP_ACTIVE,
+  "overlap_phase": "$OVERLAP_PHASE",
   "state_file": "$STATE_FILES",
   "skill_path": ".claude/skills/ammo/SKILL.md"
 }

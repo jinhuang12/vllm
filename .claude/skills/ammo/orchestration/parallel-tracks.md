@@ -1,10 +1,35 @@
 # Stages 4-5: Parallel Worktree Track Management
 
-Each winning candidate from Stage 3 gets its own git worktree, branch, and subagent pipeline. Tracks run in parallel across GPUs; steps within a track run sequentially.
+Each winning candidate from Stage 3 gets its own git worktree, branch, and implementation agent pair. All agents -- across all tracks -- belong to the **same round team** created at the start of Stage 3. The orchestrator can only lead one team at a time, so a single round-scoped team is used for the entire round lifecycle (debate through implementation). Tracks run in parallel across GPUs. Within a track, the champion and validator collaborate fluidly -- both may be active simultaneously, with GPU access coordinated via SendMessage. During round 2+, debate champions for the next round may also be present in the team (see Overlapped Debate below). Implementation and debate agents share the team but operate as independent workstreams -- they do not communicate directly.
+
+## Team Structure (Single Round Team)
+
+All implementation agents join the existing round team. The team was created at Stage 3 start (`ammo-round-{round_id}-{model_short}-{hardware}`) and persists through Stages 4-5.
+
+```
+Round Team: ammo-round-{round_id}-{model_short}-{hardware}
+[Implementation Workstream]
++-- impl-champion-{op_id_1} (Opus)    -- implementation, kill-criteria evaluation
++-- impl-validator-{op_id_1} (Sonnet)  -- independent correctness tests, benchmarks, E2E sweep
++-- impl-champion-{op_id_2} (Opus)    -- implementation, kill-criteria evaluation
++-- impl-validator-{op_id_2} (Sonnet)  -- independent correctness tests, benchmarks, E2E sweep
+[Overlapped Debate Workstream -- round 2+ only]
++-- champion-r{N+1}-1 (Opus)          -- next-round debate champion [shut down after selection]
++-- champion-r{N+1}-2 (Opus)          -- next-round debate champion [shut down after selection]
++-- delegate-r{N+1}-1a (Sonnet)       -- debate delegate [shut down after selection]
+```
+
+Each track uses an **adversarial validation model**: the champion implements, an independent validator validates. This separation prevents reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation).
+
+**Why adversarial validation**: The AMMO pipeline has observed four types of reward hacking when the same agent both implements and validates. Separating implementation from validation into independent agents with differing goals catches issues in real-time. The existing DA Stop hook remains as a third verification layer.
+
+**Why a single team**: The orchestrator can only lead ONE team at a time. Creating per-track teams (`ammo-impl-{op_id}`) is architecturally impossible — the orchestrator would lose contact with all but the last-created team. A single round-scoped team keeps all agents under one roof.
 
 ## Worktree Creation
 
-Worktrees are created automatically by the Agent tool when spawning `ammo-implementer` subagents (which have `isolation: worktree` in their definition). The `WorktreeCreate` hook (`worktree-create-with-build.sh`) pre-configures Python isolation, copies `.so` files, and creates a per-worktree `.venv`.
+Worktrees are created automatically by the Agent tool when spawning `ammo-impl-champion` subagents (which have `isolation: worktree` in their definition). The `WorktreeCreate` hook (`worktree-create-with-build.sh`) pre-configures Python isolation, copies `.so` files, and creates a per-worktree `.venv`.
+
+The validator agent shares the champion's worktree (same track team). Both agents may be active simultaneously — GPU access is coordinated via SendMessage, with the champion having priority.
 
 ## GPU Assignment
 
@@ -15,43 +40,35 @@ Worktrees are created automatically by the Agent tool when spawning `ammo-implem
 | Track 2 (op_id 3) | `2` | Kernel benchmarks, micro-validation |
 | E2E benchmarks | All GPUs | Sequential via `flock` on `/tmp/ammo_gpu_locks/` |
 
-E2E benchmarks require exclusive GPU access. The existing flock mechanism serializes them:
+Within a track, GPU access is coordinated via SendMessage — the champion has priority, and the validator yields when the champion needs the GPU for compilation or smoke tests. During validation, the champion is idle and the validator has exclusive GPU access.
 
-```bash
-flock /tmp/ammo_gpu_locks/gpu_all.lock -c "run_e2e_benchmark.sh"
-```
-
-## Worktree Build Rules (CRITICAL — Read Before Running Any Commands)
-
-The worktree-create hook pre-configures Python isolation. Agents MUST follow these rules:
+## Worktree Build Rules (CRITICAL)
 
 | Change Type | Required Action | Time |
 |-------------|----------------|------|
 | **Pure Python** (model code, Triton kernels, configs) | Edit, test, commit. **NO rebuild.** | Immediate |
 | **C++ kernel** (csrc/ changes) | `cmake --preset release && cmake --build --preset release --target install` | ~5-55s (ccache) |
 
-**Why no rebuild for Python**: The hook copies all `.so` files from the main repo and configures `.pth` files so worktree Python code takes priority over the main repo. Triton kernels JIT-compile at runtime.
-
-**AVOID** — these are redundant and waste 10-15 minutes:
-- `pip install -e .` — triggers full C++ rebuild unnecessarily
-- `pip install -e . --no-build-isolation` — still rebuilds C++
-- `python setup.py build_ext --inplace` — unnecessary if no C++ changes
+**Only the champion compiles.** The validator never runs cmake. The validator only executes against committed, compiled code.
 
 ## Per-Track Execution Pipeline
 
-Each track follows these four steps **sequentially**. All tracks run **in parallel** with each other.
+### Orchestrator Spawns Implementation Agents
 
-### Step 1: Implementation + Validation (ammo-implementer Subagent)
+The round team already exists from Stage 3 (`ammo-round-{round_id}-{model_short}-{hardware}`). No new TeamCreate is needed. All implementation agents join the existing team.
 
-Main spawns an implementer subagent that writes the optimization code, runs validation (correctness tests, kernel benchmarks, E2E benchmarks), and writes `validation_results.md`. The implementer works in an isolated worktree (auto-created via `isolation: worktree`).
+```python
+# existing_team_name = state.json -> debate.team_name
+# e.g., "ammo-round-1-llama70b-h100"
 
-A frontmatter Stop hook (DA) on the implementer verifies `validation_results.md` is complete, runs an Amdahl's Law sanity check, verifies baseline citation and production parity, and checks for cross-track contamination risk before allowing it to stop. If any check fails, the hook blocks the implementer and tells it what to fix.
-
-```
+# Per winning candidate — spawn into the EXISTING round team (no TeamCreate):
 Agent(
-    subagent_type="ammo-implementer",
+    name=f"impl-champion-{op_id}",
+    subagent_type="ammo-impl-champion",
+    team_name=existing_team_name,    # Reuse round team, NOT a per-track team
     prompt="""
-    You are implementing and validating optimization {op_id} for the AMMO pipeline.
+    You are implementing optimization {op_id} for the AMMO pipeline.
+    Your validator is impl-validator-{op_id}.
 
     Artifact dir: {artifact_dir}
     Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
@@ -63,90 +80,108 @@ Agent(
     - Per-batch-size JSON: {artifact_dir}/runs/baseline_bs{N}.json
     - Summary table: {artifact_dir}/constraints.md ("Baseline E2E latency" section)
     - Kernel breakdown: {artifact_dir}/constraints.md ("Baseline Truth Snapshot" section)
-    Use these for ALL E2E comparisons. Do NOT run a baseline from the worktree.
 
     ## Kill Criteria
     {kill_criteria_from_optimization_plan}
 
-    Instructions:
-    Phase 1 — Implementation:
-    1. Read the optimization plan and bottleneck analysis for {op_id}.
-    2. Implement the optimization.
-    3. If C++ changes (csrc/): run cmake --preset release && cmake --build --preset release --target install
-    4. Commit implementation.
+    Workflow:
+    1. Delegate research to your validator while you read debate artifacts
+    2. Implement the kernel optimization (use validator for codebase lookups as needed)
+    3. Commit implementation, then delegate validation (all 3 gates) to your validator
+    4. Evaluate kill criteria from validator's raw data, write validation_results.md
+    """
+)
 
-    Phase 2 — Validation:
-    5. Run correctness tests (Gate 5.1): torch.allclose() against vLLM production kernel.
-    6. Run kernel benchmarks (Gate 5.2): both baseline and optimized captured in CUDA graphs.
-    7. Run E2E benchmark (Gate 5.3): ONLY the optimized run. Compare against Stage 1 baseline.
-       Use the sweep script:
-       python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
-         --artifact-dir {artifact_dir} --labels opt
-       FORBIDDEN: Do NOT use raw `vllm bench latency` commands. The sweep script is mandatory for all E2E measurements.
-    8. Evaluate all kill criteria with definitive PASS/FAIL verdicts.
-    9. Write results to {artifact_dir}/tracks/{op_id}/validation_results.md.
-    10. Commit validation results.
-    11. Return: overall PASS/FAIL, key metrics, worktree path.
+# Validator in the same round team (shared worktree via champion)
+Agent(
+    name=f"impl-validator-{op_id}",
+    subagent_type="ammo-impl-validator",
+    model="sonnet",
+    team_name=existing_team_name,    # Same round team as champion
+    prompt="""
+    You are the independent validator for optimization {op_id}.
+    Your champion is impl-champion-{op_id}.
+
+    Artifact dir: {artifact_dir}
+    GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
+
+    Wait for initial tasks from your champion via SendMessage.
+    You support the champion throughout: research, profiling, codebase lookups, proactive advisories.
+    When the champion requests validation, write your OWN independent tests and benchmarks (Gates 5.1, 5.2, 5.3).
+
+    Key references:
+    - Benchmark template: .claude/skills/ammo/references/kernel-benchmark-template.py
+    - Validation defaults: .claude/skills/ammo/references/validation-defaults.md
+    - CUDA graph safety: .claude/skills/ammo/references/cudagraph-safety.md
     """
 )
 ```
 
-The implementer subagent returns upon completion. The frontmatter Stop hook (DA) has already verified validation completeness, Amdahl's Law sanity, baseline citation, production parity, and cross-track contamination awareness before allowing the implementer to stop. Main resumes and records the worktree path from the agent result.
+### Collaboration Timeline
 
-### Step 2: Compilation Gate (Main Session)
+The champion and validator work as a team with fluid collaboration. Both may be active simultaneously, except during the validation phase when the champion must remain idle:
 
-Main verifies the implementation compiles from the implementer's worktree:
+```
+Early:     Validator researches + profiles (ncu, dispatch, shapes)
+           Champion reads debate artifacts, receives research report
+           Both active — validator assists champion as needed
 
-```bash
-cd {worktree_path}
-source .venv/bin/activate
-python -c "import vllm; print('compilation OK')"
+Mid:       Champion implements kernel (sole source modifier)
+           Validator assists: codebase lookups, proactive advisories, prep work
+           Champion has GPU priority for compilation/smoke tests
+
+Late:      Champion commits implementation, requests validation
+           Validator runs independent Gates 5.1/5.2/5.3 (writes OWN tests/benchmarks)
+           Champion IDLE during validation (validator needs stable code + GPU)
+
+Final:     Champion evaluates validator's raw data, writes validation_results.md
+           DA Stop hook fires on champion
 ```
 
-If compilation fails, the track is marked `FAILED` in `state.json` and no further steps run.
+### Key Rules (Not Phases)
 
-### Step 3: State Update (Main Session)
+1. **Only the champion modifies source files** (csrc/, vllm/, etc.). The validator reads files and writes to `{artifact_dir}/tracks/{op_id}/validator_prep/`.
+2. **Champion has GPU priority.** Validator coordinates via SendMessage before GPU-intensive work (ncu profiling). Champion signals when it needs the GPU.
+3. **Independent validation is non-negotiable.** When validating, the validator writes its OWN correctness tests and benchmarks from the optimization plan — not from the champion's scripts. This is the reward hacking prevention mechanism.
+4. **During validation, champion is idle.** The validator needs stable committed code and exclusive GPU access for accurate measurements.
 
-Main reads the validation results and updates `state.json`:
+### Three Layers of Verification
 
-```bash
-# Read results
-cat {artifact_dir}/tracks/{op_id}/validation_results.md
+```
+Layer 1: Independent Validator (Sonnet)
+  Writes OWN correctness tests, OWN benchmark scripts, runs E2E sweep
+  Reports raw structured results — no interpretation
+
+Layer 2: Champion Review (Opus)
+  Evaluates kill criteria against validator's raw data
+  Cross-checks Gate 5.2 numbers against own smoke-test
+  Writes final validation_results.md with evidence chain
+
+Layer 3: DA Stop Hook (Sonnet, frontmatter on champion)
+  Fires when champion attempts to stop
+  Audits validation_results.md: completeness, Amdahl's consistency,
+  production parity, independent validation existence, benchmark cross-check
 ```
 
-Update `state.json` field `parallel_tracks.{op_id}.result` with:
+### Handling Validation Failures
 
-```json
-{
-  "status": "PASSED | FAILED | REGRESSED",
-  "correctness": true,
-  "kernel_speedup": 1.35,
-  "e2e_speedup": 1.12,
-  "validation_results_path": "{artifact_dir}/tracks/{op_id}/validation_results.md"
-}
-```
+When the validator reports a gate failure:
 
-**Note**: The DA audit is embedded in the implementer's frontmatter Stop hook — if the implementer returned successfully, the DA already passed (Amdahl's check, baseline citation, production parity, cross-track awareness). No separate DA artifact is produced.
+1. Validator reports failure details to champion
+2. Champion diagnoses root cause
+3. Champion fixes implementation, recompiles if needed, commits
+4. Champion re-delegates validation with new commit SHA
+5. Validator re-runs ALL gates from scratch with fresh independent tests
 
-## Async Debate (Round 2+ Only)
-
-**MANDATORY**: Immediately after spawning all implementer subagents, the orchestrator must also launch a new debate for round N+1 if this is round 2 or later (round 1 has no prior bottleneck data to debate from).
-
-1. Create a new debate team from the EXISTING `bottleneck_analysis.md` (do not re-profile).
-2. Follow the full adversarial protocol — same as Stage 3, no lighter screening.
-3. Winners go to `campaign.pending_queue` in state.json — NOT to implementation.
-4. Set `debate.async_round_started: true` in state.json when the debate team is created.
-
-The async debate runs concurrently with implementers. The orchestrator monitors both: gating implementer results as they complete while also moderating the debate team.
-
-If an implementer ships a candidate (triggering re-profiling later in Stage 7), the in-progress debate should still finish. Queued winners will be re-validated against new profiling data during stale queue handling (see `integration-logic.md` § Stale Queue Handling).
+The validator writes new tests each re-delegation cycle — the champion cannot "fix" by influencing the test methodology.
 
 ## Result Collection
 
 After all tracks complete, main reads each track's outputs:
 
-1. `{artifact_dir}/tracks/{op_id}/validation_results.md` -- detailed results
-2. `state.json` field `parallel_tracks.{op_id}.result` -- structured summary
+1. `{artifact_dir}/tracks/{op_id}/validation_results.md` — champion's final report
+2. `{artifact_dir}/tracks/{op_id}/validator_tests/` — validator's independent scripts and results
+3. `state.json` field `parallel_tracks.{op_id}.result` — structured summary
 
 Main aggregates results to determine which candidates pass to Stage 6 integration.
 
@@ -154,29 +189,82 @@ Main aggregates results to determine which candidates pass to Stage 6 integratio
 
 A track **passes** if all of the following hold:
 
-- Correctness tests pass (no regressions)
-- Kernel benchmark shows measurable speedup (>1% over baseline)
-- E2E benchmark shows non-negative impact (>=1.0x)
-- Implementer's frontmatter DA Stop hook passed (Amdahl's check, baseline citation, production parity)
+- Gate 5.1: Validator's independent correctness tests pass (no regressions)
+- Gate 5.2: Validator's independent kernel benchmark shows measurable speedup (>1% over baseline)
+- Gate 5.3: E2E benchmark shows non-negative impact (>=1.0x)
+- Champion's DA Stop hook passed (Amdahl's check, baseline citation, production parity, independent validation exists)
+- No unresolved benchmark divergence between champion and validator (if both ran Gate 5.2)
 
-## Worktree Cleanup
+## Team and Worktree Cleanup
 
-After Stage 6 integration is complete (or a track is abandoned), clean up:
+After all implementation tracks have completed and results are collected:
+
+1. **TeamDelete** the round team (`ammo-round-{round_id}-{model_short}-{hardware}`). This is the only TeamDelete in the round lifecycle -- it shuts down any remaining implementation agents. TeamDelete is called only after all implementation tracks complete AND the overlapped debate (if launched) has completed.
+
+2. **Remove worktrees** for all tracks (after Stage 6 integration is complete or a track is abandoned):
 
 ```bash
 git worktree remove {worktree_path} --force
 ```
 
-Run cleanup for all tracks, including failed ones. The integration branch (if created in Stage 6) is retained until the final patch is shipped.
+Run cleanup for all tracks, including failed ones.
 
 ## In-Flight Tracks During Campaign Re-profiling
 
-When a candidate ships and triggers re-profiling (see Campaign Loop section in `SKILL.md`), other tracks from the same round may still be running. These tracks are NOT terminated:
+When a candidate ships and triggers re-profiling, other tracks from the same round may still be running:
 
-1. Let all in-flight implementations complete against the ORIGINAL round's baseline.
-2. Validate their results using Stage 1 baseline from the current round (not the re-profiled baseline).
-3. If they pass: they also ship as additional cumulative gain — update `campaign.cumulative_e2e_speedup` multiplicatively.
-4. Record all track results in the current round's entry in `campaign.rounds`.
-5. The next campaign round starts only after all current-round tracks have completed.
+1. Let all in-flight implementations complete against the ORIGINAL round's baseline
+2. Validate using Stage 1 baseline from the current round (not re-profiled baseline)
+3. If they pass: they also ship as additional cumulative gain
+4. Record all track results in the current round's `campaign.rounds` entry
+5. Next campaign round starts only after all current-round tracks complete
 
-This ensures no work is wasted — an implementer that started before the re-profile can still contribute a valid optimization, even if the bottleneck landscape has shifted.
+## Overlapped Debate Within the Round Team (Round 2+ Only)
+
+During round 2+, the orchestrator spawns debate champions for the next campaign round into the same round team alongside implementation agents. This overlaps debate with implementation, saving 35-70 minutes per extra round.
+
+### Communication Isolation
+
+Debate champions and implementation agents MUST NOT communicate:
+- The orchestrator does NOT provide implementation agent names in debate champion spawn prompts (and vice versa).
+- Debate champions write to `debate/campaign_round_{N+1}/` (scoped paths).
+- Implementation agents write to `tracks/{op_id}/`.
+- The orchestrator is the only agent that communicates with both workstreams.
+
+### Orchestrator Interleaving Pattern
+
+The orchestrator manages both workstreams through the same team inbox:
+
+1. Broadcast debate Phase 0 start to debate champions.
+2. Check for any impl track completions (DA Stop hook notifications).
+3. If an impl track completed: run T9 gate, update state.json.
+4. Wait for debate Phase 0 completions from all champions.
+5. Run eligibility gate on proposals.
+6. Broadcast debate Round 1 Phase A.
+7. Check for impl track completions again.
+8. Continue alternating until both workstreams complete.
+
+The orchestrator MUST NOT advance to Stage 6 integration until:
+- ALL implementation tracks have completed (PASSED or FAILED)
+- The overlapped debate has completed (winners selected, champions shut down) OR has exceeded the 90-minute timeout (in which case: shut down debate champions, discard partial results, proceed without overlapped debate winners)
+
+### GPU Allocation During Overlap
+
+| Agent Type | GPU Access |
+|-----------|-----------|
+| Implementation champions | Assigned GPU per track (as today) |
+| Implementation validators | Shared GPU with their champion (coordinated via SendMessage) |
+| Debate champions | CPU-based analysis only (roofline, ISA, ncu --query-metrics) |
+| Debate delegates | CPU-based analysis only |
+
+On systems with 3+ GPUs, the last GPU is soft-reserved for debate micro-experiments that need GPU access. It returns to the implementation pool when debate is idle.
+
+### Debate Results Handling
+
+When the overlapped debate completes:
+1. Orchestrator scores candidates using the debate-scoring-rubric.md.
+2. Orchestrator writes `debate/campaign_round_{N+1}/summary.md`.
+3. Orchestrator records winners in `state.json` at `debate.next_round_overlap.selected_winners`.
+4. Orchestrator records each winner's f-value at proposal time in `debate.next_round_overlap.f_values_at_proposal`.
+5. Orchestrator sends `shutdown_request` to all debate champions and delegates.
+6. Winners are used in round N+1 after lazy invalidation (see SKILL.md, Campaign Loop Transition).

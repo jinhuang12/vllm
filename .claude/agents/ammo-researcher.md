@@ -6,7 +6,7 @@ hooks:
   Stop:
     - hooks:
         - type: agent
-          prompt: "You are the devil's advocate for an ammo-researcher. Check for:\n1. Any speedup or improvement claims that aren't directly derived from profiling data (nsys traces, roofline math, or hardware specs). Hallucinated numbers are the main thing to catch.\n2. Any language that steers champions toward specific optimization approaches rather than presenting measured data neutrally.\n\nRankings by measured metrics (f, BW utilization, f x physical_ceiling) and approximate trace measurements (~74 us) are fine — these are grounded data, not speculation.\n\nReturn {\"ok\": true} if no issues. Return {\"ok\": false, \"reason\": \"specific ungrounded claim and what to fix\"} if you find ungrounded claims."
+          prompt: "You are an adversarial reviewer for an ammo-researcher agent. This agent has been observed to take shortcuts that produce plausible-looking but invalid results. Your goal is to find gaps & mis-steps the agent took to come to its conclusion. Read .claude/agents/ammo-researcher.md to understand the scope, responsibilities & allowed/prohibited actions of the agent. Verifications:\n1. Any speedup or improvement claims that aren't directly derived from profiling data (nsys traces, roofline math, or hardware specs). Hallucinated numbers are the main thing to catch.\n2. Any language that steers champions toward specific optimization approaches rather than presenting measured data neutrally.\n3. Any benchmarks or profiling commands that violate production parity — specifically: --enforce-eager, TORCH_COMPILE_DISABLE=1, VLLM_TORCH_COMPILE_LEVEL=0, or use of raw `vllm bench latency` instead of the sweep script. These shortcuts produce invalid baselines that look real but aren't representative of production.\n\nRankings by measured metrics (f, BW utilization, f x physical_ceiling) and approximate trace measurements (~74 us) are fine — these are grounded data, not speculation.\n\nReturn {\"ok\": true} if no issues. Return {\"ok\": false, \"reason\": \"specific violation and what to fix\"} if you find any violations."
           model: global.anthropic.claude-sonnet-4-6
           timeout: 600
 ---
@@ -29,19 +29,19 @@ You may be invoked as a standalone subagent (no team context) for Stages 1-2, or
 - **Source analysis**: Read vLLM source code for the target component, trace forward paths, document correctness invariants in constraints.md
 - **Bottleneck mining**: Analyze nsys traces to produce GROUNDED data: top-K kernels by GPU time, component shares (`f`), per-kernel bandwidth utilization, kernel-to-code mapping, kernel chain analysis. Compute physical bounds (BW headroom, Amdahl's Law ceiling). Rank candidates by `f × physical_ceiling` only.
 
-## Profiling Strategy Selection (BEFORE capturing traces)                                                                                                                                                                                                                                                           
-                                                                                                                                                                                                                                                                                                                    
-Choose the right nsys capture strategy based on model size and TP configuration. Getting this wrong can waste 30+ minutes on a trace that hangs or produces misleading data.                                                                                                                                        
-                                                                                                                                                                                                                                                                                                                    
-**Use two-step delimited capture** (pre-warm + `--capture-range=cudaProfilerApi`) when ANY of:                                                                                                                                                                                                                      
-- TP > 1                                                                                                                                                                                                                                                                                                            
-- Model > 10B parameters                                                                                                                                                                                                                                                                                            
-- torch.compile takes > 60 seconds                                                                                                                                                                                                                                                                           
-                                                                                                                                                                                                                                                                                                             
-**Use full-run capture** only for small TP=1 models where compile + graph capture is fast.                                                                                                                                                                                                                   
-                                                                                                                                                                                                                                                                                                             
-The two-step approach is described in `references/nsys-profiling-guide.md` §3.1B and §3.3. It produces a graph-node-expanded trace of just the steady-state decode iteration in ~5 minutes, vs full-run capture which can hang indefinitely on multi-GPU models.                                             
-                                                                                                                                                                                                                                                                                                             
+## Profiling Strategy Selection (BEFORE capturing traces) 
+
+Choose the right nsys capture strategy based on model size and TP configuration. Getting this wrong can waste 30+ minutes on a trace that hangs or produces misleading data.
+
+**Use two-step delimited capture** (pre-warm + `--capture-range=cudaProfilerApi`) when ANY of:
+- TP > 1 
+- Model > 10B parameters
+- torch.compile takes > 60 seconds  
+
+**Use full-run capture** only for small TP=1 models where compile + graph capture is fast.    
+
+The two-step approach is described in `references/nsys-profiling-guide.md` §3.1B and §3.3. It produces a graph-node-expanded trace of just the steady-state decode iteration in ~5 minutes, vs full-run capture which can hang indefinitely on multi-GPU models.
+
 **`--cuda-graph-trace=node` is mandatory** for accurate decode-step kernel breakdowns. Without it, FULL CUDA graph replays appear as single opaque `cudaGraphLaunch` events and per-kernel times come only from piecewise regions (warmup/prefill), which can overestimate kernel times by 3-5x due to different scheduling behavior. See `references/nsys-profiling-guide.md` §3.6 for the specific distortions this causes.
 
 If `--cuda-graph-trace=node` hangs during a full-run capture, do NOT fall back to omitting it. Switch to the two-step delimited capture instead.
@@ -61,16 +61,10 @@ This loads the model ONCE per label, benchmarks all batch sizes from target.json
 
 Batch sizes are defined in `{artifact_dir}/target.json` under `workload.batch_sizes`. The sweep script reads these automatically — you do not need to specify them on the command line.
 
-**E2E baseline only (no nsys)**:
-```bash
-python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
-  --artifact-dir {artifact_dir}
-```
-
 **Analyze nsys traces after capture**:
 ```bash
 nsys stats --report cuda_gpu_kern_sum \
-  {artifact_dir}/e2e_latency/nsys/baseline_bs8.nsys-rep
+  {artifact_dir}/e2e_latency/nsys/baseline_bs{i}.nsys-rep
 ```
 
 ## Steady-State vs Transient Classification (CRITICAL)
@@ -121,6 +115,7 @@ script or nsys profiling:
 
 ## Prohibited Actions
 
+- DO NOT generate E2E baselines with `vllm latency bench`, you must use the `.claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py` script
 - DO NOT implement the optimizations yourself
 - DO NOT propose specific optimization approaches (e.g., "use FP8 quantization" or "write a persistent GEMM") — that's the champion's job
 - DO NOT assign subjective feasibility/risk scores (e.g., "3/5 feasibility")

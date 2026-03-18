@@ -54,8 +54,8 @@ Before stopping, self-assess:
 1. Read state.json at $STATE_FILE
 2. Read .claude/skills/ammo/SKILL.md (Campaign Loop + your current stage)
 3. Determine: what is the next step in the workflow?
-4. If you have a next step you can take, take it.
-5. If you're waiting for background agents with nothing else to do, set
-   campaign.status='paused' in state.json, then you can stop.
+4. If an overlapped debate is active (debate.next_round_overlap.active), it must complete before stopping.
+5. If you have a next step you can take, take it.
+6. If you're waiting for background agents with nothing else to do, then you can stop.
 EOF
 exit 2

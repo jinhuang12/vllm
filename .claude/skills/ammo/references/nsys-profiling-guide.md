@@ -90,7 +90,7 @@ Optional (more granular, validate in your configuration):
 
 Full-run capture with `--cuda-graph-trace=node` can hang indefinitely. The hang can occur during CUDA graph **replay** under `--cuda-graph-trace=node`, not only during graph creation or torch.compile. Evidence from Qwen3.5-35B-A3B-FP8 on B200: graph capture completed successfully (15s, 102 graphs), BS=1 profiling succeeded (5 iterations), but BS=8 hung after `cudaProfilerStart()` during the first graph replay. Likely cause: per-node replay instrumentation overwhelmed by graph complexity or GPU memory pressure from ~2,142 CUDAGraph objects (50 default capture sizes x ~41 piecewise subgraphs + 50 FULL graphs).
 
-The two-step approach reduces compile/capture overhead in the profiled region (even though it does not fully prevent replay hangs -- see also section 3.1C for reducing the CUDA graph capture surface):
+The two-step approach reduces compile/capture overhead in the profiled region (even though it does not fully prevent replay hangs — see also section 3.1C for reducing the CUDA graph capture surface):
 
 1. **Pre-warm** (no nsys): Run the workload once to populate torch.compile and Triton autotuning caches on disk. Note: CUDA graphs are in-memory only and will be recaptured in Step 2 (see note on caching below).
 2. **Profile with delayed capture**: Use `--capture-range=cudaProfilerApi` so nsys idles through model load, compile, and graph capture, then traces only the profiled iteration.
@@ -374,7 +374,7 @@ For deeper inspection, prefer saving a report with `-o`/`--export` and opening i
 
 ### 5.1 nsys
 - Use `--trace-fork-before-exec=true` to follow vLLM worker processes.
-**For TP > 1**: Use the two-step delimited capture (section 3.1B, section 3.3) and consider reducing the CUDA graph capture surface (section 3.1C). Full-run capture with `--cuda-graph-trace=node` can hang during graph replay when per-node instrumentation is overwhelmed by the number of CUDAGraph objects. The two-step approach (pre-warm without nsys, then `--capture-range=cudaProfilerApi`) reduces overhead, and restricting `--cudagraph-capture-sizes` further mitigates replay hangs.                                                                                                                                                                                                                                                    
+**For TP > 1**: Use the two-step delimited capture (section 3.1B, section 3.3) and consider reducing the CUDA graph capture surface (section 3.1C). Full-run capture with `--cuda-graph-trace=node` can hang during graph replay when per-node instrumentation is overwhelmed by the number of CUDAGraph objects. The two-step approach (pre-warm without nsys, then `--capture-range=cudaProfilerApi`) reduces overhead, and restricting `--cudagraph-capture-sizes` further mitigates replay hangs.
 - Single-GPU tracing (`CUDA_VISIBLE_DEVICES=0`) is useful for kernel-level analysis but cannot capture multi-GPU communication patterns. For TP models, trace all GPUs but use delimited capture to keep trace size manageable.
 - For CUDA graphs, include `--cuda-graph-trace=node` to see per-kernel detail.
 
