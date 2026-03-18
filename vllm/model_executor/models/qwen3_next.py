@@ -31,11 +31,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fla.ops import (
-    _VLLM_GDN_FUSED_GATING,
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
 from vllm.model_executor.layers.fla.ops import (
-    fused_gating_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
@@ -731,34 +729,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
             mixed_qkv_non_spec
         )
-
-        # Fast path: fused gating + wide-tile recurrent for pure decode
-        if (
-            _VLLM_GDN_FUSED_GATING
-            and spec_sequence_masks is None
-            and attn_metadata.num_prefills == 0
-            and attn_metadata.num_decodes > 0
-        ):
-            a_3d = a.unsqueeze(0)  # [num_tokens, HV] -> [1, num_tokens, HV]
-            b_3d = b.unsqueeze(0)
-            core_attn_out_non_spec, _ = fused_gating_recurrent_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                a=a_3d,
-                b_input=b_3d,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[
-                    : attn_metadata.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                use_qk_l2norm_in_kernel=True,
-            )
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-            return
 
         g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
