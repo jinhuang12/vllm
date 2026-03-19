@@ -21,6 +21,9 @@ You are the **lead orchestrator**. You scaffold, delegate, and gate — you neve
 - Do not write kernel code (CUDA or Triton) yourself
 - Do not skip team creation "for efficiency"
 - Do not implement directly — always delegate to subagents
+- Do not override state.json configuration (delegation, thresholds, etc.) without user approval
+
+**Configuration Fidelity**: The orchestrator MUST respect all `state.json` configuration flags as written. If the orchestrator believes a configuration should change (e.g., disabling delegation for a round), it MUST propose the change to the user and wait for approval before acting. The orchestrator does NOT have discretion to override configuration settings — it scaffolds, delegates, and gates, not makes policy.
 
 ## Invocation
 
@@ -119,7 +122,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 **When to launch**: Immediately after spawning all implementation agents for round N. The debate uses the EXISTING bottleneck_analysis.md (from the most recent profiling) -- it does NOT wait for re-profiling.
 
 **How it works**:
-1. Spawn 2-4 ammo-champion agents (+ delegates if enabled) into the existing round team.
+1. Spawn 2-4 ammo-champion agents (+ delegates — REQUIRED when delegation.enabled is true) into the existing round team.
 2. Moderate debate using the standard protocol (Phase 0 -> rounds -> selection).
 3. Interleave debate moderation with implementation monitoring: broadcast debate phase starts, then check for impl track completions, then wait for debate phase completions.
 4. When debate finishes: score winners, shut down debate champions via `shutdown_request`. Record winners in `debate.next_round_overlap.selected_winners`.
@@ -162,7 +165,7 @@ When `--nsys-profile` is used, the sweep script automatically restricts `cudagra
 
 - **TeamCreate**: `ammo-round-{round_id}-{model_short}-{hardware}` — this is the **round team**, created once and reused through Stages 4-5.
 - Spawn 2-4 ammo-champion agents into the round team. Each reads the grounded bottleneck_analysis.md independently.
-- **Delegation**: If `state.json` has `debate.delegation.enabled: true`, also spawn Sonnet delegate agents alongside champions (1-N per champion, configurable via `delegates_per_champion`). Champions direct delegates via SendMessage for research and micro-experiments. See `orchestration/debate-protocol.md` § Delegation.
+- **Delegation**: If `state.json` has `debate.delegation.enabled: true`, the orchestrator MUST spawn Sonnet delegate agents alongside champions (1-N per champion, per `delegates_per_champion`). Skipping delegates when the flag is `true` is a protocol violation. To disable delegation for a specific round, the orchestrator MUST update `delegation.enabled` to `false` in state.json WITH user approval first. Champions direct delegates via SendMessage for research and micro-experiments. See `orchestration/debate-protocol.md` § Delegation.
 - **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists. With delegation, champions may direct delegates to extract profiling data and run roofline calculations.
 - **Debate rounds**: Champions argue for their proposals, critique others, rebut. See `orchestration/debate-protocol.md`.
 - Main session selects 2-3 winners using scoring rubric (`references/debate-scoring-rubric.md`).
@@ -177,7 +180,7 @@ Execute these steps **in order**:
 
 1. **Spawn implementation agents into the round team**: Per winning candidate, spawn an `ammo-impl-champion` (Opus, `isolation: worktree`) and an `ammo-impl-validator` (Sonnet) into the existing round team (the same team used for debate). The champion implements; the validator independently writes its own correctness tests, benchmark scripts, and runs E2E sweeps. The DA TeammateIdle hook fires on the champion, who aggregates the validator's raw results into `validation_results.md`. GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
 
-2. **Launch overlapped debate (round 2+ only)**: If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents (+ delegates if enabled) into the same round team. Follow the standard debate protocol (Phase 0 -> rounds -> selection) while also monitoring implementation tracks. See "Overlapped Debate" section above. For round 1, skip this step.
+2. **Launch overlapped debate (round 2+ only)**: If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents (+ delegates — REQUIRED when delegation.enabled is true) into the same round team. Follow the standard debate protocol (Phase 0 -> rounds -> selection) while also monitoring implementation tracks. See "Overlapped Debate" section above. For round 1, skip this step.
 
 3. **Monitor and gate**: While implementation agents run, actively monitor progress. Interleave debate moderation (if active) with implementation gating. As each champion completes (DA Stop hook passed), run its compilation gate (T9) and update state.json. Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed.
 
@@ -288,10 +291,10 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 | **WorktreeCreate** | `worktree-create-with-build.sh` | Sets up build environment in new worktrees |
 | **WorktreeRemove** | `worktree-remove-cleanup.sh` | Cleans up worktree resources |
 
-Subagent-level hooks (frontmatter in agent definitions):
-- **ammo-researcher** Stop → DA checks for ungrounded claims
-- **ammo-impl-champion** Stop → DA checks validation completeness, Amdahl's Law, baseline citation, independent validation existence, benchmark cross-check
-- **ammo-champion** TeammateIdle → DA checks custom kernel mandate, micro-experiment evidence
+Inline DA verification (integrated into helper agents — replaces non-functional Stop hook DAs for team members):
+- **ammo-delegate** → After Phase 0 proposal and each round's argument: 6-point DA audit (custom kernel mandate, micro-experiment evidence, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target). Writes audit files to `debate/delegate_work/` for orchestrator visibility.
+- **ammo-impl-validator** → After Gates 5.1/5.2/5.3: 5-point DA section in validation report (Amdahl sanity, cross-track awareness, kernel-to-E2E coherence, scope adherence, Gate 5.2 cross-check).
+- **ammo-researcher** Stop → DA checks for ungrounded claims (subagent — Stop hooks work correctly).
 
 ## State Management
 

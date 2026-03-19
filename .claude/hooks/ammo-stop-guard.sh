@@ -1,35 +1,59 @@
 #!/bin/bash
-# Stop hook — AMMO campaign self-assessment prompt.
-# Fires ONLY for main session (SubagentStop is separate).
+# Stop hook — AMMO orchestrator continuation nudge.
 #
-# Instead of stage-specific logic (which can get cases wrong because
-# it lacks the orchestrator's full context), this hook emits a single
-# generic prompt that asks the orchestrator to self-assess its workflow
-# state — the same pattern as the Resume Protocol in SKILL.md.
+# Only fires for the ORCHESTRATOR (not teammates) and only at stages
+# where the orchestrator should autonomously continue:
+#   - Stage 7 (campaign evaluation): should proceed to next round or Stage 7b
+#   - Stage 7b (report generation): should spawn report subagent
+#   - Any stage with active overlapped debate that hasn't completed
+#
+# Teammates are excluded by checking if the session is the team lead.
 #
 # Uses file-based one-shot circuit breaker (keyed by session_id):
-#   1st stop attempt: create marker file, nudge with self-assessment prompt
+#   1st stop attempt: create marker file, nudge with stage-specific prompt
 #   2nd stop attempt: marker file exists → allow through
 set -euo pipefail
 if ! command -v jq &>/dev/null; then exit 0; fi
 
 INPUT=$(cat)
 
-# Circuit breaker: file-based, scoped to session.
-# stop_hook_active only guards against immediate re-stop (no work in between).
-# Our nudge tells Claude to DO work, so the next stop is a new cycle with
-# stop_hook_active=false again — creating an infinite loop. A file marker
-# survives across stop cycles regardless of intervening work.
+# ── Skip for teammates ──
+# Teammates have --agent-name set, which means they won't be the lead.
+# Check: if any team config lists our session_id as leadSessionId, we're the lead.
+# Simpler: teammates run inside a team context but are NOT the lead session.
+# The lead session created the team — its session_id matches leadSessionId.
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
-MARKER="/tmp/ammo-stop-nudged-${SESSION_ID}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 
+IS_LEAD=false
+for team_cfg in "$HOME/.claude/teams"/*/config.json; do
+    [ -f "$team_cfg" ] || continue
+    lead_sid=$(jq -r '.leadSessionId // empty' "$team_cfg" 2>/dev/null)
+    if [ "$lead_sid" = "$SESSION_ID" ]; then
+        IS_LEAD=true
+        break
+    fi
+done
+
+# If we found team configs but none had our session_id as lead, we're a teammate.
+# If no team configs exist at all, we might be the orchestrator running solo — continue checks.
+HAS_TEAMS=false
+for team_cfg in "$HOME/.claude/teams"/*/config.json; do
+    [ -f "$team_cfg" ] && HAS_TEAMS=true && break
+done
+
+if [ "$IS_LEAD" = "false" ] && [ "$HAS_TEAMS" = "true" ]; then
+    exit 0  # Team exists but we're not the lead — allow stop without nudge
+fi
+
+# ── Circuit breaker ──
+MARKER="/tmp/ammo-stop-nudged-${SESSION_ID}"
 if [ -f "$MARKER" ]; then
     rm -f "$MARKER"
     exit 0
 fi
 
-# Find state.json — prefer active campaigns over completed ones.
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+# ── Find active campaign ──
 STATE_FILE=""
 for d in "$PROJECT_DIR"/kernel_opt_artifacts/*/; do
     [ -f "$d/state.json" ] || continue
@@ -39,23 +63,63 @@ for d in "$PROJECT_DIR"/kernel_opt_artifacts/*/; do
         break
     fi
 done
-[ -z "$STATE_FILE" ] && exit 0  # no active AMMO campaign
+[ -z "$STATE_FILE" ] && exit 0  # no active campaign
 
 STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILE" 2>/dev/null)
 ROUND=$(jq -r '.campaign.current_round // 1' "$STATE_FILE" 2>/dev/null)
+OVERLAP_ACTIVE=$(jq -r '.debate.next_round_overlap.active // false' "$STATE_FILE" 2>/dev/null)
 
-# Drop the marker so the next stop attempt passes through.
+# ── Stage-specific nudge ──
+# Only nudge at stages where the orchestrator should keep going.
+NUDGE=""
+case "$STAGE" in
+    7_campaign_eval*)
+        NUDGE="You are at Stage 7 (Campaign Evaluation). Do NOT stop or ask the user.
+Autonomously decide: check diminishing returns threshold in state.json.
+- If above threshold: update state to next round and continue to Stage 1 (re-profile).
+- If below threshold: set campaign status to campaign_complete or campaign_exhausted, then IMMEDIATELY proceed to Stage 7b (spawn report subagent)."
+        ;;
+    7b_report*|*report_gen*)
+        NUDGE="You are at Stage 7b (Report Generation). Spawn the report subagent now:
+Read .claude/skills/ammo/report/SKILL.md and spawn a general-purpose subagent to generate REPORT.md.
+Do NOT stop without spawning the report subagent."
+        ;;
+    4_5*|*parallel_tracks*|*implementation*)
+        # During implementation: check if overlapped debate should be launched
+        if [ "$ROUND" -ge 2 ] && [ "$OVERLAP_ACTIVE" != "true" ]; then
+            # Round 2+ and overlapped debate not yet launched
+            HAS_TRACKS=$(jq -r '.parallel_tracks | length // 0' "$STATE_FILE" 2>/dev/null)
+            if [ "$HAS_TRACKS" -gt 0 ]; then
+                NUDGE="You spawned implementation agents but have NOT launched the overlapped debate.
+Per SKILL.md Overlapped Debate protocol: immediately launch Round $((ROUND+1)) debate
+champions into the SAME team. Use existing bottleneck_analysis.md — do NOT wait for
+implementation to finish or re-profiling. This saves 35-70 minutes of wall-clock time."
+            fi
+        elif [ "$OVERLAP_ACTIVE" = "true" ]; then
+            NUDGE="Overlapped debate is active (debate.next_round_overlap.active=true).
+Wait for both implementation tracks AND debate to complete before proceeding to Stage 6."
+        else
+            exit 0  # Round 1 implementation — no overlap needed
+        fi
+        ;;
+    *)
+        # For other stages, only nudge if overlapped debate is still active
+        if [ "$OVERLAP_ACTIVE" = "true" ]; then
+            NUDGE="An overlapped debate is still active (debate.next_round_overlap.active=true).
+Wait for debate to complete before stopping. Check teammate status and collect results."
+        else
+            exit 0  # Other stages — allow stop without nudge
+        fi
+        ;;
+esac
+
+[ -z "$NUDGE" ] && exit 0
+
 touch "$MARKER"
 
 cat >&2 <<EOF
-AMMO: Campaign is active (stage: $STAGE, round: $ROUND).
+AMMO: Campaign active (stage: $STAGE, round: $ROUND).
 
-Before stopping, self-assess:
-1. Read state.json at $STATE_FILE
-2. Read .claude/skills/ammo/SKILL.md (Campaign Loop + your current stage)
-3. Determine: what is the next step in the workflow?
-4. If an overlapped debate is active (debate.next_round_overlap.active), it must complete before stopping.
-5. If you have a next step you can take, take it.
-6. If you're waiting for background agents with nothing else to do, then you can stop.
+$NUDGE
 EOF
 exit 2

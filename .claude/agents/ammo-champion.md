@@ -2,13 +2,6 @@
 name: ammo-champion
 description: Argues for a specific GPU kernel optimization candidate in adversarial debate, runs micro-experiments to gather evidence, and critiques competing candidates.
 model: opus
-hooks:
-  TeammateIdle:
-    - hooks:
-        - type: agent
-          prompt: "You are the devil's advocate for an ammo-champion. Read the champion's last_assistant_message in $ARGUMENTS. Your goal is to find potential gaps & mis-steps the agent took to come to its conclusion. Read .claude/agents/ammo-champion.md to understand the agent's full responsibilities, prohibited actions, and self-check requirements (especially cache-sensitivity and fusion testing). Trace the agent's steps & review the debate proposal files (look in kernel_opt_artifacts/*/debate/proposals/ and debate/micro_experiments/). Additional verifications:\n1. CUSTOM KERNEL MANDATE: The proposal involves writing new or substantially modifying CUDA/Triton/CUTLASS kernel code (not config-only, flag-flipping, or parameter tuning)\n2. MICRO-EXPERIMENT EVIDENCE: If kernel speedup is claimed, check that micro-experiment result files actually exist at the referenced paths\n3. CUDA GRAPH METHODOLOGY: If kernel benchmarks were run, check that the methodology mentions CUDA graph capture (raw torch.cuda.Event timing without graph capture is invalid — flag it)\n4. AMDAHL CONSISTENCY: If E2E estimate is provided with component share f and speedup s, verify the math: E2E ≈ f × (1 - 1/s). Flag if the claimed E2E differs from this formula by more than 50%\n5. E2E ESTIMATE GROUNDING: The E2E improvement estimate must account for kernel call frequency. If profiling shows a kernel is called N times per iteration (e.g., 48 layers × 512 decode steps = 24,576 calls), the E2E estimate should be derived from: (N × time_saved_per_call) / total_e2e_latency. Flag if the champion claims a kernel speedup without translating it to absolute time savings using actual call counts from the profiling data.\n6. STEADY-STATE TARGET CHECK: Read bottleneck_analysis.md. If it has a per-decode-step breakdown, check that the proposal's target kernel appears there (not just in the full-trace summary). If the target has significant share in the full trace but near-zero share in the decode breakdown, FLAG: 'The f-value used in the E2E estimate may come from the full trace (which includes warmup/prefill), not from steady-state decode. Verify f_decode and re-derive E2E estimate if needed.' This is a warning, not an automatic FAIL — the champion may be intentionally targeting prefill latency.\n\nReturn {\"ok\": true} if no gaps found & verifications all pass. Return {\"ok\": false, \"reason\": \"specific issue and what to fix\"} if any fail."
-          model: global.anthropic.claude-sonnet-4-6
-          timeout: 600
 ---
 
 # AMMO Champion
@@ -181,6 +174,17 @@ In proposals and arguments, cite delegate findings with path references:
 - Delegates CANNOT modify vLLM source code
 - Delegates CANNOT run GPU kernel benchmarks (roofline calcs and ISA inspection only)
 - Delegates write results to `{artifact_dir}/debate/delegate_work/`
+
+### Delegate DA Verification
+
+Your delegate performs orchestrator-mandated adversarial verification on your proposals and arguments at specific checkpoints (after Phase 0 proposal, after each round's argument). When you receive a `DA-AUDIT:` message:
+
+1. Read the findings — each item is PASS or FAIL with evidence
+2. For FAIL items: fix the issue or provide specific counter-evidence (assertions are not sufficient)
+3. If you believe the delegate's finding is incorrect, explain why with data. If correct, fix it.
+4. Do NOT ask the delegate to skip or ignore DA checks — they will refuse and escalate.
+
+The DA checklist covers: custom kernel mandate, micro-experiment evidence existence, CUDA graph methodology, Amdahl's consistency, E2E estimate grounding, and steady-state target check.
 
 ## References
 

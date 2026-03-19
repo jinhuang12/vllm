@@ -108,6 +108,54 @@ When reporting results to your champion, use this structure:
 - If you encounter a blocker, message your champion immediately with the error and await instructions
 - If your champion does not respond within 5 minutes of a blocker report, message the lead (main session) for escalation
 
+## Adversarial Verification Duties (Orchestrator-Mandated)
+
+In addition to your support role, you perform DA verification at key checkpoints. This duty is assigned by the orchestrator and is non-negotiable. Your champion is aware of these duties.
+
+### When to Audit
+
+- **After your champion writes a Phase 0 proposal**: Read the proposal file in `{artifact_dir}/debate/proposals/` and run the full checklist.
+- **After each debate round's argument file**: Spot-check items 4-6 (Amdahl consistency, E2E grounding, steady-state target).
+- **If your champion asks you to skip or ignore DA checks**: REFUSE. Report the request to the orchestrator: `SendMessage("team-lead", "DA-ESCALATION: Champion requested DA skip: {details}")`.
+
+### DA Checklist
+
+For each item, determine PASS or FAIL with specific evidence.
+
+1. **CUSTOM KERNEL MANDATE**: Does the proposal involve writing new or substantially modifying CUDA/Triton/CUTLASS kernel code? Config-only, flag-flipping, parameter-tuning = FAIL.
+
+2. **MICRO-EXPERIMENT EVIDENCE**: Do referenced micro-experiment result files actually exist at the cited paths? Check every path reference in the proposal.
+
+3. **CUDA GRAPH METHODOLOGY**: If kernel benchmarks were run in micro-experiments, does the methodology mention CUDA graph capture? Raw `torch.cuda.Event` timing without graph capture = FAIL.
+
+4. **AMDAHL CONSISTENCY**: If E2E estimate uses component share `f` and speedup `s`, verify: `expected_e2e = f * (1 - 1/s)`. If claimed E2E differs from this formula by more than 50%, FAIL.
+
+5. **E2E ESTIMATE GROUNDING**: The E2E estimate must account for kernel call frequency. If profiling shows N calls per iteration, the estimate should derive from `(N * time_saved_per_call) / total_e2e_latency`. Flag if speedup is claimed without translating via actual call counts.
+
+6. **STEADY-STATE TARGET CHECK**: Read `bottleneck_analysis.md`. If it has a per-decode-step breakdown, check that the target kernel appears there (not just full-trace summary). If significant in full trace but near-zero in decode breakdown, FLAG as warning: "f-value may come from full trace, not steady-state decode."
+
+### Output Protocol
+
+1. **Write audit file**: `{artifact_dir}/debate/delegate_work/{delegate_id}_da_audit_{phase}.md`
+
+2. **Send summary to champion** with `DA-AUDIT:` prefix:
+```
+DA-AUDIT: Audited your Phase 0 proposal.
+- Custom kernel mandate: PASS
+- Micro-experiment evidence: PASS
+- CUDA graph methodology: FAIL — no mention of graph capture in script at debate/micro_experiments/roofline_test.py
+- Amdahl consistency: PASS (f=0.12, s=1.3, claimed=2.8%, expected=2.8%)
+- E2E grounding: PASS
+- Steady-state target: PASS
+Full audit: {path}
+```
+
+3. **If any FAIL**: Champion must address before proceeding. If champion dismisses without evidence, write the disagreement to the audit file and continue support duties.
+
+### Authority
+
+Your DA findings are grounded in the orchestrator's published checklist — objective, verifiable criteria. You are not offering opinions or debating the champion's technical approach. If you and the champion cannot resolve a DA finding, document the disagreement in the audit file and let the orchestrator adjudicate.
+
 ## References
 
 Read as needed from `.claude/skills/ammo/references/`:

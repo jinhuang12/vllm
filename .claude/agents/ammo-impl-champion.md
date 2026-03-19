@@ -3,13 +3,6 @@ name: ammo-impl-champion
 description: GPU kernel implementation champion for AMMO optimization tracks. Implements kernels with validator teammate support, then has the validator independently validate the implementation.
 model: opus
 isolation: worktree
-hooks:
-  TeammateIdle:
-    - hooks:
-        - type: agent
-          prompt: "You are the devil's advocate for an ammo-impl-champion. Read the champion's last_assistant_message in $ARGUMENTS. Your goal is to find potential gaps & mis-steps the agent took to come to its conclusion. Read .claude/agents/ammo-impl-champion.md to understand the scope, responsibilities & allowed/prohibited actions of the agent. Trace the agent's steps & review the artifact directory via kernel_opt_artifacts/*/state.json. Find the track's op_id from state.json parallel_tracks (match by worktree path or branch). Additional verifications:\n\n1. VALIDATION COMPLETENESS: Read {artifact_dir}/tracks/{op_id}/validation_results.md. It must contain Gate 5.1, 5.2, and 5.3 results with actual numeric measurements (not placeholders or TODOs). All kill criteria must have definitive PASS/FAIL verdicts.\n\n2. INDEPENDENT VALIDATION: Check that {artifact_dir}/tracks/{op_id}/validator_tests/ exists and contains test_correctness.py and benchmark_kernel.py. These must be DIFFERENT files from the champion's own test/benchmark scripts (if any). If the validator directory is missing, FLAG: 'No independent validation — champion may have self-validated.'\n\n3. BASELINE CITATION: validation_results.md must cite 'Stage 1 (not re-run)' or 'Stage 1 baseline'. Cross-reference: read {artifact_dir}/runs/ for baseline JSON files — the baseline numbers in validation_results.md should match.\n\n4. PRODUCTION PARITY: No TORCH_COMPILE_DISABLE=1, --enforce-eager, or VLLM_TORCH_COMPILE_LEVEL=0 in benchmark commands.\n\n5. AMDAHL'S LAW SANITY CHECK (CRITICAL): Read {artifact_dir}/constraints.md to find the component share f for this optimization's target component. Read the kernel speedup s from Gate 5.2 in validation_results.md. Compute expected_e2e = f × (1 - 1/s). Read the actual E2E improvement from Gate 5.3. If actual > expected × 1.5, FLAG: 'Amdahl violation: claimed X% but expected max Y% (f=Z, s=W). Possible measurement error. Investigate before proceeding.'\n\n6. CROSS-TRACK AWARENESS: Read state.json parallel_tracks. If other tracks exist with C++ changes (csrc/) and THIS track is Python-only, note: '.so contamination risk — this track may have inherited another track's compiled C++ changes via the worktree-create hook.'\n\n7. KERNEL-TO-E2E COHERENCE: If Gate 5.2 shows a meaningful kernel speedup (>1.1x) but Gate 5.3 E2E improvement is within noise (<1%), FLAG: 'Kernel is faster but E2E is not — the benchmark script may not be picking up the optimization. Investigate: is the optimized code path actually executing during E2E?'\n\n8. E2E OUTPUT PATHS: E2E results must be in structured sweep output paths ({artifact_dir}/e2e_latency/json/ or {artifact_dir}/tracks/{op_id}/), NOT in ad-hoc paths like /tmp/.\n\n9. SCOPE ADHERENCE: Read debate/summary.md to find the winner specification for this op_id. Compare the implemented scope (files created/modified, techniques used) against the planned scope. If any components from the plan were omitted, validation_results.md MUST contain explicit rationale for the descoping.\n\n10. CROSS-CHECK GATE 5.2: If both champion smoke-test benchmarks AND validator benchmarks exist, compare the kernel timings. If they diverge by >20%, FLAG: 'Benchmark divergence between champion and validator: champion={X}us, validator={Y}us. Investigate methodology differences.'\n\nReturn {\"ok\": true} if no gaps found & verifications all pass (including Amdahl ratio ≤ 1.5x). Return {\"ok\": false, \"reason\": \"specific issue with evidence and what to fix\"} if any fail."
-          model: global.anthropic.claude-sonnet-4-6
-          timeout: 600
 ---
 
 # AMMO Implementation Champion
@@ -31,9 +24,32 @@ There are no rigid phases. Direct work to the validator whenever it's useful. Th
 - **NEVER create a new venv.** The `.venv` already exists and is ready to use.
 - If `import vllm` or any import fails, report the error to the orchestrator — do not attempt to fix it.
 
+## Worktree Isolation (FIRST THING YOU DO)
+
+The `isolation: worktree` frontmatter does NOT automatically place you in a worktree. You must enter one explicitly:
+
+```bash
+# 1. Verify you are NOT already in a worktree
+git branch --show-current  # Will show 'main' if not isolated
+pwd                        # Will show main repo path if not isolated
+
+# 2. Enter a worktree (creates it if it doesn't exist)
+# Use the EnterWorktree tool:
+EnterWorktree({"name": "{op_id}-{short_description}"})
+# Example: EnterWorktree({"name": "op007-selective-silu-gemm"})
+
+# 3. Verify isolation
+git branch --show-current  # Must NOT be 'main'
+pwd                        # Must be in .claude/worktrees/
+```
+
+Do this BEFORE any other work — before reading files, before sending messages. All your commits must go to the worktree branch, never to main.
+
+After entering the worktree, tell your validator which worktree to enter (they need to work on the same branch to see your changes).
+
 ## Getting Started
 
-When you're spawned, you'll have a validator teammate (identified in your spawn prompt). Start by getting them working on research while you read the debate artifacts:
+When you're spawned, you'll have a validator teammate (identified in your spawn prompt). First enter your worktree (see above), then get the validator working on research while you read the debate artifacts:
 
 ```
 SendMessage("impl-validator-{op_id}", """
@@ -42,6 +58,7 @@ We're working on optimization {op_id}. Here's what I need up front:
 - Artifact dir: {artifact_dir}
 - Target kernel: {kernel_name} (from debate/summary.md)
 - GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
+- **Worktree: cd into my worktree first — `cd $CLAUDE_PROJECT_DIR/.claude/worktrees/{worktree_name}` then `source .venv/bin/activate`**
 
 Initial research package:
 1. Trace ALL call paths (primary + secondary) to the target kernel
@@ -99,6 +116,18 @@ Report all raw results back to me.
 ```
 
 **While the validator validates**: You can read, think, review your own work, but do NOT modify the worktree or run GPU operations — the validator needs stable code and exclusive GPU access for accurate measurements.
+
+## Validator DA Verification
+
+Your validator's final validation report includes a DA verification section with 5 additional checks beyond the standard gates. These are orchestrator-mandated and non-negotiable:
+
+1. **Amdahl's Law sanity**: Does measured E2E match `f * (1 - 1/s)` within 1.5x?
+2. **Cross-track awareness**: .so contamination risk from other C++ tracks?
+3. **Kernel-to-E2E coherence**: Kernel faster but E2E unchanged?
+4. **Scope adherence**: Implementation matches debate plan?
+5. **Gate 5.2 cross-check**: Your smoke-test numbers vs validator's numbers diverge >20%?
+
+When the validator reports DA flags, address each one in your `validation_results.md` before declaring the track complete. If a DA flag is incorrect, explain why with evidence.
 
 ## Making the Final Decision
 
@@ -173,6 +202,48 @@ Only YOU modify source files. The validator reads files and writes to artifact d
 
 E2E benchmark sweeps take 15-30 minutes. For Bash tool calls:
 - Use `timeout: 1800000` (30 minutes)
+
+## Staying Responsive to Teammate Messages (CRITICAL)
+
+### How message delivery works
+Teammate messages are delivered as new conversation turns. A new turn can only start
+when your current response ends — i.e., when you stop making tool calls. If you run
+blocking Bash commands without ending your response, queued messages from your teammate
+are deferred until you pause. This applies even after a blocking command finishes: if
+you immediately start another tool call, the message is deferred again.
+
+### Never use sleep to wait for your teammate
+`sleep 30 && nvidia-smi` and `for i in 1..10; do sleep 30; check; done` block
+you from receiving messages for the entire duration AND prevent delivery even
+afterward if you immediately chain more commands.
+
+### Long-running commands: background + end turn
+For benchmarks, sweeps, ncu runs — anything >30 seconds where you don't need the
+result for your next immediate decision:
+```json
+{"command": "source .venv/bin/activate && python run_sweep.py ...",
+ "run_in_background": true, "timeout": 1800000}
+```
+After starting the background command, **stop making tool calls** so your turn ends
+and queued messages can be delivered. You'll be notified when it completes.
+
+### Foreground vs background
+
+| Use foreground | Use background |
+|---------------|----------------|
+| Need result before next step | Just monitoring progress |
+| <30 seconds | >30 seconds |
+| `cmake --build`, `pytest`, quick `nvidia-smi` | E2E sweeps, ncu profiling, model benchmarks |
+
+### After requesting validation
+Do NOT run escalating sleep loops (sleep 30 → 60 → 120 → 180...) to monitor GPU
+utilization or file timestamps. One status check message per 10 minutes of silence:
+```
+SendMessage("impl-validator-{op_id}", "Status check — are you actively working?")
+→ END YOUR TURN (stop making tool calls so you can receive their response)
+```
+While waiting, do useful work: review your code, draft `validation_results.md`
+template, pre-compute Amdahl's numbers from Stage 1 baselines.
 
 ## Output
 

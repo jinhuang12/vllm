@@ -4,13 +4,15 @@ set -euo pipefail
 # WorktreeCreate hook for vLLM
 # Creates a git worktree with build artifacts + Python isolation pre-populated.
 #
-# Input (stdin JSON): { session_id, transcript_path, cwd, hook_event_name, name }
+# Input (stdin JSON):
+#   WorktreeCreate: { session_id, transcript_path, cwd, hook_event_name, name }
+#   PreToolUse:EnterWorktree: { session_id, cwd, hook_event_name, tool_name, tool_input: {name} }
 # Output (stdout): absolute path to the created worktree directory
 # All logging goes to stderr.
 
 # ── Read hook input ──
 INPUT=$(cat)
-WORKTREE_NAME=$(echo "$INPUT" | jq -r '.name // empty')
+WORKTREE_NAME=$(echo "$INPUT" | jq -r '.tool_input.name // .name // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
 [ -z "$WORKTREE_NAME" ] && { echo "ERROR: No worktree name provided" >&2; exit 1; }
