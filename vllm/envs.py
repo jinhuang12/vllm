@@ -160,6 +160,7 @@ if TYPE_CHECKING:
         "full",
         "relax",
     ] = "relax"
+    VLLM_GDN_FUSED_INTERGEMM: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
@@ -1201,6 +1202,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "full",
             "relax",
         ],
+    ),
+    # Whether to use fused GDN inter-GEMM Triton kernels (OP-003).
+    # Fuses split/rearrange + RMSNormGated in GDN layers during decode.
+    "VLLM_GDN_FUSED_INTERGEMM": lambda: bool(
+        int(os.getenv("VLLM_GDN_FUSED_INTERGEMM", "0"))
     ),
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(

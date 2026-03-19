@@ -50,6 +50,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.fla.ops.fused_gdn_intergemm import (
+    VLLM_GDN_FUSED_INTERGEMM,
+    fused_rmsnorm_gated,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -198,7 +202,15 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
+        if VLLM_GDN_FUSED_INTERGEMM:
+            # Fused RMSNorm(x) * silu(z) -- bypasses LayerNormFn.apply
+            core_attn_out = fused_rmsnorm_gated(
+                core_attn_out, z,
+                self.norm.weight,
+                eps=self.norm.eps,
+            )
+        else:
+            core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
