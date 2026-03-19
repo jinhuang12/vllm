@@ -8,11 +8,17 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
+import os
+
 import torch
 
 from vllm.triton_utils import tl, triton
 
 from .op import exp
+
+# op006: When VLLM_GDN_BV8_DECODE=1, use BV=8 instead of BV=32 for the
+# recurrent kernel. More blocks/SM → higher occupancy → better DRAM saturation.
+_USE_GDN_BV8_DECODE = os.environ.get("VLLM_GDN_BV8_DECODE", "0") == "1"
 
 
 @triton.heuristics(
@@ -193,6 +199,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
+    if _USE_GDN_BV8_DECODE:
+        BV = min(BV, 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
