@@ -77,7 +77,8 @@ __global__ void Marlin(
     int prob_k,             // reduction dimension k
     int* locks,             // extra global storage for barrier synchronization
     bool use_atomic_add,    // whether to use atomic add to reduce
-    bool use_fp32_reduce    // whether to use fp32 global reduce
+    bool use_fp32_reduce,   // whether to use fp32 global reduce
+    bool fuse_relu2         // fuse relu2 activation into epilogue
 ) {}
 
 }  // namespace MARLIN_NAMESPACE_NAME
@@ -279,7 +280,8 @@ __global__ void Marlin(
     int* locks,             // extra global storage for barrier synchronization
     bool has_bias,
     bool use_atomic_add,  // whether to use atomic add to reduce
-    bool use_fp32_reduce  // whether to use fp32 global reduce
+    bool use_fp32_reduce, // whether to use fp32 global reduce
+    bool fuse_relu2       // fuse relu2 activation into epilogue
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
@@ -1812,6 +1814,18 @@ __global__ void Marlin(
               reinterpret_cast<scalar_t*>(&b_bias[0])[(threadIdx.x % 8) / 4]);
         }
         res = __hadd2(res, tmp_bias);
+      }
+
+      // Fused relu2 activation: relu(x)^2 = max(0, x)^2
+      // Applied after all scale/bias operations for correctness.
+      if (fuse_relu2) {
+        float r0 = (float)res.x;
+        float r1 = (float)res.y;
+        r0 = fmaxf(r0, 0.0f);
+        r0 *= r0;
+        r1 = fmaxf(r1, 0.0f);
+        r1 *= r1;
+        res = Cdtype::nums2num2(Cdtype::float2num(r0), Cdtype::float2num(r1));
       }
 
       if constexpr (m_block_size_8) {
