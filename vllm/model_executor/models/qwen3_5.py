@@ -149,6 +149,25 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             prefix=prefix,
         )
 
+    def fuse_ba_into_qkvz(self) -> None:
+        """Fuse in_proj_ba weight into in_proj_qkvz for a single larger GEMM.
+
+        Called after weight loading. Concatenates the ba weight rows onto
+        qkvz so that forward() can issue one GEMM [hidden -> qkvz_dim+ba_dim]
+        instead of two separate GEMMs. The standalone in_proj_ba GEMM at
+        N=64 achieves only 2.6% BW utilization; fusing it into the N=12288
+        GEMM eliminates this bottleneck.
+
+        The fused weight is stored as a non-parameter buffer so that
+        torch.compile / CUDA graphs see a static tensor.
+        """
+        qkvz_w = self.in_proj_qkvz.weight.data  # [qkvz_dim, hidden]
+        ba_w = self.in_proj_ba.weight.data        # [ba_dim, hidden]
+        fused = torch.cat([qkvz_w, ba_w], dim=0)  # [qkvz_dim+ba_dim, hidden]
+        self.register_buffer("_fused_qkvzba_weight", fused, persistent=False)
+        self._qkvz_dim = qkvz_w.shape[0]
+        self._ba_dim = ba_w.shape[0]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -156,7 +175,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
     ):
         """
         Forward pass with three parts:
-        1. Input projection
+        1. Input projection (fused qkvz+ba when available)
         2. Core attention (custom op)
         3. Output projection
         """
@@ -165,12 +184,24 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        if hasattr(self, "_fused_qkvzba_weight"):
+            # Fused path: single GEMM for qkvz + ba.
+            # Eliminates the standalone in_proj_ba GEMM (N=64, 2.6% BW util)
+            # by appending ba rows to the in_proj_qkvz weight (N=12352).
+            fused_out = torch.ops.vllm.cuda_skinny_gemm(
+                hidden_states, self._fused_qkvzba_weight, None
+            )
+            mixed_qkvz = fused_out[:, : self._qkvz_dim]
+            ba = fused_out[:, self._qkvz_dim :]
+        else:
+            # Unfused fallback
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
         z_size = self.value_dim // self.tp_size
         mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        ba, _ = self.in_proj_ba(hidden_states)
         b, a = ba.chunk(2, dim=-1)
 
         b = b.contiguous()
@@ -613,7 +644,15 @@ class Qwen3_5ForCausalLMBase(
             self,
             skip_prefixes=["mtp."],
         )
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        # Fuse in_proj_ba into in_proj_qkvz for each linear attention layer
+        # to eliminate the catastrophically inefficient standalone N=64 GEMM.
+        for layer in self.model.layers:
+            if hasattr(layer, "linear_attn") and isinstance(
+                layer.linear_attn, Qwen3_5GatedDeltaNet
+            ):
+                layer.linear_attn.fuse_ba_into_qkvz()
+        return loaded
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
