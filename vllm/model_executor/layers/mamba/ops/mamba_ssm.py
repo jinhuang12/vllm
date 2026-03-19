@@ -410,7 +410,12 @@ def selective_state_update(
             # Optimized for B200 with dstate>64
             BLOCK_SIZE_M, num_warps = 32, 8
         elif dstate <= 128:
-            BLOCK_SIZE_M, num_warps = 4, 4
+            if state.dtype == torch.bfloat16:
+                # BF16 state halves working set, fitting in L2 cache;
+                # larger tile improves CTA efficiency at reduced grid
+                BLOCK_SIZE_M, num_warps = 16, 4
+            else:
+                BLOCK_SIZE_M, num_warps = 4, 4
 
     tie_hdim = (
         A.stride(-1) == 0
