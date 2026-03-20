@@ -94,7 +94,7 @@ Behavior:
 4. Find N free physical GPUs (lowest-numbered first)
 5. If N free GPUs found: write holder info for each, release flock, exit 0
 6. If not enough free: print which GPUs are held by whom + since when, release flock, exit 1
-7. On success: write env file to `/tmp/ammo_gpu_res/env_{holder}.sh`:
+7. On success: write env file to `/tmp/ammo_gpu_res/env_{session_id}_{holder}.sh`:
    ```bash
    export CUDA_VISIBLE_DEVICES=3,4
    export AMMO_GPU_HOLDER=impl-champion-op003
@@ -114,7 +114,7 @@ Behavior:
 1. Acquire brief flock on `.lock`
 2. Read `state.json`, clear all entries matching `holder`
 3. Write updated `state.json`, release flock
-4. Remove `/tmp/ammo_gpu_res/env_{holder}.sh`
+4. Remove `/tmp/ammo_gpu_res/env_{session_id}_{holder}.sh`
 
 #### `gpu_status.py`
 
@@ -176,11 +176,8 @@ Only match clear GPU indicators. The existing read-only command bailout at the t
 # e.g., "nsys profile ...", "ncu ...", "nvidia-smi --query-compute-apps"
 # Matched by: command starts with nsys|ncu, or nvidia-smi with --query-compute
 
-# Pattern 4: CUDA compilation
-# e.g., "cmake --build ... --target install"
-# Matched by: cmake --build (building CUDA extensions needs GPU for testing)
-
 # NOT matched (false positive prevention):
+# - cmake --build (builds don't use GPU; only subsequent tests do)
 # - nvidia-smi (bare, for status checks)
 # - python -c 'print("hello")' (no GPU keywords)
 # - Any command already in the read-only bailout list
@@ -285,7 +282,7 @@ Replace hardcoded `GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}` with:
 ```
 GPU reservation: Reserve 1 GPU via:
   python .claude/skills/ammo/scripts/gpu_reserve.py --gpu-count 1 --holder {agent_name} --session-id {session_id}
-  source /tmp/ammo_gpu_res/env_{agent_name}.sh
+  source /tmp/ammo_gpu_res/env_{session_id}_{agent_name}.sh
 Release when your track completes:
   python .claude/skills/ammo/scripts/gpu_release.py --holder {agent_name}
 ```
@@ -312,7 +309,7 @@ Modified files:
 
 **Agent crash without release**: PID-based stale detection on next reserve attempt. If the PID is dead, the reservation is auto-reclaimed with a warning.
 
-**E2E sweep needs all GPUs but tracks hold some**: The orchestrator coordinates release via SendMessage before launching the sweep. This is documented in the GPU Reservation Protocol. The sweep script's reserve call fails fast if GPUs are still held, giving a clear error.
+**E2E sweep needs all GPUs but tracks hold some**: The orchestrator coordinates release via SendMessage before launching the sweep. This is documented in the GPU Reservation Protocol. The sweep script's reserve call fails fast if GPUs are still held, giving a clear error. On failure, the agent should report the contention to the orchestrator via SendMessage rather than busy-polling retries.
 
 **Hook false positives**: Conservative patterns minimize these. A `python -c 'print("hello")'` won't trigger because it lacks GPU keywords. The warn-only mode means false positives are annoying but not blocking.
 
