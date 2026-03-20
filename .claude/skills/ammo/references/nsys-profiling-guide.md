@@ -232,8 +232,11 @@ Instead of manually running nsys per batch size (which reloads the model each ti
 ```bash
 python scripts/run_vllm_bench_latency_sweep.py \
   --artifact-dir {artifact_dir} \
-  --nsys-profile
+  --nsys-profile \
+  --nsys-output-len 32
 ```
+
+`--nsys-output-len` decouples the profiling sequence length from the benchmark workload's `output_len`. This is critical for large models — see section 3.9 for why `--cuda-graph-trace=node` becomes superlinearly expensive as kernel count × output length grows. `--nsys-num-iters` defaults to `1` when `--nsys-output-len` is set.
 
 This produces **one `.nsys-rep` per bucket** in `{artifact_dir}/e2e_latency/nsys/` (e.g., `baseline_bs1.nsys-rep`, `baseline_bs8.nsys-rep`).
 
@@ -311,6 +314,81 @@ nsys stats --report cuda_api_sum --format csv \
 
 - `cuda_api_sum`:
   - "Are we spending time in `cudaStreamSynchronize` / `cudaMemcpy*` / graph breaks / CPU launch overhead?"
+
+### 3.9 Scaling limits of --cuda-graph-trace=node
+
+`--cuda-graph-trace=node` forces nsys to execute each CUDA graph node individually with full driver instrumentation. The overhead per kernel is NOT constant — it grows superlinearly as the total number of profiled events exceeds CPU cache capacity for trace buffers.
+
+**Overhead model (empirical, observed on SM89 L40S / SM100 B200 hosts — actual overhead varies with host CPU, RAM bandwidth, and nsys version):**
+
+| Total Kernel Events | Effective Overhead/Kernel | Typical Wall Time |
+|---:|---:|---:|
+| <30,000 | ~60 us | <5 min |
+| ~200,000 | ~150 us | ~30 min |
+| >3,000,000 | ~1,500 us | >100 min (may DNF) |
+
+Total events = `kernels_per_step × output_len × num_iters × num_buckets`.
+
+**Key insight**: `--capture-range=cudaProfilerApi` does NOT reduce this overhead. Instrumentation hooks are injected during CUDA graph capture (which happens during warmup, before `cudaProfilerStart()`), not during data collection. Delayed capture reduces trace *size* but not profiling *overhead*.
+
+**Formula for safe profiling output length:**
+
+```
+nsys_OL = min(32, floor(20000 / kernels_per_step))
+```
+
+This keeps events under ~20K per bucket with `num_iters=1`. For multi-bucket sweeps, total events = `kernels_per_step × nsys_OL × num_buckets`. With 3 buckets and ~1,200 kernels/step, total events reach ~57K — above the <30K fast regime but well below the 200K+ danger zone. Profiling will take ~5-10 min rather than <5 min, which is acceptable. For TP > 1, nsys traces all GPU contexts (`--trace-fork-before-exec=true`), roughly multiplying events by TP — use `kernels_per_step × TP` in the formula for conservative estimates. Examples:
+
+| Model | Kernels/Step | nsys_OL |
+|---|---:|---:|
+| Qwen3.5-4B | ~200 | 32 (capped) |
+| Nemotron-3-Nano-30B-A3B | ~400 | 32 (capped) |
+| NemotronH-120B (88 hybrid layers) | ~1,177 | 16 |
+
+**Detecting kernel count (pre-profiling probe):**
+
+Run a short capture with `--cuda-graph-trace=node` and `OL=2` to count kernel executions per step. Using `=node` (not `=graph`) is required — `=graph` collapses each graph replay into a single event, hiding per-kernel detail.
+
+```bash
+# Quick probe: ~2-5 min (model load + warmup + 1 short iter)
+nsys profile \
+  --trace=cuda \
+  --sample=none \
+  --cuda-graph-trace=node \
+  --trace-fork-before-exec=true \
+  -o /tmp/probe \
+  vllm bench latency \
+    --model {model_id} \
+    --batch-size 1 \
+    --input-len 64 \
+    --output-len 2 \
+    --num-iters-warmup 3 \
+    --num-iters 1
+
+# Extract total kernel executions from the summary.
+# cuda_gpu_kern_sum lists unique kernel names with their instance count.
+# Sum the Instances column to get total kernel executions across the trace.
+nsys stats --report cuda_gpu_kern_sum /tmp/probe.nsys-rep
+
+# Approximate kernels_per_step:
+# The trace contains warmup (3 iters × ~3 steps each) + benchmark (1 iter × 3 steps).
+# In graph-replay steady state, each decode step runs a fixed kernel count.
+# Divide total instances by ~12 for a rough estimate of kernels_per_step.
+# If the model has N layers, a quick check: kernels_per_step ≈ N × 10-15
+# for standard transformers, or N × 13-20 for hybrid (MoE+Mamba+Attention).
+```
+
+Then apply the formula to choose `--nsys-output-len` for the real capture. The estimate is approximate — when in doubt, use a conservative (lower) `--nsys-output-len`.
+
+**Note**: profiling at a short OL means decode steps operate on shorter KV sequences (input_len + nsys_OL tokens). For Stage 1 kernel survey (identifying *which* kernels dominate), this is fine — kernel identity and count are constant across KV lengths. For Stage 2 device-level analysis where kernel *duration* matters (e.g., attention scaling with KV length), profile at a representative OL or use targeted ncu on specific kernels.
+
+**Escape hatches when profiling is still too slow:**
+
+| Strategy | When to use |
+|---|---|
+| Reduce `--nsys-output-len` further (e.g., 4-8) | Default first step |
+| `--cuda-graph-trace=graph` | When you only need aggregate graph timing, not per-kernel (see section 3.6 for major caveats — kernel-level data is lost) |
+| Two-pass: nsys survey (OL=8) → targeted ncu on top 3 kernels | When device-level roofline data is needed for Stage 2 |
 
 ## 4) Nsight Compute (ncu): targeted kernel profiling (device bottlenecks)
 

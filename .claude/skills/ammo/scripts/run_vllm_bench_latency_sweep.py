@@ -877,25 +877,29 @@ def _run_inproc_latency_sweep_child(
                 # --trace-fork-before-exec) when ANY process triggers the
                 # capture range — this is an nsys-level mechanism, not CUDA
                 # profiler propagation.
+                _torch_prof = None
                 if nsys_profile:
                     import torch as _torch_prof
                     _torch_prof.cuda.synchronize()
                     _torch_prof.cuda.cudart().cudaProfilerStart()
                     _log(f"[nsys] cudaProfilerStart for {tag}")
 
-                for i in range(num_iters_eff):
-                    if _time.monotonic() > deadline:
-                        raise TimeoutError(f"Bucket timeout exceeded ({timeout_s_per_bucket}s)")
-                    latencies.append(run_to_completion())
-                    if (_time.monotonic() - last_status_t) > 5.0:
-                        _update_status("benchmark", batch_size=bs, extra={"iter": i + 1})
-                        last_status_t = _time.monotonic()
-
-                # Stop nsys capture for this bucket.
-                if nsys_profile:
-                    _torch_prof.cuda.synchronize()
-                    _torch_prof.cuda.cudart().cudaProfilerStop()
-                    _log(f"[nsys] cudaProfilerStop for {tag}")
+                try:
+                    for i in range(num_iters_eff):
+                        if _time.monotonic() > deadline:
+                            raise TimeoutError(f"Bucket timeout exceeded ({timeout_s_per_bucket}s)")
+                        latencies.append(run_to_completion())
+                        if (_time.monotonic() - last_status_t) > 5.0:
+                            _update_status("benchmark", batch_size=bs, extra={"iter": i + 1})
+                            last_status_t = _time.monotonic()
+                finally:
+                    # Stop nsys capture for this bucket. Must happen even on
+                    # exception to avoid corrupting the repeat:N capture count
+                    # and leaving nsys waiting indefinitely.
+                    if nsys_profile and _torch_prof is not None:
+                        _torch_prof.cuda.synchronize()
+                        _torch_prof.cuda.cudart().cudaProfilerStop()
+                        _log(f"[nsys] cudaProfilerStop for {tag}")
 
                 # Match vLLM bench JSON schema.
                 arr = np.array(latencies, dtype=np.float64)
@@ -1039,10 +1043,32 @@ def main() -> None:
             "Total timeout = nsys_timeout_s * num_buckets."
         ),
     )
+    p.add_argument(
+        "--nsys-output-len",
+        type=int,
+        default=None,
+        help=(
+            "Override output_len for nsys profiling only (default: use workload output_len). "
+            "Decouples profiling sequence length from benchmark sequence length to avoid "
+            "superlinear nsys overhead on models with many kernels/step. "
+            "Requires --nsys-profile."
+        ),
+    )
+    p.add_argument(
+        "--nsys-num-iters",
+        type=int,
+        default=None,
+        help=(
+            "Override num_iters for nsys profiling only. Defaults to 1 when "
+            "--nsys-output-len is set. Requires --nsys-profile."
+        ),
+    )
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_cudagraph-capture-sizes", nargs="+", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_nsys-output-len", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_nsys-num-iters", type=int, default=None, help=argparse.SUPPRESS)
 
     args = p.parse_args()
 
@@ -1052,6 +1078,18 @@ def main() -> None:
             raise SystemExit(
                 "nsys not found on PATH. Install Nsight Systems CLI or remove --nsys-profile."
             )
+    if (args.nsys_output_len is not None or args.nsys_num_iters is not None) and not args.nsys_profile:
+        raise SystemExit(
+            "--nsys-output-len and --nsys-num-iters require --nsys-profile."
+        )
+    if args.nsys_output_len is not None and args.nsys_output_len <= 0:
+        raise SystemExit(
+            f"--nsys-output-len must be positive, got {args.nsys_output_len}"
+        )
+    if args.nsys_num_iters is not None and args.nsys_num_iters <= 0:
+        raise SystemExit(
+            f"--nsys-num-iters must be positive, got {args.nsys_num_iters}"
+        )
 
     # Parse and validate --labels.
     selected_labels = {s.strip() for s in args.labels.split(",")}
@@ -1220,6 +1258,11 @@ def main() -> None:
 
     # Validate all buckets fit within max_model_len at plan time.
     _validate_buckets_model_len(buckets, max_model_len)
+    if args.nsys_output_len is not None:
+        _validate_buckets_model_len(
+            [{**b, "output_len": args.nsys_output_len} for b in buckets],
+            max_model_len,
+        )
 
     print("=== Target ===")
     print(f"artifact_dir: {artifact_dir}")
@@ -1234,6 +1277,19 @@ def main() -> None:
         print(f"workload: input_len={input_len}, output_len={output_len}, num_iters={num_iters}")
         print(f"batch_sizes: {batch_sizes}")
     print(f"baseline_label: {baseline_label}, opt_label: {opt_label}")
+    if args.nsys_profile:
+        nsys_ol_eff = args.nsys_output_len if args.nsys_output_len is not None else "(workload)"
+        nsys_ni_eff = args.nsys_num_iters
+        if nsys_ni_eff is None and args.nsys_output_len is not None:
+            nsys_ni_eff = "1 (auto)"
+        elif nsys_ni_eff is None:
+            nsys_ni_eff = "(workload)"
+        print(f"nsys_profile: enabled, nsys_output_len={nsys_ol_eff}, nsys_num_iters={nsys_ni_eff}")
+        print(
+            "WARNING: nsys profiling adds overhead — latency results from this run "
+            "should not be used for performance comparison.",
+            file=sys.stderr,
+        )
 
     if ep != 1:
         print(
@@ -1398,13 +1454,22 @@ def main() -> None:
                 + ["--cudagraph-capture-sizes"]
                 + [str(x) for x in args._cudagraph_capture_sizes]
             )
+        # Apply nsys overrides when present (decouples profiling OL from benchmark OL).
+        child_buckets = buckets
+        child_num_iters = num_iters
+        nsys_ol = getattr(args, "_nsys_output_len", None)
+        nsys_ni = getattr(args, "_nsys_num_iters", None)
+        if nsys_ol is not None:
+            child_buckets = [{**b, "output_len": nsys_ol} for b in buckets]
+        if nsys_ni is not None:
+            child_num_iters = nsys_ni
         returncode = _run_inproc_latency_sweep_child(
             label=label,
             model_id=model_id,
             tp=tp,
             max_model_len=max_model_len,
-            buckets=buckets,
-            num_iters=num_iters,
+            buckets=child_buckets,
+            num_iters=child_num_iters,
             extra_args=label_args,
             out_root=out_root,
             timeout_s_per_bucket=args.timeout_s,
@@ -1471,6 +1536,15 @@ def main() -> None:
                 child_cmd.extend(
                     ["--_cudagraph-capture-sizes"] + [str(bs) for bs in nsys_capture_sizes]
                 )
+            # Pass nsys overrides to child (decouples profiling OL from benchmark OL).
+            nsys_ol = args.nsys_output_len
+            nsys_ni = args.nsys_num_iters
+            if nsys_ni is None and nsys_ol is not None:
+                nsys_ni = 1  # Default to 1 iter when profiling OL is decoupled.
+            if nsys_ol is not None:
+                child_cmd.extend(["--_nsys-output-len", str(nsys_ol)])
+            if nsys_ni is not None:
+                child_cmd.extend(["--_nsys-num-iters", str(nsys_ni)])
 
         # Prepend nsys wrapper when profiling.
         child_env = dict(run.env) if run.env else dict(os.environ)
@@ -1511,7 +1585,8 @@ def main() -> None:
             if args.nsys_profile and child_res.get("returncode") in (-9, 137, None):
                 hint = (
                     " This is likely an nsys --cuda-graph-trace=node replay hang. "
-                    "Try reducing workload batch_sizes or increasing --nsys-timeout-s "
+                    "Try adding --nsys-output-len 32 to decouple profiling OL, "
+                    "reducing workload batch_sizes, or increasing --nsys-timeout-s "
                     f"(current: {args.nsys_timeout_s}s per bucket)."
                 )
             raise SystemExit(
@@ -1522,10 +1597,25 @@ def main() -> None:
 
         # Rename nsys output files to match bucket tags.
         if nsys_dir is not None:
+            # Use nsys-overridden buckets for tags if OL was overridden.
+            nsys_tag_buckets = buckets
+            if args.nsys_output_len is not None:
+                nsys_tag_buckets = [{**b, "output_len": args.nsys_output_len} for b in buckets]
+                # Detect tag collisions: heterogeneous workload_matrix buckets
+                # that differ only in output_len would collide after OL override.
+                tags = [_bucket_file_tag(b, nsys_tag_buckets) for b in nsys_tag_buckets]
+                if len(tags) != len(set(tags)):
+                    dupes = [t for t in tags if tags.count(t) > 1]
+                    print(
+                        f"WARNING: --nsys-output-len creates duplicate file tags {set(dupes)}. "
+                        f"Nsys profiles for colliding buckets will be overwritten. "
+                        f"Consider using distinct batch_sizes or input_lens.",
+                        file=sys.stderr,
+                    )
             renamed = 0
-            for i, bucket in enumerate(buckets, 1):
+            for i, bucket in enumerate(nsys_tag_buckets, 1):
                 src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
-                tag = _bucket_file_tag(bucket, buckets)
+                tag = _bucket_file_tag(bucket, nsys_tag_buckets)
                 dst = nsys_dir / f"{run.label}_{tag}.nsys-rep"
                 if src.exists():
                     src.rename(dst)
