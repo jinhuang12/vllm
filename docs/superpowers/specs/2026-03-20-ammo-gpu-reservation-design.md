@@ -50,6 +50,8 @@ num_tracks = len(debate.selected_winners)
 can_partition = (gpu_count >= tp * num_tracks)
 ```
 
+**Immutability**: The GPU assignment plan is computed once per round and recorded in `state.json.gpu_assignment`. If the plan already exists for the current round, the orchestrator uses the existing plan (does not recompute). If `target.tp` changes mid-campaign, the current round must complete or be abandoned before the new TP takes effect.
+
 ### Exclusive Mode (`can_partition = true`)
 
 Each track gets TP GPUs exclusively. Fully parallel kernel AND E2E work. Zero contention.
@@ -213,12 +215,14 @@ When a GPU pattern is detected:
    - If free → OK
    - If held but lease expired → auto-reclaim (log to audit), treat as free
    - If held and lease active → **BLOCK**: `"GPU {id} held by command: {snippet} (since {time}). Retry shortly."`
-6. If all requested GPUs free: write reservations (command_hash, session_id, lease_expires=now+2h, cvd_requested, command_snippet=first 80 chars), release flock.
+6. If all requested GPUs free: write reservations (command_hash, session_id, lease_expires=now+2h [or 4h for nsys], cvd_requested, command_snippet=first 80 chars), release flock.
+   - If flock acquisition fails after 5 retries: **BLOCK** with distinct message: `"GPU reservation lock timeout — system is busy. Retry in a few seconds."` (distinct from "GPU held by command" to clarify the failure is transient lock contention, not a held GPU).
 7. Exit 0 (allow command).
 
 **Case B — CVD="" (empty string)**:
 3. Agent explicitly says this command doesn't need GPUs. `CUDA_VISIBLE_DEVICES=""` also disables CUDA at the driver level, preventing accidental GPU usage.
-4. Skip reservation. Exit 0 (allow command).
+4. **Sanity check** (advisory): if the command contains known GPU-heavy indicators (`run_vllm_bench`, `benchmark_kernel`, `nsys profile`, `ncu`) AND CVD is empty, emit a stderr warning: `"CVD is empty but command looks GPU-intensive. Verify this is intentional."` This catches misuse of the sentinel on GPU-heavy commands. Does not block.
+5. Skip reservation. Exit 0 (allow command).
 
 **Case C — No CVD at all**:
 3. Check one-shot flag file `/tmp/ammo_gpu_res/.warned_{session_hash}`.
@@ -228,9 +232,11 @@ When a GPU pattern is detected:
 5. If flag exists (already warned):
    - Exit 0 (allow command). Agent was already made aware and chose to proceed without CVD.
 
-**Command hash**: `sha256(command_string)[:8]`. Used by PostToolUse to match the reservation for cleanup.
+**Command hash**: `sha256(command_string)[:16]`. 16 hex chars = 64 bits of hash space. Birthday collision probability at 1000 commands is ~2.7e-11, effectively zero across any AMMO campaign lifetime. Used by PostToolUse to match the reservation for cleanup.
 
-**Session hash**: Derived from `$CLAUDE_SESSION_ID` or `$PPID` — scoped to the agent session so each agent gets its own one-shot warning.
+**Session hash**: Derived from `$CLAUDE_SESSION_ID` only (not `$PPID` — PIDs are small integers that reuse frequently across sessions). If `$CLAUDE_SESSION_ID` is not set, the hook skips the one-shot mechanism and exits 0 (fail-open). Flag files (`/tmp/ammo_gpu_res/.warned_{session_hash}`) are cleaned up on `SessionStart` via the existing `ammo-postcompact.sh` hook to prevent stale flags from suppressing warnings in new sessions.
+
+**Lease duration**: Default 2 hours. If the command contains `nsys` (nsys profiling on large models can take 45-75 min), set `lease_hours=4.0` instead.
 
 ### PostToolUse Hook: Auto-Release
 
@@ -254,13 +260,16 @@ New hook in `.claude/settings.local.json`:
 
 #### Release Flow
 
+**Implementation prerequisite**: Verify empirically that `PostToolUse` for Bash provides `tool_input.command` (the original command string) in the hook input JSON. The existing PreToolUse hook (`ammo-pretool-guard.sh` line 15) handles field name ambiguity between `tool_input.command` and `input.command` — the PostToolUse hook should use the same extraction pattern.
+
 1. Check if `/tmp/ammo_gpu_res/state.json` exists. If not, skip.
-2. Extract command from the PostToolUse input JSON.
-3. Check if command contains `CUDA_VISIBLE_DEVICES=` with digit IDs (same regex as PreToolUse Case A). Commands with `CVD=""` or no CVD had no reservation — skip.
-4. Compute command_hash, acquire flock, read state.json.
-5. For each GPU entry where `command_hash` matches: clear to null.
-6. Write state.json, release flock.
-7. Exit 0.
+2. Extract command from the PostToolUse input JSON (try `tool_input.command`, then `input.command`).
+3. **Fallback if command extraction fails**: If command is empty/null, scan state.json for reservations with the current `$CLAUDE_SESSION_ID` and release the most recently reserved entry (heuristic). Log a warning about the fallback.
+4. Check if command contains `CUDA_VISIBLE_DEVICES=` with digit IDs (same regex as PreToolUse Case A). Commands with `CVD=""` or no CVD had no reservation — skip.
+5. Compute command_hash, acquire flock, read state.json.
+6. For each GPU entry where `command_hash` matches: clear to null.
+7. Write state.json, release flock.
+8. Exit 0.
 
 **Missed PostToolUse (crash recovery)**: If the session crashes mid-command, PostToolUse never fires. The reservation stays with its lease timestamp. The next PreToolUse for that GPU (from any agent) checks the lease — if expired, auto-reclaims. With a 2-hour lease, this means GPUs are unavailable for up to 2 hours after a crash. For faster recovery, the orchestrator can manually clear stale reservations via `gpu_status.py` + `gpu_force_clear.py` (see below).
 
@@ -290,9 +299,10 @@ Human-readable table or JSON of current reservation state.
 
 ```
 python .claude/skills/ammo/scripts/gpu_force_clear.py [--gpu-ids 0,1] [--all] --session-id <id>
+python .claude/skills/ammo/scripts/gpu_force_clear.py --all --force-no-session  # emergency: clear ALL regardless of session
 ```
 
-Orchestrator-only tool. Clears reservations for specific GPUs or all GPUs within a session. Used for crash recovery when the 2-hour lease is too long to wait. Writes to audit log.
+Orchestrator-only tool. Clears reservations for specific GPUs or all GPUs within a session. Used for crash recovery when the 2-hour lease is too long to wait. Writes to audit log. The `--force-no-session` flag is an emergency override for when the session ID was never recorded (crash before `session_id` MUST was fulfilled). Logs a prominent warning.
 
 ### Shared Module
 
