@@ -71,7 +71,10 @@ Machine-scoped (not per-campaign) because GPU contention is a machine-level conc
     },
     "3": null
   },
-  "gpu_count": 4
+  "gpu_count": 4,
+  "audit": [
+    {"timestamp": "2026-03-20T15:00:00Z", "action": "force_release", "holder": "impl-champion-op003", "released_by": "orchestrator", "session_id": "a1b2c3d4", "reason": "coordination_timeout"}
+  ]
 }
 ```
 
