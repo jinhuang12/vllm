@@ -19,12 +19,23 @@ After an `/ammo` campaign completes (or is interrupted with results), invoke thi
 ## Arguments
 
 The user provides:
-- `--artifact-dir` (required): Path to the completed campaign's artifact directory
-- `--description` (required): Human-readable description of what skill changes were made
-- `--session-id` (required): Claude Code session UUID for the campaign (find via `ls -lt ~/.claude/projects/-home-jinhun-vllm/*.jsonl | head`)
+- `--session-id` (required): Claude Code session UUID for the campaign. This is the only required argument — everything else can be auto-detected.
+- `--artifact-dir` (auto-detected): Path to the campaign's artifact directory. **Auto-detection**: scan `kernel_opt_artifacts/*/state.json` for a matching `session_id` field. If not found, scan the session JSONL for file writes to `kernel_opt_artifacts/` and infer the directory from the path.
+- `--description` (optional, default: auto-generated from target info): Human-readable description of what skill changes were made
 - `--skip-transcript-grading` (optional): Skip the LLM grader for speed
 - `--skip-deep-analysis` (optional): Skip the causal LLM deep dive for speed
 - `--repository` (optional, default `~/.claude/ammo-eval`): Eval repository path
+
+### Minimal Invocation
+
+The user can simply say: `Run /ammo-eval for session ba11c39a-...`
+
+The orchestrator resolves everything:
+1. Locate JSONL at `~/.claude/projects/-home-jinhun-vllm/<session-id>.jsonl`
+2. Find artifact dir by scanning `kernel_opt_artifacts/*/state.json` for matching session_id
+3. If no match in state.json, grep the JSONL for file writes to `kernel_opt_artifacts/` and extract the directory
+4. Auto-generate description from `target.json` (model + hardware + dtype)
+5. Run the full pipeline (Steps 0-8) including causal analysis unless `--skip-*` flags are given
 
 ## Pipeline
 
