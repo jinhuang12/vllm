@@ -10,7 +10,7 @@ Usage:
         --previous-dag /path/to/previous_dag.json \\
         --output /path/to/diff.json \\
         [--deep] \\
-        [--skill-diff /path/to/skill_diff.json] \\
+        [--skill-diff /path/to/skill.patch] \\
         [--regression-report /path/to/report.md]
 """
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,8 +116,385 @@ def _count_anomalies_by_type(nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Skill-diff correlation helpers
+# ---------------------------------------------------------------------------
+
+# Map from section name → DAG nodes that the section influences
+_SECTION_TO_NODES: Dict[str, List[str]] = {
+    "researcher_guidance": ["baseline_capture", "bottleneck_mining"],
+    "debate_guidance": ["debate"],
+    "implementation_guidance": [],   # filled dynamically for impl_* nodes
+    "delegation_guidance": ["debate"],
+    "general": [],                   # filled dynamically to all nodes
+}
+
+# File-path keywords → section
+_PATH_SECTION_RULES: List[Tuple[str, str]] = [
+    ("researcher", "researcher_guidance"),
+    ("bottleneck", "researcher_guidance"),
+    ("champion", "debate_guidance"),
+    ("debate", "debate_guidance"),
+    ("impl", "implementation_guidance"),
+    ("validator", "implementation_guidance"),
+    ("delegate", "delegation_guidance"),
+]
+
+
+def _infer_section_from_path(file_path: str) -> Optional[str]:
+    """Infer section from file path using keyword rules.
+
+    Returns None if no rule matches (caller should check SKILL.md content).
+    """
+    lower = file_path.lower()
+    for keyword, section in _PATH_SECTION_RULES:
+        if keyword in lower:
+            return section
+    return None
+
+
+def _infer_section_from_skill_md_context(hunk_header: str, hunk_lines: List[str]) -> str:
+    """For SKILL.md hunks, infer section from surrounding ## headings.
+
+    hunk_header is the @@ … @@ context string (may contain the function/heading name).
+    hunk_lines are all lines in the hunk (context + added + removed).
+    """
+    # Look for a ## heading in the hunk lines themselves (most recent heading wins)
+    current_heading: Optional[str] = None
+    for line in hunk_lines:
+        # Strip unified-diff leading char (space, +, -)
+        text = line[1:] if line and line[0] in (" ", "+", "-") else line
+        if text.startswith("## "):
+            current_heading = text[3:].strip().lower()
+    if current_heading is None:
+        # Fall back to @@ context text
+        current_heading = hunk_header.lower()
+
+    if not current_heading:
+        return "general"
+
+    if any(k in current_heading for k in ("debate", "champion", "adversar")):
+        return "debate_guidance"
+    if any(k in current_heading for k in ("researcher", "bottleneck", "baseline", "mining")):
+        return "researcher_guidance"
+    if any(k in current_heading for k in ("impl", "implement", "validator", "validat")):
+        return "implementation_guidance"
+    if any(k in current_heading for k in ("delegat",)):
+        return "delegation_guidance"
+    return "general"
+
+
+def _parse_skill_diff(patch_text: str) -> List[Dict[str, Any]]:
+    """Parse a unified diff into a list of changed hunks.
+
+    Each hunk dict:
+    {
+        "file": str,
+        "section": str,
+        "added_lines": list[str],
+        "removed_lines": list[str],
+    }
+    """
+    hunks: List[Dict[str, Any]] = []
+    current_file: Optional[str] = None
+    current_hunk_header: str = ""
+    current_hunk_lines: List[str] = []
+    added_lines: List[str] = []
+    removed_lines: List[str] = []
+    in_hunk = False
+
+    def _flush_hunk() -> None:
+        if current_file is None or not in_hunk:
+            return
+        # Determine section
+        lower_path = (current_file or "").lower()
+        if "skill.md" in lower_path or "skill.md" in Path(current_file).name.lower():
+            section = _infer_section_from_skill_md_context(
+                current_hunk_header, current_hunk_lines
+            )
+        else:
+            section = _infer_section_from_path(current_file)
+            if section is None:
+                section = "general"
+        hunks.append({
+            "file": current_file,
+            "section": section,
+            "added_lines": list(added_lines),
+            "removed_lines": list(removed_lines),
+        })
+
+    for raw_line in patch_text.splitlines():
+        # New file header: "diff --git a/... b/..."
+        if raw_line.startswith("diff --git "):
+            _flush_hunk()
+            in_hunk = False
+            current_hunk_header = ""
+            current_hunk_lines = []
+            added_lines = []
+            removed_lines = []
+            # Extract b/ path
+            m = re.search(r' b/(.+)$', raw_line)
+            current_file = m.group(1) if m else None
+            continue
+
+        # +++ line also carries the filename (use as fallback)
+        if raw_line.startswith("+++ "):
+            path_part = raw_line[4:].strip()
+            if path_part.startswith("b/"):
+                path_part = path_part[2:]
+            if path_part != "/dev/null":
+                current_file = path_part
+            continue
+
+        if raw_line.startswith("--- "):
+            continue
+
+        # Hunk header: @@ -l,s +l,s @@ optional context
+        if raw_line.startswith("@@ "):
+            _flush_hunk()
+            in_hunk = True
+            current_hunk_header = ""
+            current_hunk_lines = []
+            added_lines = []
+            removed_lines = []
+            # Extract optional context after the second @@
+            m = re.search(r'^@@[^@]+@@(.*)$', raw_line)
+            current_hunk_header = m.group(1).strip() if m else ""
+            continue
+
+        if in_hunk:
+            current_hunk_lines.append(raw_line)
+            if raw_line.startswith("+"):
+                added_lines.append(raw_line[1:])
+            elif raw_line.startswith("-"):
+                removed_lines.append(raw_line[1:])
+
+    _flush_hunk()
+    return hunks
+
+
+def _map_skill_changes_to_nodes(
+    skill_changes: List[Dict[str, Any]],
+    all_node_ids: Optional[List[str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Map each skill change section to the DAG node(s) it would affect.
+
+    Returns: {node_id: [list of skill change dicts that could affect this node]}
+    """
+    # Collect impl_* and all node ids from the changes themselves + caller-provided list
+    impl_nodes: List[str] = []
+    all_nodes: List[str] = []
+    if all_node_ids:
+        all_nodes = list(all_node_ids)
+        impl_nodes = [n for n in all_node_ids if n.startswith("impl_")]
+
+    result: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _add(node_id: str, change: Dict[str, Any]) -> None:
+        result.setdefault(node_id, []).append(change)
+
+    for change in skill_changes:
+        section = change.get("section", "general")
+
+        if section == "researcher_guidance":
+            for nid in ["baseline_capture", "bottleneck_mining"]:
+                _add(nid, change)
+
+        elif section == "debate_guidance":
+            _add("debate", change)
+
+        elif section == "implementation_guidance":
+            # Affects all impl_* nodes
+            if impl_nodes:
+                for nid in impl_nodes:
+                    _add(nid, change)
+            else:
+                # No node list provided — use a placeholder
+                _add("impl_*", change)
+
+        elif section == "delegation_guidance":
+            _add("debate", change)
+
+        else:  # "general"
+            if all_nodes:
+                for nid in all_nodes:
+                    _add(nid, change)
+            else:
+                _add("*", change)
+
+    return result
+
+
+def _summarise_change(change: Dict[str, Any]) -> str:
+    """Produce a short human-readable summary of a skill hunk."""
+    added = [l.strip() for l in change.get("added_lines", []) if l.strip()]
+    removed = [l.strip() for l in change.get("removed_lines", []) if l.strip()]
+    parts: List[str] = []
+    if added:
+        parts.append(f"Added: {'; '.join(added[:3])}")
+    if removed:
+        parts.append(f"Removed: {'; '.join(removed[:3])}")
+    if not parts:
+        return "content changed"
+    return " | ".join(parts)
+
+
+def _correlate_changes(
+    skill_node_map: Dict[str, List[Dict[str, Any]]],
+    metric_deltas: Dict[str, Dict[str, float]],
+    new_anomalies: List[Dict[str, Any]],
+    resolved_anomalies: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """For each node that has BOTH a skill change mapping AND a behavioral change,
+    produce a hypothesis dict.
+
+    Args:
+        skill_node_map: {node_id: [skill changes]}, from _map_skill_changes_to_nodes
+        metric_deltas: {node_id: {metric: delta}}, from diff_versions
+        new_anomalies: list of {"node": ..., "type": ...}
+        resolved_anomalies: list of {"node": ..., "type": ...}
+
+    Returns: list of hypothesis dicts
+    """
+    _SIGNIFICANT_DELTA = 0.1
+
+    # Build per-node behavioral change summaries
+    new_anomaly_by_node: Dict[str, List[str]] = {}
+    for a in new_anomalies:
+        new_anomaly_by_node.setdefault(a["node"], []).append(a["type"])
+    resolved_anomaly_by_node: Dict[str, List[str]] = {}
+    for a in resolved_anomalies:
+        resolved_anomaly_by_node.setdefault(a["node"], []).append(a["type"])
+
+    # Expand wildcard mappings
+    all_behaviour_nodes = (
+        set(metric_deltas.keys())
+        | set(new_anomaly_by_node.keys())
+        | set(resolved_anomaly_by_node.keys())
+    )
+
+    expanded_map: Dict[str, List[Dict[str, Any]]] = {}
+    for node_id, changes in skill_node_map.items():
+        if node_id in ("*", "impl_*"):
+            for bnode in all_behaviour_nodes:
+                if node_id == "impl_*" and not bnode.startswith("impl_"):
+                    continue
+                expanded_map.setdefault(bnode, []).extend(changes)
+        else:
+            expanded_map.setdefault(node_id, []).extend(changes)
+
+    hypotheses: List[Dict[str, Any]] = []
+    for node_id in sorted(expanded_map.keys()):
+        skill_changes = expanded_map[node_id]
+        if not skill_changes:
+            continue
+
+        # Check if there is a significant behavioral change at this node
+        node_metric_deltas = metric_deltas.get(node_id, {})
+        significant_deltas = {
+            m: d for m, d in node_metric_deltas.items()
+            if abs(d) >= _SIGNIFICANT_DELTA
+        }
+        node_new_anomalies = new_anomaly_by_node.get(node_id, [])
+        node_resolved_anomalies = resolved_anomaly_by_node.get(node_id, [])
+
+        has_behavioral_change = (
+            bool(significant_deltas)
+            or bool(node_new_anomalies)
+            or bool(node_resolved_anomalies)
+        )
+        if not has_behavioral_change:
+            continue
+
+        # Build behavioral_changes summary
+        behavioral_changes: Dict[str, Any] = {}
+        for m, d in significant_deltas.items():
+            behavioral_changes[m] = round(d, 4)
+        if node_new_anomalies:
+            behavioral_changes["new_anomalies"] = node_new_anomalies
+        if node_resolved_anomalies:
+            behavioral_changes["resolved_anomalies"] = node_resolved_anomalies
+
+        # Determine confidence
+        if len(skill_changes) == 1 and (
+            len(significant_deltas) + len(node_new_anomalies) + len(node_resolved_anomalies)
+        ) == 1:
+            confidence = "high"
+        elif any(c.get("section") == "general" for c in skill_changes):
+            confidence = "low"
+        else:
+            confidence = "medium"
+
+        # Build hypothesis text
+        sections_mentioned = sorted({c.get("section", "general") for c in skill_changes})
+        delta_desc = ", ".join(
+            f"{m} ({d:+.4f})" for m, d in sorted(significant_deltas.items())
+        )
+        anomaly_desc_parts: List[str] = []
+        for atype in node_new_anomalies:
+            anomaly_desc_parts.append(f"new {atype} anomaly")
+        for atype in node_resolved_anomalies:
+            anomaly_desc_parts.append(f"resolved {atype} anomaly")
+        anomaly_desc = ", ".join(anomaly_desc_parts)
+
+        evidence_parts: List[str] = []
+        if delta_desc:
+            evidence_parts.append(f"metric deltas: {delta_desc}")
+        if anomaly_desc:
+            evidence_parts.append(anomaly_desc)
+        evidence_str = "; ".join(evidence_parts)
+
+        change_summaries = [_summarise_change(c) for c in skill_changes[:3]]
+        change_str = "; ".join(change_summaries)
+
+        hypothesis = (
+            f"Skill change to {', '.join(sections_mentioned)} ({change_str}) "
+            f"correlates with behavioral change at {node_id} node: {evidence_str}. "
+            f"Review whether the skill edit directly caused this shift."
+        )
+
+        # Recommended action
+        if confidence == "high":
+            recommended_action = (
+                f"Directly investigate the {sections_mentioned[0]} change — "
+                f"it is the sole candidate for the observed {evidence_str}."
+            )
+        elif any(a in ["DATA_CORRUPTION"] for a in node_new_anomalies):
+            recommended_action = (
+                "Audit data-grounding enforcement in the updated section and "
+                "add a validation step to catch corruption early."
+            )
+        else:
+            recommended_action = (
+                f"Run an A/B comparison with and without the {sections_mentioned} "
+                "skill changes to isolate the causal factor."
+            )
+
+        hypotheses.append({
+            "node_id": node_id,
+            "skill_changes": [
+                {
+                    "file": c.get("file", ""),
+                    "section": c.get("section", "general"),
+                    "summary": _summarise_change(c),
+                }
+                for c in skill_changes
+            ],
+            "behavioral_changes": behavioral_changes,
+            "hypothesis": hypothesis,
+            "confidence": confidence,
+            "recommended_action": recommended_action,
+        })
+
+    return hypotheses
+
+
 def _generate_regression_report(diff: Dict[str, Any]) -> str:
-    """Format the diff data into a human-readable markdown regression report."""
+    """Format the diff data into a human-readable markdown regression report.
+
+    When deep_investigation contains hypotheses (skill-diff mode), a richer
+    report with Causal Hypotheses and Uncorrelated Changes sections is produced.
+    """
     lines: List[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -139,6 +517,114 @@ def _generate_regression_report(diff: Dict[str, Any]) -> str:
     lines.append(f"- Nodes with metric changes: **{len(metric_deltas)}**")
     lines.append(f"- Edge type changes: **{len(edge_changes)}**")
     lines.append("")
+
+    # --- Rich skill-diff sections (only when deep_investigation has hypotheses) ---
+    deep = diff.get("deep_investigation") or {}
+    hypotheses = deep.get("hypotheses") if isinstance(deep, dict) else None
+
+    if hypotheses is not None:
+        # Skill Changes section
+        skill_changes_parsed = deep.get("skill_changes_parsed", [])
+        lines.append("## Skill Changes")
+        lines.append("")
+        if skill_changes_parsed:
+            for hunk in skill_changes_parsed:
+                added_n = len(hunk.get("added_lines", []))
+                removed_n = len(hunk.get("removed_lines", []))
+                lines.append(
+                    f"- `{hunk['file']}`: {hunk['section']} "
+                    f"— {added_n} lines added, {removed_n} lines removed"
+                )
+                # Key changes: first 3 added/removed lines
+                key_lines: List[str] = []
+                for l in hunk.get("added_lines", [])[:3]:
+                    stripped = l.strip()
+                    if stripped:
+                        key_lines.append(f"+ {stripped}")
+                for l in hunk.get("removed_lines", [])[:3]:
+                    stripped = l.strip()
+                    if stripped:
+                        key_lines.append(f"- {stripped}")
+                if key_lines:
+                    lines.append(f"  - Key changes: {' | '.join(key_lines)}")
+        else:
+            lines.append("- No skill changes detected.")
+        lines.append("")
+
+        # Behavioral Changes section
+        lines.append("## Behavioral Changes")
+        lines.append("")
+        has_behavioral = False
+        for node_id, deltas in sorted(metric_deltas.items()):
+            sig_deltas = {m: d for m, d in deltas.items() if abs(d) >= 0.1}
+            node_new = [a["type"] for a in new_anomalies if a["node"] == node_id]
+            node_resolved = [a["type"] for a in resolved_anomalies if a["node"] == node_id]
+            if sig_deltas or node_new or node_resolved:
+                has_behavioral = True
+                parts: List[str] = []
+                for m, d in sorted(sig_deltas.items()):
+                    parts.append(f"{m} {d:+.4f}")
+                for atype in node_new:
+                    parts.append(f"new anomaly: {atype}")
+                for atype in node_resolved:
+                    parts.append(f"resolved: {atype}")
+                lines.append(f"- `{node_id}`: {', '.join(parts)}")
+        # Also nodes with anomalies but no metric deltas
+        for a in new_anomalies:
+            if a["node"] not in metric_deltas:
+                has_behavioral = True
+                lines.append(f"- `{a['node']}`: new anomaly: {a['type']}")
+        for a in resolved_anomalies:
+            if a["node"] not in metric_deltas:
+                has_behavioral = True
+                lines.append(f"- `{a['node']}`: resolved: {a['type']}")
+        if not has_behavioral:
+            lines.append("- No significant behavioral changes detected.")
+        lines.append("")
+
+        # Causal Hypotheses section
+        lines.append("## Causal Hypotheses")
+        lines.append("")
+        if hypotheses:
+            for hyp in hypotheses:
+                lines.append(f"- **{hyp['node_id']}**: {hyp['hypothesis']}")
+                for sc in hyp.get("skill_changes", []):
+                    lines.append(f"  - Skill change: {sc['section']} in `{sc['file']}`")
+                beh = hyp.get("behavioral_changes", {})
+                beh_parts: List[str] = []
+                for k, v in beh.items():
+                    if isinstance(v, list):
+                        beh_parts.append(f"{k}: {v}")
+                    else:
+                        beh_parts.append(f"{k}: {v:+.4f}" if isinstance(v, float) else f"{k}: {v}")
+                if beh_parts:
+                    lines.append(f"  - Behavioral evidence: {'; '.join(beh_parts)}")
+                lines.append(f"  - Confidence: {hyp.get('confidence', 'unknown')}")
+                lines.append(f"  - Recommended action: {hyp.get('recommended_action', '')}")
+        else:
+            lines.append("- No correlated changes found.")
+        lines.append("")
+
+        # Uncorrelated Changes section
+        uncorr_skill = deep.get("uncorrelated_skill_changes", [])
+        uncorr_behavioral = deep.get("uncorrelated_behavioral_changes", [])
+        lines.append("## Uncorrelated Changes")
+        lines.append("")
+        if uncorr_skill:
+            lines.append("Skill changes with no behavioral impact:")
+            for item in uncorr_skill:
+                lines.append(f"- `{item.get('file', '?')}` ({item.get('section', '?')})")
+        else:
+            lines.append("- Skill changes with no behavioral impact: none")
+        if uncorr_behavioral:
+            lines.append("Behavioral changes with no matching skill change (may be stochastic):")
+            for node_id in uncorr_behavioral:
+                lines.append(f"- `{node_id}`")
+        else:
+            lines.append("- Behavioral changes with no matching skill change: none")
+        lines.append("")
+
+    # --- Standard structural sections (always present) ---
 
     # New anomalies
     if new_anomalies:
@@ -409,44 +895,108 @@ def main() -> int:
         print(f"ERROR reading input files: {e}", file=sys.stderr)
         return 1
 
-    # Optionally load skill diff
-    skill_diff = None
+    # Optionally load skill diff (as a unified diff / patch text)
+    skill_patch_text: Optional[str] = None
     if args.skill_diff:
         skill_diff_path = Path(args.skill_diff)
         if not skill_diff_path.exists():
             print(f"WARNING: skill-diff file not found: {skill_diff_path}", file=sys.stderr)
         else:
             try:
-                skill_diff = json.loads(skill_diff_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as e:
+                skill_patch_text = skill_diff_path.read_text(encoding="utf-8")
+            except OSError as e:
                 print(f"WARNING: could not read skill-diff: {e}", file=sys.stderr)
 
     # Run diff
     diff = diff_versions(current_dag=current_dag, previous_dag=previous_dag)
 
-    # Attach skill diff if provided
-    if skill_diff is not None:
-        diff["skill_diff"] = skill_diff
-
-    # Deep mode: populate deep_investigation summary
+    # Deep mode
     if args.deep:
-        diff["deep_investigation"] = {
-            "mode": "structural_diff",
-            "new_anomaly_count": len(diff["new_anomalies"]),
-            "resolved_anomaly_count": len(diff["resolved_anomalies"]),
-            "regressed_metrics": [
-                {"node": node_id, "metric": metric, "delta": delta}
-                for node_id, deltas in diff["metric_deltas"].items()
-                for metric, delta in deltas.items()
-                if delta < 0
-            ],
-            "improved_metrics": [
-                {"node": node_id, "metric": metric, "delta": delta}
-                for node_id, deltas in diff["metric_deltas"].items()
-                for metric, delta in deltas.items()
-                if delta > 0
-            ],
-        }
+        if skill_patch_text is not None:
+            # --- Full correlation analysis ---
+            # Collect all DAG node IDs for wildcard expansion
+            all_node_ids = [
+                n["id"]
+                for n in current_dag.get("nodes", [])
+                if isinstance(n.get("id"), str)
+            ]
+
+            skill_changes = _parse_skill_diff(skill_patch_text)
+            skill_node_map = _map_skill_changes_to_nodes(skill_changes, all_node_ids)
+            hypotheses = _correlate_changes(
+                skill_node_map,
+                diff["metric_deltas"],
+                diff["new_anomalies"],
+                diff["resolved_anomalies"],
+            )
+
+            # Determine uncorrelated skill changes
+            affected_nodes_from_skill = set(skill_node_map.keys()) - {"*", "impl_*"}
+            behavioral_nodes = (
+                set(diff["metric_deltas"].keys())
+                | {a["node"] for a in diff["new_anomalies"]}
+                | {a["node"] for a in diff["resolved_anomalies"]}
+            )
+            correlated_nodes = {h["node_id"] for h in hypotheses}
+
+            # Skill changes that touched nodes with no behavioral change
+            uncorrelated_skill: List[Dict[str, Any]] = []
+            for node_id, changes in skill_node_map.items():
+                if node_id in ("*", "impl_*"):
+                    continue
+                if node_id not in correlated_nodes:
+                    for c in changes:
+                        entry = {"file": c.get("file", ""), "section": c.get("section", "general")}
+                        if entry not in uncorrelated_skill:
+                            uncorrelated_skill.append(entry)
+
+            # Behavioral changes with no matching skill change
+            uncorrelated_behavioral = sorted(
+                behavioral_nodes - correlated_nodes - affected_nodes_from_skill
+            )
+
+            diff["deep_investigation"] = {
+                "mode": "skill_correlation",
+                "skill_changes_parsed": skill_changes,
+                "correlations_found": len(hypotheses),
+                "hypotheses": hypotheses,
+                "uncorrelated_skill_changes": uncorrelated_skill,
+                "uncorrelated_behavioral_changes": uncorrelated_behavioral,
+                # Also keep structural summary for compatibility
+                "new_anomaly_count": len(diff["new_anomalies"]),
+                "resolved_anomaly_count": len(diff["resolved_anomalies"]),
+                "regressed_metrics": [
+                    {"node": node_id, "metric": metric, "delta": delta}
+                    for node_id, deltas in diff["metric_deltas"].items()
+                    for metric, delta in deltas.items()
+                    if delta < 0
+                ],
+                "improved_metrics": [
+                    {"node": node_id, "metric": metric, "delta": delta}
+                    for node_id, deltas in diff["metric_deltas"].items()
+                    for metric, delta in deltas.items()
+                    if delta > 0
+                ],
+            }
+        else:
+            # --- Structural-only deep mode (no skill diff) ---
+            diff["deep_investigation"] = {
+                "mode": "structural_diff",
+                "new_anomaly_count": len(diff["new_anomalies"]),
+                "resolved_anomaly_count": len(diff["resolved_anomalies"]),
+                "regressed_metrics": [
+                    {"node": node_id, "metric": metric, "delta": delta}
+                    for node_id, deltas in diff["metric_deltas"].items()
+                    for metric, delta in deltas.items()
+                    if delta < 0
+                ],
+                "improved_metrics": [
+                    {"node": node_id, "metric": metric, "delta": delta}
+                    for node_id, deltas in diff["metric_deltas"].items()
+                    for metric, delta in deltas.items()
+                    if delta > 0
+                ],
+            }
 
     # Write diff JSON
     out_path = Path(args.output)
