@@ -23,6 +23,7 @@ The user provides:
 - `--description` (required): Human-readable description of what skill changes were made
 - `--session-id` (required): Claude Code session UUID for the campaign (find via `ls -lt ~/.claude/projects/-home-jinhun-vllm/*.jsonl | head`)
 - `--skip-transcript-grading` (optional): Skip the LLM grader for speed
+- `--skip-deep-analysis` (optional): Skip the causal LLM deep dive for speed
 - `--repository` (optional, default `~/.claude/ammo-eval`): Eval repository path
 
 ## Pipeline
@@ -73,6 +74,66 @@ python .claude/skills/ammo/eval/scripts/score_campaign.py \
   --report /tmp/ammo_eval_report.md
 ```
 
+### Step 3b: Extract Events + Build Causal DAG
+
+```bash
+python .claude/skills/ammo/eval/causal/extract_events.py \
+  --session-jsonl ~/.claude/projects/-home-jinhun-vllm/<SESSION_ID>.jsonl \
+  --session-data /tmp/ammo_eval_session_data.json \
+  --output /tmp/ammo_eval_events.json
+
+python .claude/skills/ammo/eval/causal/build_dag.py \
+  --events /tmp/ammo_eval_events.json \
+  --artifact-dir <ARTIFACT_DIR> \
+  --output /tmp/ammo_eval_causal_dag.json
+```
+
+### Step 3c: Score Nodes + Detect Anomalies
+
+```bash
+python .claude/skills/ammo/eval/causal/score_nodes.py \
+  --dag /tmp/ammo_eval_causal_dag.json \
+  --events /tmp/ammo_eval_events.json \
+  --snapshot /tmp/ammo_eval_snapshot.json \
+  --output /tmp/ammo_eval_scored_dag.json \
+  --anomalies /tmp/ammo_eval_anomalies.json
+```
+
+### Step 3d: LLM Deep Dive (Optional)
+
+If `--skip-deep-analysis` is NOT set, spawn an LLM grader subagent:
+
+```
+Spawn a subagent (general-purpose type) with:
+  prompt: Read the causal analyzer rubric at .claude/skills/ammo/eval/causal/agents/causal_analyzer.md,
+          then analyze anomalies at /tmp/ammo_eval_anomalies.json
+          with events at /tmp/ammo_eval_events.json
+          and artifacts at <ARTIFACT_DIR>.
+          Write deep_analysis.json to /tmp/ammo_eval_deep_analysis.json.
+```
+
+### Step 3e: Generate Post-Mortem
+
+```bash
+python .claude/skills/ammo/eval/causal/generate_postmortem.py \
+  --scored-dag /tmp/ammo_eval_scored_dag.json \
+  --deep-analysis /tmp/ammo_eval_deep_analysis.json \
+  --events /tmp/ammo_eval_events.json \
+  --output-dag /tmp/ammo_eval_causal_dag_final.json \
+  --output-narrative /tmp/ammo_eval_postmortem.md \
+  --output-viz /tmp/ammo_eval_causal_viz.html
+```
+
+### Step 3f: Cross-Version Diff (if previous version exists in archive)
+
+```bash
+python .claude/skills/ammo/eval/causal/diff_versions.py \
+  --current-dag /tmp/ammo_eval_causal_dag_final.json \
+  --previous-dag ~/.claude/ammo-eval/versions/<prev>/runs/<target>/run_1/causal_dag.json \
+  --output /tmp/ammo_eval_version_diff.json \
+  [--deep --regression-report /tmp/ammo_eval_regression_report.md]
+```
+
 ### Step 4: Transcript Grading (Optional)
 
 If `--skip-transcript-grading` is NOT set, spawn an LLM grader subagent:
@@ -100,10 +161,15 @@ python .claude/skills/ammo/eval/scripts/archive_run.py \
   --snapshot /tmp/ammo_eval_snapshot.json \
   --description "<DESCRIPTION>" \
   --transcript-grading /tmp/ammo_eval_transcript_grading.json \
-  --changes-snapshot /tmp/ammo_eval_changes_snapshot
+  --changes-snapshot /tmp/ammo_eval_changes_snapshot \
+  --causal-dag /tmp/ammo_eval_causal_dag_final.json \
+  --postmortem-narrative /tmp/ammo_eval_postmortem.md \
+  --causal-viz /tmp/ammo_eval_causal_viz.html
 ```
 
 The `--changes-snapshot` flag stores the full changes snapshot (worktree patches, artifact copies, manifest) alongside the scored run in the archive. This ensures you can always reconstruct what code was produced, even after cleanup.
+
+The `--causal-dag`, `--postmortem-narrative`, and `--causal-viz` flags are optional. When provided, these causal engine outputs are stored alongside the scorecard in the archive run directory.
 
 ### Step 6: Aggregate & Dashboard
 ```bash
@@ -145,7 +211,12 @@ rm -rf <ARTIFACT_DIR>
 # Temp files:
 rm -rf /tmp/ammo_eval_snapshot.json /tmp/ammo_eval_scorecard.json \
        /tmp/ammo_eval_report.md /tmp/ammo_eval_transcript_grading.json \
-       /tmp/ammo_eval_changes_snapshot
+       /tmp/ammo_eval_changes_snapshot \
+       /tmp/ammo_eval_events.json /tmp/ammo_eval_causal_dag.json \
+       /tmp/ammo_eval_scored_dag.json /tmp/ammo_eval_anomalies.json \
+       /tmp/ammo_eval_deep_analysis.json /tmp/ammo_eval_causal_dag_final.json \
+       /tmp/ammo_eval_postmortem.md /tmp/ammo_eval_causal_viz.html \
+       /tmp/ammo_eval_version_diff.json /tmp/ammo_eval_regression_report.md
 ```
 
 ## Scoring Dimensions

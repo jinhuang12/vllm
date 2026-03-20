@@ -115,6 +115,9 @@ def archive_run(
     transcript_grading_path: Optional[Path] = None,
     git_hash: Optional[str] = None,
     changes_snapshot_path: Optional[Path] = None,
+    causal_dag_path: Optional[Path] = None,
+    postmortem_narrative_path: Optional[Path] = None,
+    causal_viz_path: Optional[Path] = None,
 ) -> Dict[str, str]:
     """Archive a scored run into the repository. Returns paths created."""
     scorecard = json.loads(scorecard_path.read_text(encoding="utf-8"))
@@ -156,6 +159,13 @@ def archive_run(
         dest = run_dir / "changes_snapshot"
         shutil.copytree(changes_snapshot_path, dest, dirs_exist_ok=True)
 
+    # Copy causal engine outputs if provided
+    if causal_dag_path and causal_dag_path.exists():
+        shutil.copy2(causal_dag_path, run_dir / "causal_dag.json")
+    if postmortem_narrative_path and postmortem_narrative_path.exists():
+        shutil.copy2(postmortem_narrative_path, run_dir / "postmortem.md")
+    if causal_viz_path and causal_viz_path.exists():
+        shutil.copy2(causal_viz_path, run_dir / "causal_viz.html")
 
     # Create/update meta.json for the version
     meta_path = version_dir / "meta.json"
@@ -197,6 +207,12 @@ def main() -> int:
     parser.add_argument("--git-hash", type=str, default=None)
     parser.add_argument("--changes-snapshot", type=str, default=None,
                         help="Path to changes snapshot directory from snapshot_changes.py")
+    parser.add_argument("--causal-dag", type=str, default=None,
+                        help="Path to causal_dag_final.json from generate_postmortem.py")
+    parser.add_argument("--postmortem-narrative", type=str, default=None,
+                        help="Path to postmortem.md from generate_postmortem.py")
+    parser.add_argument("--causal-viz", type=str, default=None,
+                        help="Path to causal_viz.html from generate_postmortem.py")
 
     args = parser.parse_args()
 
@@ -214,6 +230,18 @@ def main() -> int:
         changes_snapshot_path=(
             Path(args.changes_snapshot).expanduser().resolve()
             if args.changes_snapshot else None
+        ),
+        causal_dag_path=(
+            Path(args.causal_dag).expanduser().resolve()
+            if args.causal_dag else None
+        ),
+        postmortem_narrative_path=(
+            Path(args.postmortem_narrative).expanduser().resolve()
+            if args.postmortem_narrative else None
+        ),
+        causal_viz_path=(
+            Path(args.causal_viz).expanduser().resolve()
+            if args.causal_viz else None
         ),
     )
 
