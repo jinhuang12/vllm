@@ -43,14 +43,17 @@ PostToolUse hook (auto-release):
 At Stage 4-5 track spawn, the orchestrator computes GPU assignments:
 
 ```
-gpu_count = state.json -> gpu_resources.gpu_count
-tp = state.json -> target.tp
+# Campaign state file: {artifact_dir}/state.json (NOT /tmp/ammo_gpu_res/state.json)
+gpu_count = {artifact_dir}/state.json -> gpu_resources.gpu_count
+tp = {artifact_dir}/state.json -> target.tp
 num_tracks = len(debate.selected_winners)
 
 can_partition = (gpu_count >= tp * num_tracks)
 ```
 
-**Immutability**: The GPU assignment plan is computed once per round and recorded in `state.json.gpu_assignment`. If the plan already exists for the current round, the orchestrator uses the existing plan (does not recompute). If `target.tp` changes mid-campaign, the current round must complete or be abandoned before the new TP takes effect.
+**Assignment algorithm**: Sequential by track index. In exclusive mode: track 0 gets GPUs `[0..TP-1]`, track 1 gets GPUs `[TP..2*TP-1]`, etc. In shared mode: track N gets kernel GPU `N` (one GPU each), all tracks share the same E2E CVD (all TP GPUs). Unassigned GPUs (e.g., GPU 3 when only 3 tracks need 1 GPU each) are left free.
+
+**Immutability**: The GPU assignment plan is computed once per round and recorded in `{artifact_dir}/state.json` at `gpu_assignment`. If the plan already exists for the current round, the orchestrator uses the existing plan (does not recompute). If `target.tp` changes mid-campaign, the current round must complete or be abandoned before the new TP takes effect.
 
 ### Exclusive Mode (`can_partition = true`)
 
@@ -264,7 +267,7 @@ New hook in `.claude/settings.local.json`:
 
 1. Check if `/tmp/ammo_gpu_res/state.json` exists. If not, skip.
 2. Extract command from the PostToolUse input JSON (try `tool_input.command`, then `input.command`).
-3. **Fallback if command extraction fails**: If command is empty/null, scan state.json for reservations with the current `$CLAUDE_SESSION_ID` and release the most recently reserved entry (heuristic). Log a warning about the fallback.
+3. **Fallback if command extraction fails**: If command is empty/null, do NOT attempt to guess which reservation to release (heuristic releases risk clearing the wrong GPU under concurrency). Instead: log a warning to stderr (`"PostToolUse: could not extract command — reservation not released. Will expire via lease."`) and exit 0. The lease expiry (2h/4h) handles cleanup. For faster recovery, the orchestrator can use `gpu_force_clear.py`.
 4. Check if command contains `CUDA_VISIBLE_DEVICES=` with digit IDs (same regex as PreToolUse Case A). Commands with `CVD=""` or no CVD had no reservation — skip.
 5. Compute command_hash, acquire flock, read state.json.
 6. For each GPU entry where `command_hash` matches: clear to null.
@@ -319,7 +322,7 @@ def force_clear(gpu_ids: list[int] | None, session_id: str) -> None: ...
 def check_and_reclaim_expired() -> list[int]: ...  # returns reclaimed GPU IDs
 
 # Internal
-def _acquire_flock() -> IO: ...
+def _acquire_flock() -> IO: ...  # handles 5-attempt exponential backoff internally; raises LockTimeoutError on failure
 def _release_flock(fh: IO) -> None: ...
 def _init_state() -> dict: ...
 ```
@@ -392,7 +395,7 @@ If persistent blocking, report to orchestrator via SendMessage.
 
 Add step 3b:
 
-> **3b.** Check GPU reservation state: run `gpu_status.py`. If stale reservations exist from the crashed session, clear them: `gpu_force_clear.py --all --session-id <crashed_session_id>`. Re-spawned agents will have their GPUs auto-reserved by hooks when they run commands.
+> **3b.** Check GPU reservation state: run `gpu_status.py`. If stale reservations exist from the crashed session, clear them: `gpu_force_clear.py --all --session-id <crashed_session_id>`. If the crashed session ID is unknown (crash before it was recorded in `{artifact_dir}/state.json`), use `gpu_force_clear.py --all --force-no-session`. Re-spawned agents will have their GPUs auto-reserved by hooks when they run commands.
 
 ## Implementation Scope
 
