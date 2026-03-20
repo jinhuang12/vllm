@@ -40,3 +40,46 @@ For decode-heavy workloads (output_len >> input_len), the E2E latency is dominat
 **Rule**: Always verify your target component's f_decode before committing to an optimization. If f_decode ≈ 0 and the workload is decode-heavy, the optimization ceiling is near zero regardless of kernel speedup.
 
 **Transient overhead**: Triton `@triton.autotune` probing, torch.compile graph capture, and JIT compilation appear in traces but are one-time startup costs. They inflate f_total but have f_decode = 0. These are NOT optimization targets for serving workloads.
+
+## Crossover Prediction from Kernel Data
+
+When an optimization improves some batch sizes but regresses others, the crossover batch size can be predicted from kernel-level measurements without running expensive E2E benchmarks at every intermediate BS.
+
+### Per-BS Delta Math
+
+The standard formula `E2E_improvement = f × (1 - s)` generalizes to per-BS:
+
+```
+predicted_e2e_improvement(BS) = f_decode(BS) × (1 - T_kernel_opt(BS) / T_kernel_base(BS))
+```
+
+Where:
+- `f_decode(BS)` = component share of total decode latency at batch size BS
+- `T_kernel_opt(BS)` = optimized kernel time at batch size BS
+- `T_kernel_base(BS)` = baseline kernel time at batch size BS
+
+### Why f Varies with Batch Size
+
+The component share `f` is NOT constant across batch sizes:
+- At BS=1 (decode), a kernel may be 8% of total decode latency (`f = 0.08`)
+- At BS=32, the same kernel may be only 3% (`f = 0.03`) because other components scale differently
+
+Extract per-BS `f_decode` from the Stage 1 nsys per-bucket traces. Each batch-size bucket has its own profiling trace with kernel-level timing breakdowns.
+
+For intermediate BS values (not directly profiled), linearly interpolate between measured `f` values at adjacent profiled batch sizes. This is approximate but sufficient for crossover prediction.
+
+### Finding the Crossover
+
+The crossover batch size is where the predicted E2E improvement drops below the noise tolerance:
+
+```
+crossover_bs = max(BS) where predicted_e2e_improvement(BS) >= noise_tolerance_pct / 100
+```
+
+### When Kernel Prediction Is Unreliable
+
+If the warm-cache vs cold-cache kernel speedup ratio exceeds 1.5x at any probed BS, the kernel prediction may not reflect production behavior (where L2 cache pressure from the full model pipeline dominates). In this case:
+- For narrow BS ranges (< 15 values): fall back to E2E binary search
+- For wide BS ranges (>= 15 values): gate to exact PASS batch sizes only (skip probing)
+
+See `references/crossover-probing.md` for the full probing protocol.

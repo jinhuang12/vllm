@@ -138,12 +138,31 @@ When the validator reports results:
 3. **Cross-check Gate 5.2**: If you ran a sanity benchmark, compare your numbers against the validator's. Divergence >20% warrants investigation.
 4. **Evaluate kill criteria** against the validator's measurements
 5. **Amdahl's Law sanity check**: `expected_e2e = f × (1 - 1/s)` — does measured E2E match?
+
+### Per-BS Verdict Decision Tree
+
+After the validator reports per-BS verdicts:
+
+- **All PASS/NOISE (at least one PASS)**: determination = `PASS`
+- **Any CATASTROPHIC**: determination = `FAIL`
+- **Mixed (some PASS + some REGRESSED)**:
+  1. Evaluate gating feasibility (is the dispatch site compatible with a gating mechanism?)
+  2. If feasible: request validator to run crossover probing benchmarks (SendMessage)
+  3. Receive probe results (`crossover_threshold_bs`)
+  4. Implement gating per `references/code-templates.md` dispatch decision tree
+  5. Register env var in `vllm/envs.py`: `VLLM_{OP_NAME}=1`
+  6. Commit gated implementation
+  7. Request validator to re-validate gated version (SendMessage with commit SHA)
+  8. If re-validation all PASS/NOISE: determination = `GATED_PASS`
+  9. If re-validation fails: determination = `FAIL` (one gating attempt per track -- no nested gating)
+- **All REGRESSED/NOISE (no PASS)**: determination = `FAIL`
+
 6. **Write `validation_results.md`** with full evidence chain:
    - Implementation summary and scope
    - Validator's independent Gate 5.1/5.2/5.3 results (with paths to validator scripts)
    - Cross-check analysis (if applicable)
    - Kill criteria evaluation with PASS/FAIL verdicts
-   - Overall PASS/FAIL determination
+   - Overall PASS/FAIL/GATED_PASS determination
 7. **Commit** and report to orchestrator
 
 ## If Implementation Fails
@@ -166,6 +185,18 @@ If the validator reports a gate failure:
 4. Ask the validator to re-validate with the new commit SHA
 
 The validator writes fresh tests each time — you can't "fix" by influencing the test.
+
+### GATED_PASS Output
+
+If determination is `GATED_PASS`, `validation_results.md` must include:
+- Dispatch mechanism type (torch.cond / Python if-else / init-time)
+- Env var name (e.g., `VLLM_OP003`)
+- Dispatch condition (e.g., `M <= 16`)
+- Crossover threshold BS
+- Pre-gating per-BS E2E table (showing which BS regressed)
+- Post-gating per-BS E2E table (showing all BS are PASS/NOISE)
+
+The DA Stop hook must recognize `GATED_PASS` as a valid determination and verify gating metadata exists when determination is `GATED_PASS`.
 
 ## Stage 1 Baseline Reuse (NON-NEGOTIABLE)
 

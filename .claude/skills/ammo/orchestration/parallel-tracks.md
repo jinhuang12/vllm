@@ -84,6 +84,13 @@ Agent(
     ## Kill Criteria
     {kill_criteria_from_optimization_plan}
 
+    ## Regression Thresholds (from campaign config)
+    - noise_tolerance_pct: {noise_tolerance_pct} (default: 0.5%)
+    - catastrophic_regression_pct: {catastrophic_regression_pct} (default: 5.0%)
+    - Per-BS verdicts: PASS / NOISE / REGRESSED / CATASTROPHIC
+    - Track verdicts: PASS / GATING_REQUIRED / GATED_PASS / FAIL
+    - See references/validation-defaults.md and references/crossover-probing.md
+
     Workflow:
     1. Delegate research to your validator while you read debate artifacts
     2. Implement the kernel optimization (use validator for codebase lookups as needed)
@@ -175,6 +182,23 @@ When the validator reports a gate failure:
 
 The validator writes new tests each re-delegation cycle — the champion cannot "fix" by influencing the test methodology.
 
+### GATING_REQUIRED Verdict
+
+When the validator reports a `GATING_REQUIRED` track verdict (some BS PASS, some REGRESSED):
+
+1. Validator reports per-BS verdict table to champion (SendMessage with structured verdict data)
+2. Champion evaluates gating feasibility (is the dispatch site compatible with a gating mechanism?)
+3. If feasible: champion requests validator to run crossover probing benchmarks (SendMessage)
+4. Validator runs kernel sweep + E2E confirmation per `references/crossover-probing.md`, reports probe results to champion (SendMessage with `crossover_threshold_bs`)
+5. Champion implements gating mechanism per `references/code-templates.md` dispatch decision tree
+6. Champion registers env var in `vllm/envs.py`: `VLLM_{OP_NAME}=1`
+7. Champion requests validator to re-validate gated version (SendMessage with commit SHA)
+8. Validator re-validates at all BS — all must be PASS or NOISE
+9. If re-validation passes: champion writes `GATED_PASS` to `validation_results.md`
+10. If re-validation fails OR gating infeasible at step 2: track `FAIL` (one gating attempt per track — no nested gating)
+
+**Important**: The validator runs benchmarks and reports results. The validator does NOT implement gating code (Hard Rule 6: no source modification). The champion directs the workflow; the validator executes benchmark requests.
+
 ## Result Collection
 
 After all tracks complete, main reads each track's outputs:
@@ -185,15 +209,38 @@ After all tracks complete, main reads each track's outputs:
 
 Main aggregates results to determine which candidates pass to Stage 6 integration.
 
-### Pass Criteria
+For `GATED_PASS` tracks, the `state.json` `parallel_tracks.{op_id}` entry includes additional fields:
+- `verdict`: `"GATED_PASS"`
+- `per_bs_verdict`: per-BS verdict map (e.g., `{"1": "PASS", "8": "PASS", "32": "REGRESSED"}`)
+- `gating`: gating metadata object (mechanism, env_var, dispatch_condition, crossover_threshold_bs, crossover_probing sub-object, pre_gating_results, post_gating_results)
 
-A track **passes** if all of the following hold:
+### Pass Criteria (Tiered Verdict System)
 
-- Gate 5.1: Validator's independent correctness tests pass (no regressions)
-- Gate 5.2: Validator's independent kernel benchmark shows measurable speedup (>1% over baseline)
-- Gate 5.3: E2E benchmark shows non-negative impact (>=1.0x)
-- Champion's DA Stop hook passed (Amdahl's check, baseline citation, production parity, independent validation exists)
-- No unresolved benchmark divergence between champion and validator (if both ran Gate 5.2)
+A track's verdict is determined by per-BS E2E results using the tiered verdict system (see `references/validation-defaults.md` §5.3):
+
+| Track Verdict | Condition |
+|--------------|-----------|
+| `PASS` | All BS are PASS or NOISE, with at least one PASS |
+| `GATING_REQUIRED` | Some BS are PASS + some are REGRESSED |
+| `FAIL` | Any CATASTROPHIC, or all REGRESSED/NOISE (no PASS), or gating failed |
+
+A track **ships** if its final status is `PASS` or `GATED_PASS` (after successful gating).
+
+Additional requirements unchanged:
+- Gate 5.1: Validator's independent correctness tests pass
+- Gate 5.2: Validator's independent kernel benchmark shows measurable speedup (>1% over baseline) for at least one target bucket
+- Champion's DA Stop hook passed (Amdahl's check, baseline citation, parity, independent validation exists)
+- No unresolved benchmark divergence between champion and validator
+
+### Track Status Machine
+
+```
+IN_PROGRESS → PASS       (all BS PASS/NOISE, at least one PASS)
+IN_PROGRESS → GATING_REQUIRED (some PASS + some REGRESSED)
+GATING_REQUIRED → GATED_PASS   (crossover probing + gating + re-validation succeeded)
+GATING_REQUIRED → FAIL         (gating infeasible, re-validation failed, or probing timed out)
+IN_PROGRESS → FAIL       (CATASTROPHIC, all REGRESSED, correctness failure)
+```
 
 ## Team and Worktree Cleanup
 

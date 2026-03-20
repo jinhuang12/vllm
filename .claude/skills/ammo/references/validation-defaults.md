@@ -200,17 +200,12 @@ Measure **GPU kernel time** under CUDA graphs for the same bucket set as Stage 1
 
 Default gate (safe, conservative):
 - **Measurable speedup required**: `T_opt_bucket_us < T_base_bucket_us` with >1% improvement
-  for at least one target bucket, and no regressions on remaining buckets.
+  for at least one target bucket. For buckets where the optimized kernel is slower, apply the per-BS tiered verdict system (see Stage 5.3). A `REGRESSED` verdict at kernel level triggers the same gating workflow as at E2E level.
 
 Reporting requirements:
 - baseline vs optimized per-bucket table (µs + speedup)
 - if possible, per-stage breakdown (routing/prepare/W1/act/quant/W2/reduce)
 - NCU sanity check for the dominant GEMM(s): occupancy, regs/thread, spills, SMEM/CTA
-
-If you are intentionally trading a small regression in one bucket for a larger gain elsewhere, you must:
-- explicitly document it,
-- restrict the enablement envelope accordingly, or
-- add a dispatch that picks the best variant per bucket.
 
 ## Default end-to-end gate (Stage 5.3)
 
@@ -220,15 +215,38 @@ Default iteration counts:
 - **Profiling** (Stage 1): `--num-iters 1` (keep traces small)
 - **Validation** (Stage 5): Use `num_iters` from `target.json` (default: 20 via `new_target.py`)
 
-Default targets (adjust to business needs and component share `f`):
-- **Target batch sizes**: **≥ 3%** improvement
-- **Non-target batch sizes**: **no regression** (≥ 1.0x)
-- **If regressions on non-target BS**: proceed only if optimization can be gated
-  to the improved batch sizes via dispatch guard or enablement envelope
+### Per-BS Tiered Verdict
 
-Target batch sizes are defined per optimization in the kill criteria.
+Thresholds from `target.json` gating block (defaults: `noise_tolerance_pct: 0.5`, `catastrophic_regression_pct: 5.0`):
 
-If the target component is a small fraction of end-to-end, these targets may be physically impossible. Use `references/e2e-delta-math.md` to set realistic expectations.
+| Speedup | Verdict | Meaning |
+|---------|---------|---------|
+| >= 1.0 | `PASS` | Improvement at this batch size |
+| >= (1.0 - noise_tolerance_pct/100) | `NOISE` | Within measurement noise, treated as neutral |
+| >= (1.0 - catastrophic_regression_pct/100) | `REGRESSED` | Material regression, gating required |
+| < (1.0 - catastrophic_regression_pct/100) | `CATASTROPHIC` | Too large to gate, track fails |
+
+### Track-Level Verdict
+
+| Per-BS Results | Track Verdict | Action |
+|---------------|--------------|--------|
+| All PASS or NOISE (at least one PASS) | `PASS` | Ship directly |
+| Any CATASTROPHIC | `FAIL` | Kill track |
+| Some PASS + some REGRESSED | `GATING_REQUIRED` | Champion implements gating (see below) |
+| All REGRESSED/NOISE (no PASS) | `FAIL` | No batch size benefits — kill track |
+
+### GATING_REQUIRED Workflow
+
+When the track verdict is `GATING_REQUIRED`:
+1. Validator reports per-BS verdict table to champion
+2. Champion evaluates gating feasibility
+3. Champion requests validator to run crossover probing (see `references/crossover-probing.md`)
+4. Champion implements gating mechanism per `references/code-templates.md` dispatch decision tree
+5. Validator re-validates gated version — all BS must be PASS or NOISE
+6. If re-validation passes: track status = `GATED_PASS`
+7. If re-validation fails or gating infeasible: track status = `FAIL` (one gating attempt per track)
+
+Target batch sizes are defined per optimization in the kill criteria. Use `references/e2e-delta-math.md` to set realistic expectations for E2E delta given component share `f`.
 
 ## Required reporting checklist for `{artifact_dir}/validation_results.md`
 
@@ -259,7 +277,9 @@ Include:
 - baseline vs optimized per-bucket table
 - variance notes (iters, warmup, noise sources)
 - connection to component share `f` (if improvement is small)
+- Per-BS verdict table (PASS/NOISE/REGRESSED/CATASTROPHIC) for each tested batch size
 
 6) **Decision**
 - ship / restrict envelope / pivot route / stop
 - Stage 6 enablement guard proposal (what exactly will be enabled, where, and how to roll back)
+- If GATED_PASS: dispatch mechanism type, env var name, dispatch condition, crossover_threshold_bs, pre-gating and post-gating per-BS E2E tables

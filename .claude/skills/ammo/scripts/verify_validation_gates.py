@@ -38,7 +38,11 @@ from typing import Any, Dict, List, Optional
 class GateResult:
     """Result of a single gate check."""
     name: str
-    status: str  # "PASS", "FAIL", "WARN"
+    status: str  # "PASS", "FAIL", "WARN" (gate result)
+    # Per-BS display values: "PASS", "FAIL", "WARN", "NOISE", "REGRESSED"
+    # Track-level display values: "PASS", "FAIL", "WARN", "GATED_PASS", "GATING_REQUIRED"
+    # Note: NOISE and REGRESSED are informational per-BS verdicts. The gate
+    # result itself uses PASS/FAIL/WARN for backward compatibility.
     message: str
     evidence: List[str] = field(default_factory=list)
 
@@ -387,6 +391,8 @@ def check_kill_criteria_complete(artifact_dir: Path) -> GateResult:
                 if "TODO" in result_upper or "OPTIONAL" in result_upper or "SKIP" in result_upper:
                     all_incomplete.append(label)
                 else:
+                    # GATED_PASS counts as a passing terminal verdict
+                    # alongside PASS/FAIL for kill criterion evaluation
                     all_complete.append(label)
 
     if not all_complete and not all_incomplete:
@@ -486,6 +492,50 @@ def check_state_json_gates(artifact_dir: Path) -> GateResult:
     )
 
 
+def _check_gated_pass_metadata(artifact_dir: Path) -> Optional[GateResult]:
+    """Check GATED_PASS tracks have required gating metadata in validation_results.md.
+
+    Returns a GateResult if any GATED_PASS track is missing gating metadata,
+    or None if no GATED_PASS tracks are found or all have proper metadata.
+    """
+    tracks_dir = artifact_dir / "tracks"
+    if not tracks_dir.exists():
+        return None
+
+    gating_metadata_patterns = [
+        "Dispatch mechanism",
+        "dispatch mechanism",
+        "crossover_threshold",
+        "crossover threshold",
+        "env var",
+        "env_var",
+        "VLLM_",
+    ]
+
+    missing_metadata_tracks: List[str] = []
+    for vf in tracks_dir.glob("*/validation_results.md"):
+        content = vf.read_text(encoding="utf-8", errors="ignore")
+        # Check if track determination is GATED_PASS
+        if not re.search(r"(?i)\bGATED_PASS\b", content):
+            continue
+        # GATED_PASS track found — verify gating metadata exists
+        has_metadata = any(pat in content for pat in gating_metadata_patterns)
+        if not has_metadata:
+            missing_metadata_tracks.append(vf.parent.name)
+
+    if missing_metadata_tracks:
+        return GateResult(
+            name="gated_pass_metadata",
+            status="FAIL",
+            message="GATED_PASS determination requires gating metadata",
+            evidence=[
+                f"Track(s) missing gating metadata: {', '.join(missing_metadata_tracks)}",
+                "Required: 'Dispatch mechanism', 'crossover_threshold', or 'env var' in validation_results.md",
+            ],
+        )
+    return None
+
+
 def verify_phase4(artifact_dir: Path) -> VerificationReport:
     """Run all Phase 4 verification gates."""
     report = VerificationReport(artifact_dir=str(artifact_dir))
@@ -499,6 +549,11 @@ def verify_phase4(artifact_dir: Path) -> VerificationReport:
         check_state_json_gates(artifact_dir),
     ]
 
+    # Check GATED_PASS metadata if any tracks have that determination
+    gated_pass_gate = _check_gated_pass_metadata(artifact_dir)
+    if gated_pass_gate is not None:
+        gates.append(gated_pass_gate)
+
     report.gates = gates
 
     # Collect blockers and warnings
@@ -508,7 +563,16 @@ def verify_phase4(artifact_dir: Path) -> VerificationReport:
         elif gate.status == "WARN":
             report.warnings.append(f"{gate.name}: {gate.message}")
 
-    # Determine overall status
+    # Determine overall status — check for GATED_PASS tracks to inform recommendation
+    has_gated_pass = False
+    tracks_dir = artifact_dir / "tracks"
+    if tracks_dir.exists():
+        for vf in tracks_dir.glob("*/validation_results.md"):
+            content = vf.read_text(encoding="utf-8", errors="ignore")
+            if re.search(r"(?i)\bGATED_PASS\b", content):
+                has_gated_pass = True
+                break
+
     if report.blockers:
         report.overall_status = "BLOCKED"
         report.recommendation = (
@@ -521,6 +585,12 @@ def verify_phase4(artifact_dir: Path) -> VerificationReport:
         report.recommendation = (
             "Validation conditionally complete. Review warnings before declaring complete. "
             "Ensure all comparisons are against vLLM production kernels."
+        )
+    elif has_gated_pass:
+        report.overall_status = "PASS"
+        report.recommendation = (
+            "Validation COMPLETE (GATED_PASS). Optimization ships with batch-size gating. "
+            "Verify dispatch mechanism is correctly configured."
         )
     else:
         report.overall_status = "PASS"
@@ -593,7 +663,11 @@ def main() -> int:
         print()
 
         for gate in report.gates:
-            status_icon = {"PASS": "✓", "FAIL": "✗", "WARN": "⚠"}.get(gate.status, "?")
+            status_icon = {
+                "PASS": "✓", "FAIL": "✗", "WARN": "⚠",
+                "NOISE": "~", "REGRESSED": "⊘",
+                "GATED_PASS": "⊕", "GATING_REQUIRED": "⊘",
+            }.get(gate.status, "?")
             print(f"  [{status_icon}] {gate.name}: {gate.status}")
             print(f"      {gate.message}")
             for ev in gate.evidence:

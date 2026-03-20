@@ -142,7 +142,7 @@ def score_gates(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     # Per-track validation gates
     for track in gates.get("validation_gates", []):
         total += 1
-        if track.get("status") == "PASSED":
+        if track.get("status") in ("PASSED", "GATED_PASS"):
             passed += 1
 
     # Integration
@@ -529,6 +529,11 @@ def generate_report(scorecard: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
         lines.append("")
 
     # E2E per-batch results
+    # TODO: For GATED_PASS tracks, add per-BS verdict columns to this table
+    # (e.g., "Verdict" column showing PASS/NOISE/GATED_OFF per batch size,
+    # and a "Gating" column indicating whether the optimization is active).
+    # This would make it immediately visible which batch sizes benefit and
+    # which are gated off. Deferred to a future iteration.
     e2e_results = snapshot.get("e2e_results")
     if e2e_results and e2e_results.get("per_batch"):
         lines.append("### Per-Batch E2E Results")

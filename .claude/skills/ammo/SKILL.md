@@ -190,8 +190,9 @@ See `orchestration/parallel-tracks.md` for the full team structure, phase-transi
 
 ### Stage 6: Integration Validation
 
-- If multiple candidates pass and target different components: cherry-pick both, re-run E2E.
+- If multiple candidates pass (PASS or GATED_PASS) and target different components: cherry-pick both, re-run E2E.
 - If same component: pick best E2E.
+- If GATED_PASS tracks produce merge conflicts during cherry-pick: spawn dedicated resolver agent (`.claude/agents/ammo-resolver.md`) + DA reviewer.
 - If none pass: round EXHAUSTED (not campaign-level — campaign evaluates in Stage 7).
 - See `orchestration/integration-logic.md`.
 
@@ -225,7 +226,9 @@ T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]        
   | T8a_{id}: Research (validator) + plan reading (champion)   [round team]    <- T7   |
   | T8b_{id}: Implement kernel (champion only)                 [round team]    <- T8a  |
   | T8c_{id}: Independent validation Gates 5.1/5.2/5.3 (validator) [round team] <- T8b |
-  | T8d_{id}: Kill criteria evaluation + validation_results.md (champion) [round team] <- T8c |
+  | T8cx_{id}: [IF GATING_REQUIRED] Crossover probing (validator benchmarks,   |
+  |            champion implements gating, validator re-validates)  [round team] <- T8c |
+  | T8d_{id}: Kill criteria evaluation + validation_results.md (champion) [round team] <- T8c/T8cx |
   |           (frontmatter Stop hook = DA: Amdahl, baseline, parity, independent validation) |
   | T9_{id}: GATE: compilation check                           [main]          <- T8d  |
   | T10_{id}: State update                                     [main]          <- T9   |
@@ -244,8 +247,8 @@ T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]        
 
 T11: GATE: All tracks have results AND overlapped debate (if any) complete  [main]  <- all T10, T_overlap_shutdown
 T11b: TeamDelete round team                               [main]               <- T11
-T12: Integration validation (if multiple pass)            [main]               <- T11b
-T13: Round decision (SHIP / round-EXHAUSTED)              [main]               <- T12
+T12: Integration validation (if multiple PASS or any GATED_PASS) [main]       <- T11b
+T13: Round decision (SHIP / GATED_SHIP / round-EXHAUSTED) [main]              <- T12
 
 === Campaign Loop (Stage 7) ===
 
@@ -275,7 +278,7 @@ These are NOT advisory. Violation blocks stage progression.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
 4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Reminded by `ammo-pretool-guard.sh` — warns on raw `vllm bench latency`)*
 5. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
-6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug.
+6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug. For BS-dependent optimizations, compute per-BS `f(BS) × kernel_speedup(BS)` — different batch sizes may have different `f` values. A partial regression at some batch sizes does not negate the optimization if it is gatable — see tiered verdict system in `references/validation-defaults.md`.
 7. **Custom kernel mandate**: Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected outright in the Phase 0 eligibility gate.
 
 ## Hook Enforcement
@@ -341,7 +344,10 @@ Inline DA verification (integrated into helper agents — replaces non-functiona
   },
   "session_id": null,     /* lead records session UUID at campaign start */
   "agent_costs": [],      /* auto-populated by eval pipeline from session logs */
-  "parallel_tracks": {},  /* per-track: { status, correctness, kernel_speedup, e2e_speedup, validation_results_path } */
+  "parallel_tracks": {},  /* per-track: { status, verdict, correctness, kernel_speedup, e2e_speedup, per_bs_verdict, gating, validation_results_path }
+                              verdict: "PASS" | "GATING_REQUIRED" | "GATED_PASS" | "FAIL"
+                              per_bs_verdict: { "1": "PASS", "8": "NOISE", "32": "REGRESSED" } (null if not yet evaluated)
+                              gating: null unless verdict is GATED_PASS, then: { mechanism, env_var, dispatch_condition, crossover_threshold_bs, crossover_probing: { probed_points, predicted_bs, confirmed_bs, time_minutes, converged }, pre_gating_results, post_gating_results } */
   "integration": {
     "status": "pending",
     "passing_candidates": [],
@@ -354,7 +360,9 @@ Inline DA verification (integrated into helper agents — replaces non-functiona
     "status": "active",                          /* active | paused | campaign_complete | campaign_exhausted */
     "current_round": 1,
     "diminishing_returns_threshold_pct": 0.5,    /* stop when top bottleneck < this % */
-    "cumulative_e2e_speedup": 1.0,               /* multiplicative across shipped rounds */
+    "noise_tolerance_pct": 0.5,                  /* per-BS verdict: speedup >= (1.0 - this) = NOISE. From target.json gating block. */
+    "catastrophic_regression_pct": 5.0,          /* per-BS verdict: speedup < (1.0 - this) = CATASTROPHIC. From target.json gating block. */
+    "cumulative_e2e_speedup": 1.0,               /* multiplicative across shipped rounds. For GATED_PASS tracks: uses min post-gating speedup across all BS. */
     "rounds": [],                                /* per-round history (see schema below) */
     "shipped_optimizations": []                  /* op_ids that shipped across all rounds */
   }
@@ -371,7 +379,8 @@ Each entry in `campaign.rounds`:
   "selected_candidates": ["op001", "op002"],
   "implementation_results": {
     "op001": {"status": "PASSED", "e2e_speedup": 1.12},
-    "op002": {"status": "FAILED", "reason": "correctness"}
+    "op002": {"status": "FAILED", "reason": "correctness"},
+    "op003": {"status": "GATED_PASS", "e2e_speedup": 1.025, "gating": {"env_var": "VLLM_OP003", "crossover_threshold_bs": 16, "regressing_bs": [32]}}
   },
   "shipped": ["op001"],
   "cumulative_speedup_after": 1.12

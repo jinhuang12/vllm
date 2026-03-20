@@ -9,6 +9,11 @@ After all parallel tracks complete in Stage 5, the main session determines how t
 | Single candidate passes | Ship directly -- E2E already validated in Stage 5 |
 | Multiple pass, different components | Cherry-pick both onto integration branch, re-run correctness + E2E |
 | Multiple pass, same component | Pick the candidate with the best E2E speedup, ship that one |
+| Single GATED_PASS candidate | Ship with gating dispatch intact — env var enabled, dispatch active |
+| PASS + GATED_PASS, different components | Cherry-pick both onto integration branch, re-run E2E at all BS |
+| PASS + GATED_PASS, same component | Pick the PASS candidate (cleaner integration) |
+| Two GATED_PASS, different components | Cherry-pick both; if merge conflict, spawn resolver agent |
+| Two GATED_PASS, same component | Pick candidate with best weighted E2E across all BS |
 | None pass | Mark optimization target as `EXHAUSTED` in state.json |
 
 ## Conflict Detection
@@ -71,6 +76,13 @@ python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
 
 If a cherry-pick produces a merge conflict, treat the candidates as overlapping (same-component) and pick the one with the best E2E speedup.
 
+### GATED_PASS Track Evaluation
+
+When combining a GATED_PASS track with other tracks:
+- Re-run E2E at ALL batch sizes including the gated track's non-beneficial range
+- Verify no interaction effects between the gated dispatch and other optimizations
+- If cherry-pick produces merge conflict on a GATED_PASS track: spawn resolver agent (see below)
+
 ## State Tracking
 
 The integration section of `state.json` records all decisions and results:
@@ -82,13 +94,26 @@ The integration section of `state.json` records all decisions and results:
     "passing_candidates": [
       {
         "op_id": "op001",
+        "verdict": "PASS",
         "e2e_speedup": 1.12,
         "files_changed": ["vllm/attention/backends/flash_attn.py"]
       },
       {
         "op_id": "op002",
+        "verdict": "PASS",
         "e2e_speedup": 1.08,
         "files_changed": ["csrc/quantization/gptq_marlin.cu"]
+      },
+      {
+        "op_id": "op003",
+        "verdict": "GATED_PASS",
+        "e2e_speedup": 1.025,
+        "files_changed": ["vllm/model_executor/layers/some_layer.py"],
+        "gating": {
+          "env_var": "VLLM_OP003",
+          "crossover_threshold_bs": 16,
+          "regressing_bs": [32]
+        }
       }
     ],
     "conflict_analysis": {
@@ -120,6 +145,7 @@ The integration section of `state.json` records all decisions and results:
 | `validated` | Single candidate validated successfully |
 | `single_pass` | One candidate selected (sole passer or best among overlapping) |
 | `combined` | Multiple candidates merged and validated successfully |
+| `gated_pass` | One or more GATED_PASS candidates integrated with dispatch gating |
 | `exhausted` | No candidates passed validation; no optimization to ship |
 
 ## Campaign Loop Transition (Stage 7)
@@ -130,9 +156,15 @@ After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orch
 
 1. Record shipped candidates in `campaign.shipped_optimizations`.
 2. Update `campaign.cumulative_e2e_speedup` (multiplicative: `old x round_speedup`).
+
+For GATED_PASS tracks, use the **minimum post-gating speedup across all batch sizes** as the `e2e_speedup` value (conservative — avoids needing production BS distribution data).
+
 3. Record the round in `campaign.rounds` with all results.
 4. Trigger re-profiling: invoke `ammo-researcher` subagent for Stage 1 baseline capture on the patched codebase.
 5. After re-profile: run bottleneck mining (Stage 2) on the new baseline.
+
+**Lazy invalidation with GATED_PASS**: When re-profiling after a GATED_PASS track ships, profile at ALL campaign batch sizes (not just one). The gated optimization's f-shift is BS-dependent — f changes only at gated-on batch sizes, not at gated-off batch sizes. Use the **maximum f-shift across all BS** for the lazy invalidation test to be conservative.
+
 5b. **Lazy invalidation of overlapped debate winners** (if `debate.next_round_overlap.selected_winners` is non-empty):
    - For each winner in `debate.next_round_overlap.selected_winners`:
      - Retrieve `f_old` from `debate.next_round_overlap.f_values_at_proposal[op_id]`.
@@ -198,3 +230,60 @@ If the campaign transitions to `campaign_complete` or `campaign_exhausted` while
 This can occur in two scenarios:
 - **SHIP + diminishing returns met**: A track shipped, re-profiling shows top bottleneck below threshold. The overlapped debate was running in parallel but its results are now irrelevant.
 - **All tracks EXHAUSTED + diminishing returns met**: No tracks shipped, existing profiling shows top bottleneck below threshold. The debate winners are technically valid but the campaign is ending.
+
+## Resolver Agent for Merge Conflicts
+
+When cherry-picking a GATED_PASS track (or combining multiple GATED_PASS tracks) produces merge conflicts, the orchestrator spawns a dedicated resolver.
+
+### When Invoked
+
+- Cherry-pick of a GATED_PASS track onto integration branch produces git merge conflicts
+- Two GATED_PASS tracks targeting different components but touching overlapping files (e.g., both register env vars in `vllm/envs.py`)
+
+### Workflow
+
+1. **Orchestrator** spawns a resolver agent (`.claude/agents/ammo-resolver.md`, Opus) with:
+   - The conflicting files and conflict markers
+   - Both tracks' gating metadata (env vars, dispatch conditions, crossover thresholds)
+   - The optimization intent for each track
+
+2. **Resolver** proposes a merged version preserving both gating dispatches
+
+3. **Orchestrator** spawns a DA reviewer (Sonnet) to verify:
+   - Correct dispatch ordering (more specific conditions first)
+   - No interaction effects between gating conditions
+   - Env var namespace conflicts (each optimization must have a unique env var)
+   - torch.compile safety of the merged dispatch logic
+
+4. If DA approves: merged version committed to integration branch
+5. If DA rejects: resolver revises based on DA feedback (max 2 iterations), then escalates to orchestrator
+
+### Priority Dispatch Chain (Overlapping Call Sites)
+
+For the rare case where two gated optimizations dispatch at the same call site, use a priority chain instead of nested conditionals:
+
+```python
+AMMO_DISPATCH_CHAIN = [
+    # (condition, kernel_fn, name) — evaluated in order, first match wins
+    (lambda M: 2 <= M <= 16, fused_qkv_fn, "op012_fused_qkv"),
+    (lambda M: 2 <= M <= 32, selective_fn, "op007_selective"),
+]
+
+def ammo_dispatch(layer, x, weight, bias=None):
+    M = x.numel() // x.shape[-1]
+    for condition, kernel_fn, name in AMMO_DISPATCH_CHAIN:
+        if condition(M):
+            return kernel_fn(layer, x, weight, bias)
+    return default_fn(layer, x, weight, bias)
+```
+
+### State Recording
+
+Record resolver invocation in `integration`:
+```json
+{
+  "resolver_invoked": true,
+  "resolver_outcome": "approved" | "rejected" | "escalated",
+  "conflicting_tracks": ["op001", "op003"]
+}
+```

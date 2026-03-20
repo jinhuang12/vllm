@@ -108,6 +108,8 @@ The report is for engineers who have never heard of AMMO. Translate ALL internal
 | Co-located baseline | Same-session baseline comparison |
 | Gate 5.1 / 5.2 / 5.3 | Correctness / kernel performance / E2E validation |
 | Worktree path | Development working copy / branch |
+| GATED_PASS | Optimization accepted with batch-size dispatch gate — active only for BS where it improves performance |
+| Crossover probing | Kernel-informed threshold determination — finding the exact batch size where the optimization transitions from beneficial to harmful |
 
 When discussing the evaluation process, describe it as: "We evaluated multiple optimization
 approaches through structured analysis, micro-experiments, and peer review" — not "adversarial
@@ -164,11 +166,13 @@ Every section is required unless marked optional.
 - **Multi-component decomposition**: When an optimization has multiple parts (e.g., new kernel + weight fusion), break down each part's contribution. The in-sweep comparison (same worktree, env var toggle) isolates the kernel contribution alone; the Stage 1 comparison captures the full effect including structural changes. Explain why E2E improvement may exceed or differ from kernel-level speedup.
 - Did results meet projections? Original projections are in `debate/summary.md` under "Conceded Weaknesses" (revised estimates post-debate). Compare projected vs actual, enumerate specific reasons for any gap, and frame honestly.
 - For batch sizes outside the optimization's active range, explain why (e.g., "M=1 bypassed because cuBLAS GEMV is already optimal at 70.6% BW utilization")
+- For `GATED_PASS` optimizations, include both pre-gating and post-gating E2E tables. Show which batch sizes benefit and which are gated off. Explain the dispatch mechanism in reader-friendly language (e.g., "This optimization activates only for batch sizes <= 16 via runtime dispatch").
 - Rollback instructions (disable the env var or revert the code)
 
 ### 7. What Failed (optional — include if any candidate was IMPLEMENTED but failed validation)
 - For each failed candidate: what it was, kernel-level results, why E2E didn't materialize
 - Lessons from the failure (e.g., kernel-to-E2E translation gap)
+- Include `GATED_PASS` tracks that failed during gating implementation (crossover probing inconclusive or dispatch mechanism broke torch.compile). Explain why gating was attempted and why it failed.
 - Note: candidates eliminated during evaluation (before implementation) belong in section 5, not here
 
 ### 8. Remaining Opportunities

@@ -131,8 +131,8 @@ Required sections in the proposal file:
 | **Grounded Data** | Cite measured timings, component share `f`, bandwidth utilization from bottleneck_analysis.md |
 | **Micro-Experiment Result** | At least one empirical data point: roofline calc, ncu query, or tiny prototype (MANDATORY) |
 | **Feasibility Math** | Expected kernel speedup derived from the micro-experiment, NOT from Stage 2 |
-| **Expected E2E Impact** | `f × kernel_speedup` where both factors have provenance |
-| **Kill Criteria** | What threshold defines failure for this candidate |
+| **Expected E2E Impact** | `f × kernel_speedup` where both factors have provenance. If optimization is batch-size-dependent, report per-BS projections and note gating candidacy |
+| **Kill Criteria** | What threshold defines failure for this candidate. Include per-BS ranges when the optimization is expected to benefit only a subset of target batch sizes. Format: `beneficial_range: [BS_lo, BS_hi], improvement_threshold: 1.03, regression_tolerance: 0.5%` |
 | **Kernel Code Scope** | Specific kernel files to create/modify, language (CUDA/Triton/CUTLASS), estimated LOC — demonstrates this is custom kernel work |
 | **Micro-Experiment Cache Audit** | For BW-bound kernels (AI < breakeven): (1) Were both warm-cache and cold-cache times reported? (2) If warm/cold > 1.5x, was cold-cache speedup used for E2E? For fusion proposals: was the fused kernel tested under production L2 conditions (data footprint matching pipeline working set)? |
 
@@ -249,6 +249,8 @@ After the final round:
 ```
 
 The summary includes: per-candidate scores, rationale for selection, and any conceded weaknesses that Stage 4 implementation must address.
+
+Flag proposals with kill criteria that imply per-BS differentiated impact (e.g., M<=32 kernel specialization, decode-only path). These are candidates for `GATED_PASS` and should be noted in `summary.md` so Stage 4-5 implementers are prepared for crossover probing.
 
 ## Micro-Experiment Guidelines
 

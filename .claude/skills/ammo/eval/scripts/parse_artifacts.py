@@ -157,7 +157,7 @@ def _best_e2e_from_results(impl_results: Dict[str, Any]) -> Optional[float]:
     """Extract the best e2e_speedup from implementation_results."""
     best = None
     for v in impl_results.values():
-        if isinstance(v, dict) and v.get("status") == "PASSED":
+        if isinstance(v, dict) and v.get("status") in ("PASSED", "GATED_PASS"):
             speedup = v.get("e2e_speedup")
             if isinstance(speedup, (int, float)):
                 if best is None or speedup > best:
@@ -237,13 +237,15 @@ def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
     for track_id, track_data in tracks_state.items():
         if not isinstance(track_data, dict):
             continue
-        track_gates.append({
+        gate_entry = {
             "track_id": track_id,
             "status": track_data.get("status", "UNKNOWN"),
             "correctness": track_data.get("correctness"),
             "kernel_speedup": track_data.get("kernel_speedup"),
             "e2e_speedup": track_data.get("e2e_speedup"),
-        })
+        }
+        gate_entry["gating"] = track_data.get("gating")
+        track_gates.append(gate_entry)
 
     # Integration gate
     integration = state.get("integration", {})

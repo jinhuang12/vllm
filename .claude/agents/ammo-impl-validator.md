@@ -164,6 +164,36 @@ Gate 5.3 Results:
 
 Report deltas in milliseconds, not percentages. The champion interprets significance.
 
+### Per-BS Tiered Verdict (Gate 5.3 Extension)
+
+After running E2E benchmarks at all campaign batch sizes:
+
+1. Read `noise_tolerance_pct` and `catastrophic_regression_pct` from `{artifact_dir}/target.json` gating block (defaults: 0.5%, 5.0%)
+2. Compute per-BS speedup from Stage 1 baseline (source: `{artifact_dir}/runs/baseline_bs{N}.json`)
+3. Classify each BS using the tiered verdict:
+   - speedup >= 1.0 -> `PASS`
+   - speedup >= (1.0 - noise_tolerance_pct/100) -> `NOISE`
+   - speedup >= (1.0 - catastrophic_regression_pct/100) -> `REGRESSED`
+   - speedup < (1.0 - catastrophic_regression_pct/100) -> `CATASTROPHIC`
+4. Compute track-level verdict:
+   - All PASS/NOISE (at least one PASS) -> track `PASS`
+   - Any CATASTROPHIC -> track `FAIL`
+   - Some PASS + some REGRESSED -> track `GATING_REQUIRED`
+   - All REGRESSED/NOISE (no PASS) -> track `FAIL`
+5. Report per-BS verdict table to champion (SendMessage):
+   ```
+   Gate 5.3 Results:
+   | BS | Baseline (ms) | Opt (ms) | Speedup | Verdict |
+   | 1  | 42.1          | 40.8     | 1.031   | PASS    |
+   | 8  | 58.3          | 56.4     | 1.034   | PASS    |
+   | 32 | 95.2          | 97.1     | 0.980   | REGRESSED |
+   Track verdict: GATING_REQUIRED
+   ```
+6. If champion requests crossover probing: run kernel sweep + E2E confirmation per `references/crossover-probing.md`. Report probe results (crossover_threshold_bs) to champion.
+7. If champion requests re-validation (after implementing gating): re-run Gates 5.1/5.2/5.3 on gated version. All BS must be PASS or NOISE. Report final per-BS verdict table.
+
+**IMPORTANT**: You run benchmarks and report results. You do NOT implement gating code (Hard Rule 6: no source modification). The champion implements gating; you verify it works.
+
 ### Full Validation Report
 
 After all three gates, send one comprehensive report:
@@ -212,6 +242,8 @@ After completing Gates 5.1/5.2/5.3, run these additional DA checks before sendin
 4. **SCOPE ADHERENCE**: Read `{artifact_dir}/debate/summary.md` for the planned scope of this op_id. Compare against files created/modified in the worktree (`git diff --name-only main`). If planned components were omitted, check whether the champion documented descoping rationale. If not, FLAG.
 
 5. **GATE 5.2 CROSS-CHECK**: If the champion mentioned smoke-test benchmark numbers (in messages or artifact files), compare your Gate 5.2 kernel timings against theirs. If they diverge by >20%, FLAG: "Benchmark divergence: champion={X}us, validator={Y}us. Investigate methodology differences."
+
+6. **PER-BS REGRESSION CHECK**: For each BS with `REGRESSED` verdict, verify the champion implemented gating before declaring `GATED_PASS`. Confirm: (a) post-gating E2E at the regressed BS is within noise tolerance, (b) gating metadata exists in `validation_results.md`, (c) env var is registered in `vllm/envs.py`.
 
 ### DA Output Format
 

@@ -40,6 +40,8 @@ class TargetFields:
     output_len: int
     batch_sizes: List[int]
     num_iters: int
+    noise_tolerance_pct: float
+    catastrophic_regression_pct: float
 
 
 def _write_text(path: Path, text: str, *, force: bool) -> None:
@@ -70,6 +72,8 @@ def _default_target_fields(args: argparse.Namespace) -> TargetFields:
         output_len=args.output_len,
         batch_sizes=args.batch_sizes,
         num_iters=args.num_iters,
+        noise_tolerance_pct=args.noise_tolerance_pct,
+        catastrophic_regression_pct=args.catastrophic_regression_pct,
     )
 
 
@@ -95,7 +99,9 @@ def _constraints_md(fields: TargetFields) -> str:
 """
 
 def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold: int = 3,
-                enable_delegation: bool = True, delegates_per_champion: int = 1) -> Dict[str, Any]:
+                enable_delegation: bool = True, delegates_per_champion: int = 1,
+                noise_tolerance_pct: float = 0.5,
+                catastrophic_regression_pct: float = 5.0) -> Dict[str, Any]:
     return {
         "target": {
             "model_id": fields.model_id,
@@ -157,6 +163,8 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
             "status": "active",
             "current_round": 1,
             "diminishing_returns_threshold_pct": diminishing_threshold,
+            "noise_tolerance_pct": noise_tolerance_pct,
+            "catastrophic_regression_pct": catastrophic_regression_pct,
             "cumulative_e2e_speedup": 1.0,
             "rounds": [],
             "shipped_optimizations": [],
@@ -205,6 +213,10 @@ def _target_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
                 "note": "Fill require_patterns to assert optimized fast-path executed (recommended).",
             },
         },
+        "gating": {
+            "noise_tolerance_pct": fields.noise_tolerance_pct,
+            "catastrophic_regression_pct": fields.catastrophic_regression_pct,
+        },
         "notes": {
             "production_parity": "Ensure CUDA graphs / torch.compile settings match production. See references/e2e-latency-guide.md.",
         },
@@ -238,6 +250,12 @@ def main() -> None:
     p.add_argument("--delegates-per-champion", type=int, default=1,
                    help="Number of Sonnet delegate agents per Opus champion (default: 1)")
 
+    # Gating options (BS-dependent optimization support)
+    p.add_argument("--noise-tolerance-pct", type=float, default=0.5,
+                   help="Per-BS speedup within this %% of 1.0 is classified NOISE (default: 0.5)")
+    p.add_argument("--catastrophic-regression-pct", type=float, default=5.0,
+                   help="Per-BS regression beyond this %% is classified CATASTROPHIC (default: 5.0)")
+
     args = p.parse_args()
 
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
@@ -256,6 +274,8 @@ def main() -> None:
         fields, artifact_dir, args.diminishing_returns_threshold,
         enable_delegation=args.enable_delegation,
         delegates_per_champion=args.delegates_per_champion,
+        noise_tolerance_pct=args.noise_tolerance_pct,
+        catastrophic_regression_pct=args.catastrophic_regression_pct,
     ), force=args.force)
     _write_json(artifact_dir / "target.json", _target_json(fields, artifact_dir), force=args.force)
 

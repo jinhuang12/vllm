@@ -52,6 +52,27 @@ def _write_json(path: Path, obj: Dict[str, Any]) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _classify_verdict(speedup: float, noise_tol: float, catastrophic_tol: float) -> str:
+    """Classify a per-BS E2E speedup into a tiered verdict.
+
+    Args:
+        speedup: E2E speedup ratio (e.g. 1.02 = 2% improvement, 0.97 = 3% regression).
+        noise_tol: Noise tolerance as a fraction (e.g. 0.005 for 0.5%).
+        catastrophic_tol: Catastrophic regression threshold as a fraction (e.g. 0.05 for 5%).
+
+    Returns:
+        One of "PASS", "NOISE", "REGRESSED", "CATASTROPHIC".
+    """
+    if speedup >= 1.0:
+        return "PASS"
+    elif speedup >= (1.0 - noise_tol):
+        return "NOISE"
+    elif speedup >= (1.0 - catastrophic_tol):
+        return "REGRESSED"
+    else:
+        return "CATASTROPHIC"
+
+
 def _render_e2e_section(e2e: Dict[str, Any]) -> str:
     baseline_label = e2e.get("bench", {}).get("baseline_label", "baseline")
     opt_label = e2e.get("bench", {}).get("opt_label", "opt")
@@ -164,9 +185,16 @@ def main() -> None:
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
     env_path = Path(args.env_json).expanduser().resolve() if args.env_json else (artifact_dir / "env.json")
     e2e_path = Path(args.e2e_json).expanduser().resolve() if args.e2e_json else (artifact_dir / "e2e_latency" / "e2e_latency_results.json")
+    target_path = artifact_dir / "target.json"
 
     env = _load_json(env_path)
     e2e = _load_json(e2e_path)
+
+    # Load gating thresholds from target.json (backward compat: use defaults if missing)
+    target_config = _load_json(target_path) or {}
+    gating_config = target_config.get("gating", {})
+    noise_tol = gating_config.get("noise_tolerance_pct", 0.5) / 100.0
+    catastrophic_tol = gating_config.get("catastrophic_regression_pct", 5.0) / 100.0
 
     summary: Dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -236,35 +264,45 @@ def main() -> None:
     else:
         lines.append(_render_e2e_section(e2e))
 
-        # Summarize pass/fail vs default gates (if we have numbers)
-        baseline_label = e2e.get("bench", {}).get("baseline_label", "baseline")
-        opt_label = e2e.get("bench", {}).get("opt_label", "opt")
+        # Compute per-BS tiered verdicts using thresholds from target.json
         buckets = e2e.get("results", [])
-        gate = {
-            "small_bs": {"buckets": [1, 4, 8], "min_improvement_pct": 5.0},
-            "large_bs": {"buckets": [16, 32, 64], "min_improvement_pct": 0.0},
-        }
 
-        failing: List[str] = []
+        per_bs_verdicts: List[Dict[str, Any]] = []
         if isinstance(buckets, list):
             for row in buckets:
                 if not isinstance(row, dict):
                     continue
-                bs = row.get("batch_size")
-                imp = row.get("improvement_pct")
-                if not isinstance(bs, int) or not isinstance(imp, (int, float)):
+                bs = row.get("batch_size") or row.get("num_prompts")
+                speedup = row.get("speedup")
+                if bs is None or not isinstance(speedup, (int, float)):
                     continue
+                verdict = _classify_verdict(float(speedup), noise_tol, catastrophic_tol)
+                per_bs_verdicts.append({"batch_size": bs, "speedup": speedup, "verdict": verdict})
 
-                if bs in gate["small_bs"]["buckets"] and imp < gate["small_bs"]["min_improvement_pct"]:
-                    failing.append(f"BS={bs}: {imp:.2f}% < 5%")
-                if bs in gate["large_bs"]["buckets"] and imp <= gate["large_bs"]["min_improvement_pct"]:
-                    failing.append(f"BS={bs}: {imp:.2f}% <= 0%")
+        # Compute track-level verdict
+        verdicts = [v["verdict"] for v in per_bs_verdicts]
+        has_pass = "PASS" in verdicts
+        has_catastrophic = "CATASTROPHIC" in verdicts
+        has_regressed = "REGRESSED" in verdicts
+
+        if has_catastrophic:
+            track_verdict = "FAIL"
+        elif has_regressed and has_pass:
+            track_verdict = "GATING_REQUIRED"
+        elif has_pass:
+            track_verdict = "PASS"
+        else:
+            track_verdict = "FAIL"  # All NOISE/REGRESSED, no PASS
 
         summary["e2e_gate"] = {
-            "default_gate": gate,
-            "failing": failing,
-            "pass": len(failing) == 0,
-            "note": "Default gates from references/validation-defaults.md; adjust if component share is small (see references/e2e-delta-math.md).",
+            "per_bs_verdicts": per_bs_verdicts,
+            "track_verdict": track_verdict,
+            "thresholds": {
+                "noise_tolerance_pct": gating_config.get("noise_tolerance_pct", 0.5),
+                "catastrophic_regression_pct": gating_config.get("catastrophic_regression_pct", 5.0),
+            },
+            "pass": track_verdict in ("PASS", "GATING_REQUIRED", "GATED_PASS"),  # backward compat
+            "failing": [v for v in per_bs_verdicts if v["verdict"] in ("REGRESSED", "CATASTROPHIC")],  # backward compat
         }
 
     # Decision placeholder

@@ -5,7 +5,8 @@ This checklist is used by the DA (devil's advocate) embedded in the implementer'
 ## Validation Completeness
 
 - [ ] `validation_results.md` contains Gate 5.1, 5.2, and 5.3 results with actual numeric measurements (not placeholders or TODOs)
-- [ ] All kill criteria have definitive PASS/FAIL verdicts
+- [ ] All kill criteria have definitive PASS/FAIL/GATED_PASS verdicts (using tiered verdict system)
+- [ ] If GATED_PASS: gating metadata exists (dispatch mechanism, env var, crossover threshold, pre/post-gating E2E tables)
 
 ## Baseline Citation
 
@@ -20,6 +21,7 @@ This checklist is used by the DA (devil's advocate) embedded in the implementer'
 
 - [ ] Actual E2E improvement is within 1.5x of expected (`f * (1 - 1/s)`)
 - [ ] If violated: flag cross-track contamination or measurement error
+- [ ] Per-BS Amdahl: For each REGRESSED batch size, verify the regression is Amdahl-consistent (not suspiciously large given `f` and measured kernel speedup at that BS)
 
 ## Cross-Track Awareness
 

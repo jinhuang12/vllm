@@ -1086,3 +1086,95 @@ if constexpr (HAS_SHARED_EXPERT) {
 // Tile sizes change (2x bytes per element)
 // MMA instructions change (mma.f32.bf16.bf16 vs mma.f32.f8.f8)
 ```
+
+---
+
+## Batch-Size Dispatch Mechanisms (for GATED_PASS Optimizations)
+
+When an optimization is `GATED_PASS`, it needs a dispatch mechanism to activate only at beneficial batch sizes. Choose from the decision tree below based on the dispatch site's context.
+
+### Decision Tree
+
+```
+1. Is the dispatch site inside a fullgraph-compiled region (torch.compile fullgraph=True)?
+   YES -> Use torch.cond() (Variant 1)
+
+2. Is the dispatch site inside a custom op, layer forward(), or CUDA-graphed path?
+   YES -> Use Python if/else on M dimension (Variant 2)
+         Sub-decision: Is the threshold architectural or empirical?
+           ARCHITECTURAL (e.g., kernel's BLOCK_M determines max M) -> hardcode threshold
+           EMPIRICAL (from crossover probing) -> use probed threshold with conservative bias
+
+3. Is the dispatch site at module init time or platform level?
+   YES -> Use init-time function pointer selection (Variant 3)
+```
+
+### Variant 1: torch.cond (Fullgraph-Compiled Paths)
+
+For code paths where `torch.compile(fullgraph=True)` traces through the dispatch site. Standard Python `if` on tensor shape causes graph breaks under fullgraph mode.
+
+```python
+# Reference: vllm/model_executor/layers/quantization/utils/fp8_utils.py:308-315
+condition = input.shape[0] < crossover_threshold
+return torch.cond(
+    condition,
+    optimized_fn,    # Active for BS below threshold
+    baseline_fn,     # Fallback for BS above threshold
+    (input, weight, *other_args),
+)
+```
+
+Both branches must return same-shape tensors.
+
+### Variant 2: Python if/else (CUDA-Graphed / Layer Forward Paths)
+
+For code paths captured by CUDA graphs. The Python conditional is evaluated at graph capture time and frozen -- no runtime cost during replay. Each batch-size bucket captures a separate graph with the correct branch.
+
+```python
+# Two-level dispatch: env var enables, M-check selects
+# Reference: vllm/model_executor/layers/triton_selective_gemm.py:330-355
+
+# Level 1: Env var gate (checked once at init)
+if envs.VLLM_{OP_NAME}:
+    gemm_fn = gated_optimized_gemm
+else:
+    gemm_fn = default_gemm
+
+# Level 2: Runtime M-check (frozen in CUDA graph per bucket)
+def gated_optimized_gemm(layer, x, weight, bias=None):
+    M = x.numel() // x.shape[-1]
+    if M <= crossover_threshold:  # Beneficial range
+        return optimized_kernel(x, weight)
+    return default_kernel(x, weight, bias)  # Baseline fallback
+```
+
+### Variant 3: Init-Time Function Pointer (Module Load)
+
+For dispatch at module or platform level. Zero per-call cost.
+
+```python
+# Reference: vllm/model_executor/layers/utils.py:298-308
+def dispatch_kernel():
+    if envs.VLLM_{OP_NAME} and M_typical <= crossover_threshold:
+        return optimized_fn
+    return default_fn
+```
+
+### Priority Dispatch Chain (Overlapping Call Sites)
+
+For the rare case where 2+ gated optimizations share a call site:
+
+```python
+AMMO_DISPATCH_CHAIN = [
+    # (condition, kernel_fn, name) -- first match wins
+    (lambda M: 2 <= M <= 16, fused_qkv_fn, "op012"),
+    (lambda M: 2 <= M <= 32, selective_fn, "op007"),
+]
+
+def ammo_dispatch(layer, x, weight, bias=None):
+    M = x.numel() // x.shape[-1]
+    for condition, kernel_fn, name in AMMO_DISPATCH_CHAIN:
+        if condition(M):
+            return kernel_fn(layer, x, weight, bias)
+    return default_fn(layer, x, weight, bias)
+```

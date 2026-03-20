@@ -142,3 +142,27 @@ Write `{artifact_dir}/investigation/kernel_perf.md`:
 ## Next Step if Fails
 - (next hypothesis) OR (escalate to main session)
 ```
+
+---
+
+## Investigation 4.3: Batch-Size-Dependent Performance (Crossover Pattern)
+
+### Symptom
+Optimization improves at small batch sizes but regresses at large batch sizes (or vice versa).
+
+### Common Root Causes
+1. **Tile occupancy**: Custom kernel's tile size (e.g., BLOCK_M=32) provides high occupancy at small M but wave quantization overhead at large M
+2. **Different cuBLAS kernel selection**: cuBLAS selects different kernel variants at different M sizes; the optimization may only beat one variant
+3. **L2 cache regime**: At small M, working set fits in L2 (fast); at large M, spills to DRAM (slow). Optimization's memory access pattern may be more sensitive to this
+4. **Triton autotuning**: Triton may select different tile configs at different M, and the optimization interacts differently with each config
+
+### Diagnostic Steps
+1. Compare nsys kernel dispatch traces at BS=small vs BS=large -- check if the same kernel variant fires at both
+2. Run NCU at both batch sizes -- compare occupancy, register usage, memory throughput
+3. Check warm-cache vs cold-cache speedup ratio at each BS -- if > 1.5x, the optimization is L2-sensitive
+
+### Resolution
+This is a `GATING_REQUIRED` pattern, not a `FAIL`. See `references/crossover-probing.md` for the probing protocol and `references/code-templates.md` for dispatch mechanisms.
+
+### Escalation
+If the crossover BS is very small (< 4), the beneficial envelope may be too narrow to justify shipping. Discuss with orchestrator.

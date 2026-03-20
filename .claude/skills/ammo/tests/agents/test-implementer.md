@@ -303,6 +303,36 @@ Grade responses against the "Expected Behavior" for each scenario.
 | **Constraint citation** | References specific section of agent definition | Vague or no reference |
 | **No hallucination** | All claims match agent definition text | Invents rules not in the definition |
 
+---
+
+## Scenario I11: GATING_REQUIRED Verdict at BS=32
+
+### Context
+Stage 5 validation. Validator reports Gate 5.3 results:
+- BS=1: speedup 1.025, verdict PASS
+- BS=8: speedup 1.012, verdict PASS
+- BS=32: speedup 0.982, verdict REGRESSED
+
+Track verdict: GATING_REQUIRED
+
+### Expected Behavior
+1. Champion does NOT declare track `FAIL`
+2. Champion evaluates gating feasibility for the dispatch site
+3. Champion requests validator to run crossover probing
+4. Champion implements gating mechanism (Python if/else on M, since this is a CUDA-graphed layer forward)
+5. Champion registers env var `VLLM_{OP_NAME}=1` in `vllm/envs.py`
+6. Champion requests validator to re-validate gated version
+7. If re-validation all PASS/NOISE: champion writes `GATED_PASS` to validation_results.md
+8. Validation_results.md includes gating metadata (mechanism, env var, crossover_threshold_bs, pre/post tables)
+
+### Anti-Patterns (FAIL if observed)
+- Declaring FAIL immediately upon seeing the REGRESSED verdict at BS=32
+- Validator implementing the gating code (violates Hard Rule 6)
+- Attempting nested gating if re-validation shows a new regression
+- Using the DA's "regression budget" approach (absorbing the regression without gating)
+
+---
+
 ## Baseline Results (2025-03-17)
 
 **10/10 PASS** — All scenarios correctly answered by Sonnet subagent.

@@ -128,11 +128,13 @@ For each item, determine PASS or FAIL with specific evidence.
 
 3. **CUDA GRAPH METHODOLOGY**: If kernel benchmarks were run in micro-experiments, does the methodology mention CUDA graph capture? Raw `torch.cuda.Event` timing without graph capture = FAIL.
 
-4. **AMDAHL CONSISTENCY**: If E2E estimate uses component share `f` and speedup `s`, verify: `expected_e2e = f * (1 - 1/s)`. If claimed E2E differs from this formula by more than 50%, FAIL.
+4. **AMDAHL CONSISTENCY**: If E2E estimate uses component share `f` and speedup `s`, verify: `expected_e2e = f * (1 - 1/s)`. If claimed E2E differs from this formula by more than 50%, FAIL. Verify Amdahl consistency per-BS if the champion provides per-BS f-values. Different batch sizes may have different component shares (`f_decode(BS=1) != f_decode(BS=32)`).
 
 5. **E2E ESTIMATE GROUNDING**: The E2E estimate must account for kernel call frequency. If profiling shows N calls per iteration, the estimate should derive from `(N * time_saved_per_call) / total_e2e_latency`. Flag if speedup is claimed without translating via actual call counts.
 
 6. **STEADY-STATE TARGET CHECK**: Read `bottleneck_analysis.md`. If it has a per-decode-step breakdown, check that the target kernel appears there (not just full-trace summary). If significant in full trace but near-zero in decode breakdown, FLAG as warning: "f-value may come from full trace, not steady-state decode."
+
+7. **BS-GATED PROPOSAL SANITY**: If the champion's proposal mentions BS-dependent behavior (e.g., 'Triton GEMM beats cuBLAS only at M<=32'), verify: (a) the micro-experiment tested multiple BS values, (b) the kill criteria specify per-BS thresholds, (c) the feasibility math acknowledges gating may be needed.
 
 ### Output Protocol
 

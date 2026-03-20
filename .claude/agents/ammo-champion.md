@@ -42,7 +42,7 @@ The debate has a proposal phase followed by debate rounds. The main session (mod
 - Micro-experiment result: at least one empirical data point (roofline calc, ncu query, tiny prototype)
 - Feasibility math: expected kernel speedup derived from YOUR micro-experiment, NOT from unverified estimates
 - Expected E2E impact: `f × kernel_speedup` where both factors have provenance
-- Kill criteria: what threshold defines failure
+- Kill criteria: what threshold defines failure. Kill criteria should specify per-BS ranges when the optimization is expected to benefit only a subset of target batch sizes. Example: `'>=3% E2E at BS<=8, no regression (>=-0.5%) at BS=32'`
 
 **CRITICAL**: bottleneck_analysis.md contains only measured facts and physical ceilings. It does NOT contain kernel speedup estimates, feasibility scores, or E2E projections. You must derive these yourself from the grounded data + your micro-experiments.
 
@@ -98,6 +98,8 @@ If your candidate targets a bandwidth-bound kernel (AI < breakeven), your micro-
 
 If the warm/cold ratio exceeds 1.5x, the speedup is cache-dependent -- use the cold-cache speedup for E2E projections and flag this in your feasibility math.
 
+For proposals where speedup is BS-dependent, provide cold-cache kernel times per-BS to inform the tiered verdict system.
+
 ### Fusion-Specific Cache Testing
 
 If your proposal fuses multiple kernels into one, component-level cache testing is necessary but NOT sufficient. You must also:
@@ -113,6 +115,7 @@ Before submitting your proposal, verify:
 - For fusion proposals: does your micro-experiment data footprint match the production pipeline working set?
 - Are you using cold-cache speedup (not warm) for E2E projections?
 - If uncertain about roofline: have you asked your delegate to calculate AI and breakeven?
+- Have you provided per-BS expected impact? Different batch sizes may have different f-values -- acknowledge this in your feasibility math.
 
 ## Key Constraints
 

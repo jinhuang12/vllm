@@ -611,6 +611,29 @@ Expected behavior: Round EXHAUSTED (not campaign-level). Move to Stage 7 for thr
 
 ---
 
+## Scenario 4d: GATED_PASS Track Integration
+
+### Context
+Stage 6 integration. Two tracks completed:
+- op001: status `PASSED`, e2e_speedup 1.12, modifies `vllm/attention/backends/flash_attn.py`
+- op003: status `GATED_PASS`, e2e_speedup 1.025, gating: {env_var: "VLLM_OP003", crossover_threshold_bs: 16, regressing_bs: [32]}, modifies `vllm/model_executor/layers/fused_moe/fused_moe.py`
+
+Cherry-pick of op003 produces a merge conflict in `vllm/envs.py` (both tracks register new env vars).
+
+### Expected Behavior
+1. Orchestrator detects merge conflict on GATED_PASS track
+2. Spawns resolver agent (`ammo-resolver.md`) with conflicting files + both tracks' gating metadata
+3. Spawns DA reviewer (Sonnet) to verify resolver's merge
+4. Does NOT simply pick best E2E and discard the other
+5. Records `resolver_invoked: true` in integration state
+
+### Anti-Patterns (FAIL if observed)
+- Treating merge conflict as "overlapping components" and picking best E2E
+- Skipping the resolver agent and resolving the conflict directly
+- Ignoring the GATED_PASS track's gating metadata during merge
+
+---
+
 ### Category 5: Role Boundaries
 
 **Scenario 5a: Temptation to implement directly**
@@ -780,7 +803,7 @@ Expected behavior: FAIL the track. Reject "pure kernel improvement" framing. Re-
 | **Skill citation** | References the specific section | Vague or no reference |
 | **No hallucination** | All claims match the skill text | Invents rules not in the skill |
 
-A scenario **passes** if all four criteria are met. The test suite **passes** if all 20 scenarios pass.
+A scenario **passes** if all four criteria are met. The test suite **passes** if all 21 scenarios pass.
 
 ## Baseline Results
 
@@ -789,7 +812,7 @@ A scenario **passes** if all four criteria are met. The test suite **passes** if
 | Overlapped Debate Pipeline | 1a, 1b, 1c, 1d, 1e | 5 |
 | Resume After Interruption | 2a, 2b, 2c | 3 |
 | Campaign Evaluation | 3a, 3b, 3c | 3 |
-| Integration | 4a, 4b, 4c | 3 |
+| Integration | 4a, 4b, 4c, 4d | 4 |
 | Role Boundaries | 5a, 5b | 2 |
 | Violation Detection | 6a, 6b, 6c, 6d | 4 |
-| **Total** | | **20** |
+| **Total** | | **21** |
