@@ -191,23 +191,46 @@ Extend `ammo-pretool-guard.sh` (or add a new hook script in the same PreToolUse 
 
 #### Reserve Flow
 
+The hook uses a **one-shot block** model (like `ammo-stop-guard.sh`): it blocks once per session to make the agent aware of GPU reservation, then trusts the agent's judgment on subsequent commands.
+
+Three CVD states drive different behavior:
+
+| CVD in command | Behavior | Reservation? |
+|----------------|----------|-------------|
+| `CUDA_VISIBLE_DEVICES=0,1` (digit IDs) | Auto-reserve GPUs, block on contention | Yes |
+| `CUDA_VISIBLE_DEVICES=""` (empty) | Agent explicitly signals "no GPU needed". Allow immediately. | No |
+| No CVD at all | **One-shot block** (first time), then allow | No |
+
 When a GPU pattern is detected:
 
 1. Check if `/tmp/ammo_gpu_res/state.json` exists. If not, skip.
-2. Extract `CUDA_VISIBLE_DEVICES=X` from command text (regex: `CUDA_VISIBLE_DEVICES=([\d,]+)`).
-3. If no CVD in command:
-   - **BLOCK**: `"GPU command detected without CUDA_VISIBLE_DEVICES prefix. Add CUDA_VISIBLE_DEVICES=X from your spawn prompt assignment."`
-4. If CVD found, parse GPU IDs (e.g., "0,1,2,3" → [0,1,2,3]).
-5. Acquire flock on `.lock`, read state.json.
-6. For each requested GPU:
+2. Extract `CUDA_VISIBLE_DEVICES=...` from command text.
+
+**Case A — CVD with GPU IDs** (e.g., `CUDA_VISIBLE_DEVICES=0,1,2,3`):
+3. Parse GPU IDs.
+4. Acquire flock on `.lock`, read state.json.
+5. For each requested GPU:
    - If free → OK
    - If held but lease expired → auto-reclaim (log to audit), treat as free
-   - If held and lease active:
-     - **BLOCK**: `"GPU {id} held by command: {snippet} (since {time}). Retry shortly."`
-7. If all requested GPUs free: write reservations (command_hash, session_id, lease_expires=now+2h, cvd_requested, command_snippet=first 80 chars), release flock.
-8. Exit 0 (allow command to proceed).
+   - If held and lease active → **BLOCK**: `"GPU {id} held by command: {snippet} (since {time}). Retry shortly."`
+6. If all requested GPUs free: write reservations (command_hash, session_id, lease_expires=now+2h, cvd_requested, command_snippet=first 80 chars), release flock.
+7. Exit 0 (allow command).
+
+**Case B — CVD="" (empty string)**:
+3. Agent explicitly says this command doesn't need GPUs. `CUDA_VISIBLE_DEVICES=""` also disables CUDA at the driver level, preventing accidental GPU usage.
+4. Skip reservation. Exit 0 (allow command).
+
+**Case C — No CVD at all**:
+3. Check one-shot flag file `/tmp/ammo_gpu_res/.warned_{session_hash}`.
+4. If flag does NOT exist (first time):
+   - Write flag file.
+   - **BLOCK** (one-shot): `"AMMO GPU: Command matches GPU pattern but has no CUDA_VISIBLE_DEVICES prefix. Add CUDA_VISIBLE_DEVICES=X (from your spawn prompt) for GPU work, or CUDA_VISIBLE_DEVICES=\"\" if this command does not use GPUs."`
+5. If flag exists (already warned):
+   - Exit 0 (allow command). Agent was already made aware and chose to proceed without CVD.
 
 **Command hash**: `sha256(command_string)[:8]`. Used by PostToolUse to match the reservation for cleanup.
+
+**Session hash**: Derived from `$CLAUDE_SESSION_ID` or `$PPID` — scoped to the agent session so each agent gets its own one-shot warning.
 
 ### PostToolUse Hook: Auto-Release
 
@@ -233,8 +256,8 @@ New hook in `.claude/settings.local.json`:
 
 1. Check if `/tmp/ammo_gpu_res/state.json` exists. If not, skip.
 2. Extract command from the PostToolUse input JSON.
-3. Check if command matches GPU patterns (same patterns as PreToolUse).
-4. If match: compute command_hash, acquire flock, read state.json.
+3. Check if command contains `CUDA_VISIBLE_DEVICES=` with digit IDs (same regex as PreToolUse Case A). Commands with `CVD=""` or no CVD had no reservation — skip.
+4. Compute command_hash, acquire flock, read state.json.
 5. For each GPU entry where `command_hash` matches: clear to null.
 6. Write state.json, release flock.
 7. Exit 0.
@@ -297,9 +320,7 @@ def _init_state() -> dict: ...
 
 Add to Non-Negotiables (after item 4):
 
-> **GPU isolation**: All GPU commands MUST include a `CUDA_VISIBLE_DEVICES=X` prefix matching the assignment from the spawn prompt. The PreToolUse hook auto-reserves GPUs for the command's duration and blocks if the GPUs are held by another command. No manual reservation or release is needed — hooks handle the full lifecycle. *(Enforced by `ammo-pretool-guard.sh` PreToolUse + `ammo-gpu-release.sh` PostToolUse)*
-
-**Note**: This non-negotiable uses "Enforced" (not "Warned") because the PreToolUse hook hard-blocks GPU commands without CVD or with contention. This is different from the existing N1/N4 reminders which are warn-only.
+> **GPU isolation**: GPU commands MUST include a `CUDA_VISIBLE_DEVICES=X` prefix (from spawn prompt assignment) for GPU work, or `CUDA_VISIBLE_DEVICES=""` to explicitly signal no GPU is needed. The PreToolUse hook auto-reserves GPUs when CVD contains GPU IDs and blocks on contention. PostToolUse auto-releases. No manual reservation or release needed. *(Enforced by `ammo-pretool-guard.sh` PreToolUse + `ammo-gpu-release.sh` PostToolUse — one-shot block on first missing CVD, then trusts agent judgment)*
 
 Add to Helper Scripts table:
 
@@ -344,9 +365,13 @@ Your spawn prompt includes GPU assignments:
   Kernel work:  CUDA_VISIBLE_DEVICES=X
   E2E sweep:    CUDA_VISIBLE_DEVICES=Y
 
-Prefix EVERY GPU command with the appropriate CUDA_VISIBLE_DEVICES value:
+Prefix GPU commands with the appropriate CUDA_VISIBLE_DEVICES value:
   CUDA_VISIBLE_DEVICES=0 python benchmark_kernel.py
   CUDA_VISIBLE_DEVICES=0,1,2,3 python run_vllm_bench_latency_sweep.py ...
+
+If a command does NOT need GPUs but matches GPU patterns (e.g., a torch
+script that only does CPU tensor ops), prefix with CUDA_VISIBLE_DEVICES=""
+to signal no GPU is needed and skip reservation.
 
 The hooks auto-manage GPU reservations — no manual reserve/release needed.
 If a command blocks ("GPU held by..."), wait briefly and retry.
