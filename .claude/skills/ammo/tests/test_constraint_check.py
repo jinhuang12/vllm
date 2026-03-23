@@ -22,6 +22,7 @@ from constraint_check import (
     check_smem_budget,
     check_technique_blacklist,
     parse_proposal_constraints,
+    run_checks,
     ConstraintResult,
 )
 
@@ -125,6 +126,79 @@ Shared memory: 32 KB
         result = parse_proposal_constraints(proposal)
         assert result["technique"] is not None
         assert "Split-K" in result["technique"] or "split-k" in result["technique"].lower()
+
+
+# ---------------------------------------------------------------------------
+# TestIntegrationWithRealProposal
+# ---------------------------------------------------------------------------
+
+class TestIntegrationWithRealProposal:
+    """Test against actual archived debate proposals."""
+
+    def test_splitk_proposal_blocked_by_blacklist(self, tmp_path):
+        """A split-K proposal should be blocked by the global blacklist."""
+        proposal = tmp_path / "champion-1_proposal.md"
+        proposal.write_text("""## Candidate Specification
+Technique: Split-K CUTLASS GEMM for MoE expert W1/W2 computation
+
+## Grounded Data
+MoE GEMM accounts for 71.9% of decode step latency.
+
+## Micro-Experiment Result
+Roofline analysis suggests 1.3x theoretical speedup.
+
+## Feasibility Math
+Expected kernel speedup: 1.3x from split-K parallelism.
+
+## Expected E2E Impact
+f=0.719, kernel_speedup=1.3x, E2E ~21.5% improvement.
+
+## Kill Criteria
+beneficial_range: [1, 32], improvement_threshold: 1.05
+
+## Kernel Code Scope
+Modify: csrc/moe/marlin_moe_wna16/marlin_template.h (~50 LOC)
+""")
+        blacklist = ["split-k"]
+        results = run_checks(proposal, "L40S", blacklist)
+        blocked = [r for r in results if not r.passed and not r.skipped]
+        assert len(blocked) >= 1
+        assert any("split-k" in r.reason.lower() for r in blocked)
+
+    def test_smem_overbudget_proposal_blocked(self, tmp_path):
+        """A persistent CTA proposal with SMEM > 100KB should be blocked on L40S."""
+        proposal = tmp_path / "champion-2_proposal.md"
+        proposal.write_text("""## Candidate Specification
+Persistent CTA with double-buffered state for GDN recurrent kernel.
+
+## Feasibility Math
+SMEM per block: 68 KB (128 x 128 x FP32)
+Double-buffered pipeline requires 2 concurrent buffers.
+
+## Kernel Code Scope
+Create: vllm/model_executor/layers/fla/ops/persistent_recurrent.py (~200 LOC)
+""")
+        results = run_checks(proposal, "L40S", [])
+        blocked = [r for r in results if not r.passed and not r.skipped]
+        assert len(blocked) >= 1
+        assert any("double-buffer" in r.reason.lower() for r in blocked)
+
+    def test_valid_proposal_passes(self, tmp_path):
+        """A valid Triton fusion proposal should pass all checks."""
+        proposal = tmp_path / "champion-3_proposal.md"
+        proposal.write_text("""## Candidate Specification
+Triton fused SiLU-multiply kernel for MLP activation.
+
+## Feasibility Math
+SMEM per block: 16 KB
+Expected kernel speedup: 1.15x from eliminated launch overhead.
+
+## Kernel Code Scope
+Create: vllm/model_executor/layers/triton_fused_silu.py (~80 LOC)
+""")
+        results = run_checks(proposal, "L40S", [])
+        blocked = [r for r in results if not r.passed and not r.skipped]
+        assert len(blocked) == 0
 
 
 if __name__ == "__main__":
