@@ -341,6 +341,58 @@ class TestReserve:
             with pytest.raises(ReservationError, match="Not enough free GPUs"):
                 reserve(num_gpus=1, session_id="s_new")
 
+    def test_contiguous_skips_middle_gap(self, tmp_path):
+        """GPU 1 held by different session, GPUs 0,2,3 free, request 2 -> [2,3]."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            # Hold GPU 1
+            write_reservation(gpu_ids=[1], session_id="other")
+            # Reserve 2 contiguous — GPU 0 alone is not contiguous with
+            # anything useful (GPU 1 is held), so [2,3] is the first pair.
+            result = reserve(num_gpus=2, session_id="s1")
+
+        assert result == [2, 3]
+
+    def test_failed_reserve_preserves_existing(self, tmp_path):
+        """Failed reserve must NOT destroy the session's existing reservations."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            # s1 holds GPU 0
+            reserve(num_gpus=1, session_id="s1")
+            # Fill GPUs 1,2,3 with other sessions
+            write_reservation(gpu_ids=[1], session_id="other_1")
+            write_reservation(gpu_ids=[2], session_id="other_2")
+            write_reservation(gpu_ids=[3], session_id="other_3")
+
+            # Try to reserve 2 GPUs for s1 — must fail (after auto-releasing
+            # GPU 0, only 1 GPU free, need 2)
+            with pytest.raises(ReservationError):
+                reserve(num_gpus=2, session_id="s1")
+
+            # GPU 0 must STILL be held by s1 (failed reserve should not
+            # have persisted the auto-release)
+            state = read_state()
+            assert state["gpus"]["0"] is not None
+            assert state["gpus"]["0"]["session_id"] == "s1"
+
+    def test_num_gpus_zero_raises(self, tmp_path):
+        """reserve(num_gpus=0) raises ValueError."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            with pytest.raises(ValueError, match="num_gpus must be positive"):
+                reserve(num_gpus=0, session_id="s1")
+
+    def test_num_gpus_negative_raises(self, tmp_path):
+        """reserve(num_gpus=-1) raises ValueError."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            with pytest.raises(ValueError, match="num_gpus must be positive"):
+                reserve(num_gpus=-1, session_id="s1")
+
     def test_reclaims_expired_before_allocating(self, tmp_path):
         """GPU 0 has expired lease, reserve(1) reclaims it and returns [0]."""
         state_dir = _make_temp_dir(tmp_path)

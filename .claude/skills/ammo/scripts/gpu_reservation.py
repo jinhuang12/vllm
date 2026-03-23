@@ -174,7 +174,10 @@ def write_reservation(
     command_snippet: str = "",
     lease_hours: float = 2.0,
 ) -> None:
-    """Reserve the given GPU IDs (internal helper called by reserve()).
+    """Standalone low-level reservation function that manages its own locking.
+
+    For pool-based dynamic allocation, use reserve() instead. Does NOT
+    auto-release existing session reservations or reclaim expired leases.
 
     Acquires the exclusive lock, checks that each GPU is free (or expired),
     writes reservation entries, and releases the lock.
@@ -246,6 +249,9 @@ def reserve(
     Returns the list of allocated GPU IDs on success.
     Raises ReservationError if the request cannot be satisfied.
     """
+    if num_gpus <= 0:
+        raise ValueError(f"num_gpus must be positive, got {num_gpus}")
+
     fh = _acquire_flock()
     try:
         state = read_state()
@@ -282,7 +288,6 @@ def reserve(
                 free_set.add(i)
 
         if len(free_set) < num_gpus:
-            _write_state(state)
             raise ReservationError(
                 f"Not enough free GPUs: requested {num_gpus}, "
                 f"available {len(free_set)}"
@@ -316,7 +321,6 @@ def reserve(
                     run_len = 0
 
         if allocated is None:
-            _write_state(state)
             raise ReservationError(
                 f"No contiguous block of {num_gpus} free GPUs available. "
                 f"Free GPUs: {sorted(free_set)}"
@@ -509,11 +513,16 @@ if __name__ == "__main__":
             sys.exit(1)
 
     elif args.command == "release-session":
-        released = release_by_session(args.session_id)
-        print(
-            f"Released GPUs: {','.join(str(g) for g in released)}",
-            file=sys.stderr,
-        )
+        try:
+            released = release_by_session(args.session_id)
+            print(
+                f"Released GPUs: {','.join(str(g) for g in released)}",
+                file=sys.stderr,
+            )
+            sys.exit(0)
+        except (ReservationError, LockTimeoutError) as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
 
     elif args.command == "status":
         state = read_state()
