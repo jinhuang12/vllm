@@ -10,7 +10,7 @@ read_state()                     -> dict
 write_reservation(...)           -> None
 release_by_hash(cmd_hash)        -> None
 force_clear(...)                 -> None
-check_and_reclaim_expired(state) -> list[int]
+check_and_reclaim_expired() -> list[int]
 command_hash(command)            -> str
 
 No GPU discovery or file creation occurs on import.  All state is initialised
@@ -296,15 +296,16 @@ def force_clear(
         _release_flock(fh)
 
 
-def check_and_reclaim_expired(state: dict) -> list[int]:
-    """Check for expired leases, clear them in-place, write state, and return reclaimed IDs.
+def check_and_reclaim_expired() -> list[int]:
+    """Check for expired leases, clear them, write state, and return reclaimed IDs.
 
     Acquires the exclusive lock so it is safe to call standalone from hooks.
-    Modifies *state* in place and persists the changes.
+    Reads fresh state under the lock to avoid stale-state races.
     Returns the list of reclaimed GPU IDs (as integers).
     """
     fh = _acquire_flock()
     try:
+        state = read_state()
         now = datetime.now(tz=timezone.utc)
         reclaimed: list[int] = []
         now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")

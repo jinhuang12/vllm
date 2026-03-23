@@ -257,8 +257,8 @@ class TestLeaseExpiry:
             )
             # Small sleep to ensure expiry has passed
             time.sleep(0.01)
+            reclaimed = check_and_reclaim_expired()
             state = read_state()
-            reclaimed = check_and_reclaim_expired(state)
 
         assert 0 in reclaimed
         assert state["gpus"]["0"] is None
