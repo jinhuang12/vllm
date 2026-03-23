@@ -111,7 +111,7 @@ If `debate.delegation.enabled` is `false` (default), the debate runs with champi
 
 There is no fast-track exception. Every run must go through at least Phase 0 (proposals) + 1 debate round.
 
-**Convergence Shortcut**: If ALL champions independently propose the same candidate in Phase 0 AND all proposals cite micro-experiment evidence, the lead may reduce to 1 debate round instead of the normal 2.
+**No Convergence Shortcut**: Even if all champions converge on the same candidate, the minimum 2 debate rounds are mandatory. Convergence reduces critique diversity, making additional scrutiny MORE important, not less. (Rationale: c08b370fc campaign — convergence shortcut reduced scrutiny, contributing to 0% ship rate.)
 
 ## Phase 0: Independent Proposals
 
@@ -159,7 +159,7 @@ After the eligibility gate, the lead reviews proposal diversity:
 
 ## Round Structure
 
-Normal minimum: **2 rounds**. Maximum: **4 rounds**. Each round has three sequential phases.
+Normal minimum: **2 rounds** (no convergence shortcut). Maximum: **4 rounds**. Each round has three sequential phases.
 
 ### Phase A: Evidence Presentation
 
@@ -202,6 +202,7 @@ The critique **must** identify:
 1. Weaknesses in the target's feasibility math
 2. Overlooked risks (numerical stability, edge cases, memory pressure)
 3. Incorrect assumptions about hardware behavior or kernel characteristics
+4. **Hardware resource accounting**: SMEM budget, register usage, occupancy estimate, wave count at target batch sizes. If any resource exceeds the target GPU's limit, cite the specific limit and declare a hard constraint violation.
 
 ### Phase C: Rebuttal
 
@@ -251,6 +252,19 @@ After the final round:
 The summary includes: per-candidate scores, rationale for selection, and any conceded weaknesses that Stage 4 implementation must address.
 
 Flag proposals with kill criteria that imply per-BS differentiated impact (e.g., M<=32 kernel specialization, decode-only path). These are candidates for `GATED_PASS` and should be noted in `summary.md` so Stage 4-5 implementers are prepared for crossover probing.
+
+### Post-Selection Evidence Gate
+
+After winner selection but BEFORE shutting down debate champions, the lead opens a **15-minute evidence window**:
+
+1. Broadcast to all champions: "Winners selected. 15-minute window for late findings that could override selection. Submit to `{artifact_dir}/debate/late_findings/`."
+2. If any champion submits a late finding citing a hard constraint violation (SMEM exceeded, API incompatibility, optimization already deployed):
+   - The lead evaluates the finding against available evidence
+   - If the finding is substantiated: the winner is eliminated and the next-highest-scoring candidate advances
+   - If the finding is unsubstantiated: noted but selection stands
+3. After 15 minutes (or all champions respond "no findings"): proceed to shutdown.
+
+This gate addresses the structural gap where Champion-1 in c08b370fc identified both fatal flaws in "Late Findings" after selection was finalized, with no mechanism for action.
 
 ## Micro-Experiment Guidelines
 

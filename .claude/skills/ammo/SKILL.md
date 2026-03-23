@@ -171,7 +171,7 @@ The lead should also instruct the researcher to run `scripts/nsys_probe.py` firs
 - **Debate rounds**: Champions argue for their proposals, critique others, rebut. See `orchestration/debate-protocol.md`.
 - Main session selects 2-3 winners using scoring rubric (`references/debate-scoring-rubric.md`).
 - **After selection**: Shut down debate champions and delegates via `shutdown_request` (they are no longer needed). The **round team persists** — implementation agents will be spawned into it in Stages 4-5. Do NOT call TeamDelete here.
-- **Debate is always mandatory.** If all champions independently converge on the same candidate in Phase 0 with micro-experiment evidence, the lead may shorten to 1 debate round instead of 2.
+- **Debate is always mandatory.** Minimum 2 debate rounds required — no convergence shortcut (see `orchestration/debate-protocol.md` § No Convergence Shortcut).
 
 ### Stages 4-5: Parallel Worktree Tracks (Adversarial Validation)
 
