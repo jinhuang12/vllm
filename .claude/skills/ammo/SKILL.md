@@ -278,7 +278,10 @@ These are NOT advisory. Violation blocks stage progression.
 2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
 4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Reminded by `ammo-pretool-guard.sh` — warns on raw `vllm bench latency`)*
-5. **GPU isolation**: GPU commands MUST include a `CUDA_VISIBLE_DEVICES=X` prefix (from spawn prompt assignment) for GPU work, or `CUDA_VISIBLE_DEVICES=""` to explicitly signal no GPU is needed. The PreToolUse hook auto-reserves GPUs when CVD contains GPU IDs and blocks on contention. PostToolUse auto-releases. No manual reservation or release needed. *(Enforced by `ammo-pretool-guard.sh` PreToolUse + `ammo-gpu-release.sh` PostToolUse — one-shot block on first missing CVD, then trusts agent judgment)*
+5. **GPU isolation**: GPU commands MUST use the pool reservation pattern:
+   `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>`.
+   The PostToolUse hook auto-releases GPUs when the command completes. Lease expiry handles crashes.
+   *(Enforced by ammo-pretool-guard.sh PreToolUse — one-shot block on first missing pattern, then trusts agent judgment)*
 6. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
 6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug. For BS-dependent optimizations, compute per-BS `f(BS) × kernel_speedup(BS)` — different batch sizes may have different `f` values. A partial regression at some batch sizes does not negate the optimization if it is gatable — see tiered verdict system in `references/validation-defaults.md`.
 7. **Custom kernel mandate**: Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected outright in the Phase 0 eligibility gate.
@@ -290,8 +293,8 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 | Hook Event | Script | Purpose |
 |------------|--------|---------|
 | **Stop** | `ammo-stop-guard.sh` | Blocks session end if campaign is active (one-shot: blocks once, then allows) |
-| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Warns on `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` (does not block); GPU auto-reserve: reserves GPU IDs from CVD prefix before command runs, blocks on contention |
-| **PostToolUse** (Bash) | `ammo-gpu-release.sh` | GPU auto-release: clears reservation after GPU command completes |
+| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Production-parity reminders (N1/N4) + GPU pool pattern guard (one-shot block if reservation pattern missing) |
+| **PostToolUse** (Bash) | `ammo-gpu-release.sh` | GPU auto-release: detects reservation pattern in completed command, releases by session ID |
 | **PreCompact** | `ammo-precompact.sh` | Saves campaign state checkpoint before compaction |
 | **SessionStart** | `ammo-postcompact.sh` | Injects resume context after compaction |
 | **WorktreeCreate** | `worktree-create-with-build.sh` | Sets up build environment in new worktrees |

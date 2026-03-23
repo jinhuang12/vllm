@@ -31,59 +31,21 @@ Worktrees are created automatically by the Agent tool when spawning `ammo-impl-c
 
 The validator agent shares the champion's worktree (same track team). Both agents may be active simultaneously — GPU access is coordinated via SendMessage, with the champion having priority.
 
-## TP-Aware GPU Partitioning
+### GPU Pool
 
-The orchestrator computes GPU assignments at track spawn time:
+All agents share a machine-wide GPU pool managed by `gpu_reservation.py`. Agents acquire GPUs dynamically at command time:
 
-```
-gpu_count = state.json -> gpu_resources.gpu_count
-tp = state.json -> target.tp
-num_tracks = len(debate.selected_winners)
-can_partition = (gpu_count >= tp * num_tracks)
+```bash
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
 ```
 
-**Assignment algorithm**: Sequential by track index. In exclusive mode: track 0 gets GPUs `[0..TP-1]`, track 1 gets GPUs `[TP..2*TP-1]`, etc. In shared mode: track N gets kernel GPU `N` (one GPU each), all tracks share the same E2E CVD (all TP GPUs).
+- **Kernel benchmarks**: `--num-gpus 1` (single GPU sufficient)
+- **E2E sweeps**: `--num-gpus {tp}` (must match tensor parallelism from target.json)
+- **Contiguous allocation**: For TP>1, the pool allocates contiguous GPU blocks. If no contiguous block is available, the command fails and the agent should retry.
+- **Auto-release**: PostToolUse hook releases GPUs when the command completes. Lease expiry (2h default, 4h for nsys) handles crashes.
+- **Contention**: If the pool is exhausted, the reserve command fails. Agent should wait briefly and retry.
 
-### Exclusive Mode (can_partition = true)
-
-Each track gets TP GPUs exclusively. Fully parallel kernel AND E2E work.
-
-Spawn prompt includes:
-```
-GPU assignment (EXCLUSIVE):
-  Kernel work:  CUDA_VISIBLE_DEVICES=0,1
-  E2E sweep:    CUDA_VISIBLE_DEVICES=0,1
-```
-
-### Shared Mode (can_partition = false)
-
-Tracks share GPUs for E2E sweeps. Kernel benchmarks get 1 GPU each.
-
-Spawn prompt includes:
-```
-GPU assignment (SHARED — E2E sweeps share GPUs):
-  Kernel work:  CUDA_VISIBLE_DEVICES=0
-  E2E sweep:    CUDA_VISIBLE_DEVICES=0,1,2,3
-  WARNING: E2E sweeps may block if another track's sweep is running.
-```
-
-The orchestrator records the GPU plan in `state.json` at `gpu_assignment`:
-```json
-{
-  "gpu_assignment": {
-    "mode": "exclusive|shared",
-    "gpu_count": 4,
-    "tp": 2,
-    "num_tracks": 2,
-    "tracks": {
-      "op003": {"kernel_cvd": "0,1", "e2e_cvd": "0,1"},
-      "op007": {"kernel_cvd": "2,3", "e2e_cvd": "2,3"}
-    }
-  }
-}
-```
-
-Within a track, GPU access is coordinated via SendMessage — the champion has priority, and the validator yields when the champion needs the GPU for compilation or smoke tests. During validation, the champion is idle and the validator has exclusive GPU access.
+No GPU pre-assignment in spawn prompts. Agents discover available GPUs at runtime.
 
 ## Worktree Build Rules (CRITICAL)
 
@@ -116,9 +78,9 @@ Agent(
     Artifact dir: {artifact_dir}
     Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
     Bottleneck analysis: {artifact_dir}/bottleneck_analysis.md
-    GPU assignment ({mode}):
-      Kernel work:  CUDA_VISIBLE_DEVICES={kernel_cvd}
-      E2E sweep:    CUDA_VISIBLE_DEVICES={e2e_cvd}
+    GPU pool: {gpu_count} GPUs available (TP={tp}). Acquire at runtime:
+      CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>
+      Kernel work: --num-gpus 1  |  E2E sweep: --num-gpus {tp}
 
     ## Stage 1 Baseline (DO NOT RE-RUN)
     Baseline E2E latency files (captured from clean main in Stage 1):
@@ -155,9 +117,9 @@ Agent(
     Your champion is impl-champion-{op_id}.
 
     Artifact dir: {artifact_dir}
-    GPU assignment ({mode}):
-      Kernel work:  CUDA_VISIBLE_DEVICES={kernel_cvd}
-      E2E sweep:    CUDA_VISIBLE_DEVICES={e2e_cvd}
+    GPU pool: {gpu_count} GPUs available (TP={tp}). Acquire at runtime:
+      CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>
+      Kernel work: --num-gpus 1  |  E2E sweep: --num-gpus {tp}
 
     Wait for initial tasks from your champion via SendMessage.
     You support the champion throughout: research, profiling, codebase lookups, proactive advisories.
@@ -346,12 +308,10 @@ The orchestrator MUST NOT advance to Stage 6 integration until:
 
 | Agent Type | GPU Access |
 |-----------|-----------|
-| Implementation champions | Assigned GPU per track (kernel_cvd from spawn prompt) |
-| Implementation validators | Shared GPU with their champion (coordinated via SendMessage) |
-| Debate champions | CPU-based analysis only (roofline, ISA, ncu --query-metrics) |
-| Debate delegates | CPU-based analysis only |
-
-Debate agents: CPU-only. MUST NOT use GPUs.
+| Implementation champions | Pool access — kernel work (--num-gpus 1) + E2E sweep (--num-gpus {tp}) |
+| Implementation validators | Pool access — kernel work (--num-gpus 1) + E2E sweep (--num-gpus {tp}) |
+| Debate champions | Pool access — micro-benchmarks OK (--num-gpus 1) |
+| Debate delegates | Static analysis only (ncu --query-metrics). No kernel benchmarks. |
 
 ### Debate Results Handling
 
