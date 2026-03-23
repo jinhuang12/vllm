@@ -183,6 +183,12 @@ def write_reservation(
         state = read_state()
         now = datetime.now(tz=timezone.utc)
 
+        # Validate that all requested GPU IDs exist in state
+        known = set(state["gpus"].keys())
+        unknown = [gid for gid in gpu_ids if str(gid) not in known]
+        if unknown:
+            raise ReservationError(f"GPU IDs not found in state: {unknown}")
+
         # Check all GPUs are free before writing any
         held: list[str] = []
         for gid in gpu_ids:
@@ -213,7 +219,7 @@ def write_reservation(
                 "reserved_at": reserved_at,
                 "lease_expires": lease_expires,
                 "cvd_requested": cvd_requested,
-                "command_snippet": command_snippet,
+                "command_snippet": command_snippet[:80],
             }
 
         _write_state(state)
@@ -293,35 +299,40 @@ def force_clear(
 def check_and_reclaim_expired(state: dict) -> list[int]:
     """Check for expired leases, clear them in-place, write state, and return reclaimed IDs.
 
+    Acquires the exclusive lock so it is safe to call standalone from hooks.
     Modifies *state* in place and persists the changes.
     Returns the list of reclaimed GPU IDs (as integers).
     """
-    now = datetime.now(tz=timezone.utc)
-    reclaimed: list[int] = []
-    now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    fh = _acquire_flock()
+    try:
+        now = datetime.now(tz=timezone.utc)
+        reclaimed: list[int] = []
+        now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    for key, entry in state["gpus"].items():
-        if entry is None:
-            continue
-        expires = datetime.fromisoformat(entry["lease_expires"])
-        if expires <= now:
-            state["audit"].append(
-                {
-                    "action": "reclaim_expired",
-                    "gpu_id": key,
-                    "reclaimed_at": now_str,
-                    "was_session": entry.get("session_id"),
-                    "was_hash": entry.get("command_hash"),
-                    "lease_expired_at": entry["lease_expires"],
-                }
-            )
-            state["gpus"][key] = None
-            reclaimed.append(int(key))
+        for key, entry in state["gpus"].items():
+            if entry is None:
+                continue
+            expires = datetime.fromisoformat(entry["lease_expires"])
+            if expires <= now:
+                state["audit"].append(
+                    {
+                        "action": "reclaim_expired",
+                        "gpu_id": key,
+                        "reclaimed_at": now_str,
+                        "was_session": entry.get("session_id"),
+                        "was_hash": entry.get("command_hash"),
+                        "lease_expired_at": entry["lease_expires"],
+                    }
+                )
+                state["gpus"][key] = None
+                reclaimed.append(int(key))
 
-    if reclaimed:
-        _write_state(state)
+        if reclaimed:
+            _write_state(state)
 
-    return reclaimed
+        return reclaimed
+    finally:
+        _release_flock(fh)
 
 
 def command_hash(command: str) -> str:

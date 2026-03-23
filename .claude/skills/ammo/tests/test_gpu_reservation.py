@@ -151,6 +151,39 @@ class TestWriteReservation:
         assert state["gpus"]["2"] is None
         assert state["gpus"]["3"] is None
 
+    def test_rejects_unknown_gpu_ids(self, tmp_path):
+        """Reserving a GPU ID that doesn't exist in state raises ReservationError."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            with pytest.raises(ReservationError, match="not found in state"):
+                write_reservation(
+                    gpu_ids=[7],
+                    cmd_hash="dead000000000000",
+                    session_id="sess_x",
+                    cvd_requested="7",
+                    command_snippet="python phantom.py",
+                    lease_hours=2.0,
+                )
+
+    def test_truncates_command_snippet(self, tmp_path):
+        """command_snippet is truncated to 80 characters in the stored entry."""
+        state_dir = _make_temp_dir(tmp_path)
+        long_snippet = "x" * 200
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=1):
+            write_reservation(
+                gpu_ids=[0],
+                cmd_hash="abcd000011112222",
+                session_id="sess_t",
+                cvd_requested="0",
+                command_snippet=long_snippet,
+                lease_hours=2.0,
+            )
+            state = read_state()
+
+        assert len(state["gpus"]["0"]["command_snippet"]) == 80
+
     def test_blocks_on_held_gpu(self, tmp_path):
         """Trying to reserve an already-held GPU raises ReservationError."""
         state_dir = _make_temp_dir(tmp_path)
