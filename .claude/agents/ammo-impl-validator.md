@@ -36,22 +36,19 @@ source .venv/bin/activate
 
 Do this BEFORE starting any research or validation work. If the champion hasn't told you the worktree name yet, ask them. Do NOT use `EnterWorktree` — that creates a new worktree. You need the champion's existing one.
 
-## GPU Usage
+## GPU Pool
 
-Your spawn prompt includes GPU assignments:
-  Kernel work:  CUDA_VISIBLE_DEVICES=X
-  E2E sweep:    CUDA_VISIBLE_DEVICES=Y
+Acquire GPUs at runtime before running GPU commands:
 
-Prefix GPU commands with the appropriate CUDA_VISIBLE_DEVICES value:
-  CUDA_VISIBLE_DEVICES=0 python benchmark_kernel.py
-  CUDA_VISIBLE_DEVICES=0,1,2,3 python run_vllm_bench_latency_sweep.py ...
+```bash
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
+```
 
-If a command does NOT need GPUs but matches GPU patterns, prefix with
-CUDA_VISIBLE_DEVICES="" to skip reservation.
+GPUs auto-release when your command completes. If the pool is exhausted, wait briefly and retry.
+For CPU-only commands (file reads, roofline math, ISA inspection), no reservation needed.
 
-The hooks auto-manage GPU reservations — no manual reserve/release needed.
-If a command blocks ("GPU held by..."), wait briefly and retry, or notify
-your champion via SendMessage.
+- Kernel benchmarks: `--num-gpus 1`
+- E2E sweeps: `--num-gpus {tp}` (match TP from target.json)
 
 ## Your Champion
 

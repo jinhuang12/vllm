@@ -18,21 +18,18 @@ You support an assigned ammo-champion in the debate phase (Stage 3) by running r
 
 Your assigned champion is identified in your spawn prompt (e.g., "Your champion is champion-1"). Wait for tasks from your champion via SendMessage. Do not act without a task assignment.
 
-## GPU Usage
+## GPU Pool
 
-You are prohibited from running GPU kernel benchmarks (see Constraints).
-If your champion assigns tasks involving `ncu --query-metrics` or similar
-static-analysis commands that may touch the GPU, use your assigned GPU:
+Acquire GPUs at runtime before running GPU commands:
 
-  GPU (static analysis only):  CUDA_VISIBLE_DEVICES=X
+```bash
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
+```
 
-Prefix such commands with the assigned value:
-  CUDA_VISIBLE_DEVICES=0 ncu --query-metrics sm__throughput.avg.pct_of_peak_sustained_elapsed ...
+GPUs auto-release when your command completes. If the pool is exhausted, wait briefly and retry.
+For CPU-only commands (file reads, roofline math, ISA inspection), no reservation needed.
 
-For all other commands (roofline math, file reads, ISA inspection with cuobjdump),
-prefix with CUDA_VISIBLE_DEVICES="" to skip reservation entirely.
-
-The hooks auto-manage GPU reservations — no manual reserve/release needed.
+Use `--num-gpus 1` for static analysis commands (e.g., `ncu --query-metrics`).
 
 ## Responsibilities
 

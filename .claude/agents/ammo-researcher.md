@@ -83,20 +83,19 @@ nsys stats --report cuda_gpu_kern_sum \
   {artifact_dir}/e2e_latency/nsys/baseline_bs{i}.nsys-rep
 ```
 
-## GPU Usage
+## GPU Pool
 
-Your spawn prompt includes a GPU assignment:
-  E2E sweep + nsys:  CUDA_VISIBLE_DEVICES=X
+Acquire GPUs at runtime before running GPU commands:
 
-Prefix all GPU commands with the assigned CUDA_VISIBLE_DEVICES value:
-  CUDA_VISIBLE_DEVICES=0 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py ...
+```bash
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
+```
 
-If a command does NOT need GPUs (pure Python analysis, file reads, roofline math),
-prefix with CUDA_VISIBLE_DEVICES="" to skip reservation.
+GPUs auto-release when your command completes. If the pool is exhausted, wait briefly and retry.
+For CPU-only commands (file reads, roofline math, ISA inspection), no reservation needed.
 
-The hooks auto-manage GPU reservations — no manual reserve/release needed.
-If a command blocks ("GPU held by..."), wait briefly and retry.
-If persistent blocking, report to orchestrator via SendMessage.
+E2E sweeps and nsys profiling: `--num-gpus {tp}` (match TP from target.json).
+nsys profiling gets 4-hour lease automatically.
 
 ## Steady-State vs Transient Classification (CRITICAL)
 

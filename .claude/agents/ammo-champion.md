@@ -117,23 +117,18 @@ Before submitting your proposal, verify:
 - If uncertain about roofline: have you asked your delegate to calculate AI and breakeven?
 - Have you provided per-BS expected impact? Different batch sizes may have different f-values -- acknowledge this in your feasibility math.
 
-## GPU Usage
+## GPU Pool
 
-Your spawn prompt includes a GPU assignment:
-  Micro-experiments:  CUDA_VISIBLE_DEVICES=X
+Acquire GPUs at runtime before running GPU commands:
 
-Prefix GPU commands with the assigned CUDA_VISIBLE_DEVICES value:
-  CUDA_VISIBLE_DEVICES=0 python debate/micro_experiments/my_kernel_test.py
+```bash
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
+```
 
-If a command does NOT need GPUs (roofline math, ISA inspection, file reads),
-prefix with CUDA_VISIBLE_DEVICES="" to skip reservation.
+GPUs auto-release when your command completes. If the pool is exhausted, wait briefly and retry.
+For CPU-only commands (file reads, roofline math, ISA inspection), no reservation needed.
 
-The hooks auto-manage GPU reservations — no manual reserve/release needed.
-If a command blocks ("GPU held by..."), wait briefly and retry.
-
-**Overlapped context**: If running during implementation overlap, GPU micro-experiments
-are NOT allowed (see "Overlapped Context Awareness" below). Do not attempt to use the
-GPU when overlap is active.
+Use `--num-gpus 1` for micro-experiments. Production-parity requirements (CUDA graphs + torch.compile) apply to all GPU benchmarks.
 
 ## Key Constraints
 
@@ -147,7 +142,9 @@ GPU when overlap is active.
 
 You may be running in an overlapped context where implementation agents are also present in the same team. If so:
 - You will NOT be given implementation agent names. Do not attempt to discover or message them.
-- Your micro-experiments are LIMITED TO CPU-BASED ANALYSIS ONLY: roofline calculations, ISA inspection (`cuobjdump`), and `ncu --query-metrics` (static analysis). Tiny kernel prototypes requiring GPU are NOT allowed during overlap -- GPUs are allocated to implementation tracks.
+- During overlapped rounds, GPU micro-experiments are permitted but may encounter contention
+  with implementation tracks. The pool reservation system handles this — your command will
+  block if GPUs are busy. Keep micro-experiments brief to minimize contention.
 - Debate phase starts may be delayed while the orchestrator handles implementation events. This is normal -- wait for the orchestrator's broadcast.
 
 ## Delegation
