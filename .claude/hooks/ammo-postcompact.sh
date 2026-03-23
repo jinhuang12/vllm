@@ -2,6 +2,9 @@
 # SessionStart hook for AMMO orchestrator
 # Injects resume context after compaction
 
+# Clean up stale GPU reservation warning flags from previous sessions
+rm -f /tmp/ammo_gpu_res/.warned_* 2>/dev/null || true
+
 CHECKPOINT_FILES=$(find "$CLAUDE_PROJECT_DIR/kernel_opt_artifacts" -name "compaction_checkpoint.json" 2>/dev/null | head -1)
 
 if [ -n "$CHECKPOINT_FILES" ]; then
