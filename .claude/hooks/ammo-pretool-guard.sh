@@ -15,32 +15,35 @@ INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // .input.command // empty' 2>/dev/null) || true
 [ -z "$COMMAND" ] && exit 0
 
-# Fast bail: not AMMO context
+# Determine if an AMMO campaign is active
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
-ls "$PROJECT_DIR"/kernel_opt_artifacts/*/state.json &>/dev/null || exit 0
+_CAMPAIGN_ACTIVE=false
+ls "$PROJECT_DIR"/kernel_opt_artifacts/*/state.json &>/dev/null && _CAMPAIGN_ACTIVE=true
 
-# Suppress noisy warnings on read-only / inspection commands
-if echo "$COMMAND" | grep -qP '^\s*(grep|rg|cat|head|tail|less|find|ag|ack|env|printenv|echo|printf|jq|wc|python\s+-c|git\s+(log|show|diff|blame|commit|tag|stash|rebase|cherry-pick))\b'; then
-    exit 0
-fi
+if [ "$_CAMPAIGN_ACTIVE" = "true" ]; then
+    # Suppress noisy warnings on read-only / inspection commands
+    if echo "$COMMAND" | grep -qP '^\s*(grep|rg|cat|head|tail|less|find|ag|ack|env|printenv|echo|printf|jq|wc|python\s+-c|git\s+(log|show|diff|blame|commit|tag|stash|rebase|cherry-pick))\b'; then
+        exit 0
+    fi
 
-# N1: Production parity reminders
-if echo "$COMMAND" | grep -qP 'TORCH_COMPILE_DISABLE\s*=\s*1'; then
-    echo "AMMO REMINDER: TORCH_COMPILE_DISABLE=1 detected. AMMO non-negotiable N1 requires production parity (CUDA graphs + torch.compile). If this is a false positive (e.g., documentation or search), ignore this warning." >&2
-fi
-if echo "$COMMAND" | grep -qP '(--|=)enforce[_-]eager'; then
-    echo "AMMO REMINDER: --enforce-eager detected. AMMO non-negotiable N1 requires CUDA graphs to be enabled. If this is a false positive (e.g., documentation or search), ignore this warning." >&2
-fi
-if echo "$COMMAND" | grep -qP 'VLLM_TORCH_COMPILE_LEVEL\s*=\s*[01](\s|$|")'; then
-    echo "AMMO REMINDER: VLLM_TORCH_COMPILE_LEVEL < 2 detected. AMMO non-negotiable N1 requires torch.compile level ≥ 2. If this is a false positive (e.g., documentation or search), ignore this warning." >&2
-fi
+    # N1: Production parity reminders
+    if echo "$COMMAND" | grep -qP 'TORCH_COMPILE_DISABLE\s*=\s*1'; then
+        echo "AMMO REMINDER: TORCH_COMPILE_DISABLE=1 detected. AMMO non-negotiable N1 requires production parity (CUDA graphs + torch.compile). If this is a false positive (e.g., documentation or search), ignore this warning." >&2
+    fi
+    if echo "$COMMAND" | grep -qP '(--|=)enforce[_-]eager'; then
+        echo "AMMO REMINDER: --enforce-eager detected. AMMO non-negotiable N1 requires CUDA graphs to be enabled. If this is a false positive (e.g., documentation or search), ignore this warning." >&2
+    fi
+    if echo "$COMMAND" | grep -qP 'VLLM_TORCH_COMPILE_LEVEL\s*=\s*[01](\s|$|")'; then
+        echo "AMMO REMINDER: VLLM_TORCH_COMPILE_LEVEL < 2 detected. AMMO non-negotiable N1 requires torch.compile level ≥ 2. If this is a false positive (e.g., documentation or search), ignore this warning." >&2
+    fi
 
-# N4: Sweep script mandate reminder
-if echo "$COMMAND" | grep -qP 'vllm\s+bench\s+latency' && \
-   ! echo "$COMMAND" | grep -q 'run_vllm_bench_latency_sweep'; then
-    echo "AMMO REMINDER: Raw 'vllm bench latency' detected. AMMO non-negotiable N4 requires using the sweep script:" >&2
-    echo "  python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py --artifact-dir <dir>" >&2
-    echo "If this is a false positive (e.g., documentation or search), ignore this warning." >&2
+    # N4: Sweep script mandate reminder
+    if echo "$COMMAND" | grep -qP 'vllm\s+bench\s+latency' && \
+       ! echo "$COMMAND" | grep -q 'run_vllm_bench_latency_sweep'; then
+        echo "AMMO REMINDER: Raw 'vllm bench latency' detected. AMMO non-negotiable N4 requires using the sweep script:" >&2
+        echo "  python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py --artifact-dir <dir>" >&2
+        echo "If this is a false positive (e.g., documentation or search), ignore this warning." >&2
+    fi
 fi
 
 # ── GPU Reservation Auto-Reserve ──
@@ -83,7 +86,7 @@ CVD_EMPTY=false
 
 # Check for CVD with digit IDs: CUDA_VISIBLE_DEVICES=0 or =0,1,2,3
 if echo "$COMMAND" | grep -qP 'CUDA_VISIBLE_DEVICES=[0-9]'; then
-    CVD_VALUE=$(echo "$COMMAND" | grep -oP 'CUDA_VISIBLE_DEVICES=\K[0-9][0-9,]*')
+    CVD_VALUE=$(echo "$COMMAND" | grep -oP 'CUDA_VISIBLE_DEVICES=\K[0-9][0-9,]*' | head -n1)
     CVD_FOUND=true
 # Check for CVD empty string: ="" or ='' or empty-value forms
 elif echo "$COMMAND" | grep -qP "CUDA_VISIBLE_DEVICES=(\"\"|\x27\x27)"; then

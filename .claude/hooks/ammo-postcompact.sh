@@ -2,8 +2,18 @@
 # SessionStart hook for AMMO orchestrator
 # Injects resume context after compaction
 
-# Clean up stale GPU reservation warning flags from previous sessions
-rm -f /tmp/ammo_gpu_res/.warned_* 2>/dev/null || true
+# Clean up stale GPU reservation warning flags from previous sessions.
+# Preserve the current session's flag so post-compaction restarts don't
+# re-trigger the one-shot CVD warning.
+if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+    for _f in /tmp/ammo_gpu_res/.warned_*; do
+        [ -f "$_f" ] || continue
+        [ "$_f" = "/tmp/ammo_gpu_res/.warned_${CLAUDE_SESSION_ID}" ] && continue
+        rm -f "$_f"
+    done
+else
+    rm -f /tmp/ammo_gpu_res/.warned_* 2>/dev/null || true
+fi
 
 CHECKPOINT_FILES=$(find "$CLAUDE_PROJECT_DIR/kernel_opt_artifacts" -name "compaction_checkpoint.json" 2>/dev/null | head -1)
 
