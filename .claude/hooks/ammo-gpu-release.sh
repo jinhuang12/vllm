@@ -24,7 +24,7 @@ GPU_STATE="$GPU_RES_DIR/state.json"
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../skills/ammo/scripts" 2>/dev/null && pwd)" || \
 SCRIPTS_DIR="${CLAUDE_PROJECT_DIR:-.}/.claude/skills/ammo/scripts"
 
-python3 "$SCRIPTS_DIR/gpu_reservation.py" release-session --session-id "$SESSION_ID" 2>/dev/null || \
+python3 "$SCRIPTS_DIR/gpu_reservation.py" release-session --session-id "$SESSION_ID" 2>&1 || \
     echo "AMMO GPU PostToolUse: release failed — will expire via lease." >&2
 
 exit 0

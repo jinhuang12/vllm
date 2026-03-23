@@ -1,12 +1,12 @@
 #!/bin/bash
-# PreToolUse hook — AMMO campaign production-parity reminders.
+# PreToolUse hook — AMMO campaign production-parity reminders and GPU pool guard.
 #
-# Warns (but does NOT block) when a Bash command contains patterns that
-# violate AMMO non-negotiables. Hard blocking caused false positives on
-# git commits, grep searches, documentation writes, and compound commands
-# where the pattern appeared in a non-violating context. Since the agent
-# already knows the non-negotiables from SKILL.md, a reminder is sufficient
-# — primary enforcement lives in the skill instructions and DA audits.
+# N1/N4 warnings: Warns (but does NOT block) when a Bash command contains
+# patterns that violate AMMO non-negotiables.
+#
+# GPU pool guard: Blocks ONCE per session if a GPU command lacks the
+# reservation pattern (CVD=$(python gpu_reservation.py reserve ...)).
+# Subsequent commands without the pattern are allowed through.
 set -euo pipefail
 if ! command -v jq &>/dev/null; then exit 0; fi
 
@@ -54,6 +54,8 @@ fi
 IS_GPU_CMD=false
 if echo "$COMMAND" | grep -qP '\b(nsys|ncu)\b' || \
    echo "$COMMAND" | grep -qP 'nvidia-smi\s+--query-compute'; then
+    IS_GPU_CMD=true
+elif echo "$COMMAND" | grep -qP '^\s*(vllm|torchrun)\b'; then
     IS_GPU_CMD=true
 elif echo "$COMMAND" | grep -qP '\b(python3?|pytest)\b' && \
      echo "$COMMAND" | grep -qiP '(torch|cuda|triton|vllm|benchmark|kernel|gpu)'; then
