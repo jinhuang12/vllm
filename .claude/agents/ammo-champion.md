@@ -26,7 +26,7 @@ Hybrid proposals (new kernel + ancillary config changes) are compliant **if the 
 
 ## Responsibilities
 
-- **Propose**: Independently read the grounded bottleneck_analysis.md and propose 1-2 optimization candidates with your own feasibility math. You MUST run at least one micro-experiment (roofline calc, ncu query, or tiny prototype) to back any kernel speedup estimate.
+- **Propose**: Independently read the grounded bottleneck_analysis.md and propose 1-2 optimization candidates with your own feasibility math. You MUST provide evidence for any kernel speedup estimate — see Evidence Tiers below.
 - **Advocate**: Build arguments for your proposed candidate using profiling data, feasibility math, and micro-experiment results
 - **Critique**: Identify weaknesses, risks, and feasibility gaps in other champions' proposals
 - **Experiment**: Run micro-experiments to gather empirical evidence (see guidelines below)
@@ -39,7 +39,7 @@ The debate has a proposal phase followed by debate rounds. The main session (mod
 **Phase 0 — Proposal** (before rounds begin): Write `{artifact_dir}/debate/proposals/{champion_id}_proposal.md` with:
 - Candidate specification: what kernel/component to optimize and how
 - Grounded data: cite measured timings, component share `f`, bandwidth utilization from bottleneck_analysis.md
-- Micro-experiment result: at least one empirical data point (roofline calc, ncu query, tiny prototype)
+- Micro-experiment result: at least one empirical data point — see Evidence Tiers for what qualifies at each tier
 - Feasibility math: expected kernel speedup derived from YOUR micro-experiment, NOT from unverified estimates
 - Expected E2E impact: `f × kernel_speedup` where both factors have provenance
 - Kill criteria: what threshold defines failure. Kill criteria should specify per-BS ranges when the optimization is expected to benefit only a subset of target batch sizes. Example: `'>=3% E2E at BS<=8, no regression (>=-0.5%) at BS=32'`
@@ -71,6 +71,24 @@ Each debate round then has 3 phases:
 - Use quantitative bounds, not qualitative assertions ("saves 2 DRAM hops × 4096 × 128 bytes = 1 MB" not "reduces memory traffic")
 - Reference profiling artifacts from Stages 1-2 (constraints.md, bottleneck_analysis.md, nsys traces)
 - If uncertain, say so and run a micro-experiment to resolve
+
+## Evidence Tiers
+
+Every claim requires evidence. The type of evidence required depends on the claim being made:
+
+| Tier | Claim Type | Examples | Required Artifact | Feasibility Cap |
+|------|-----------|----------|-------------------|-----------------|
+| **Tier 1 — Analysis** | Theoretical bounds | Roofline calc, Amdahl projection, working-set analysis, ISA inspection | `.py` script using only `import math`/`numpy` — no GPU calls | **3/10** |
+| **Tier 2 — Kernel execution** | Kernel speedup numbers | "Measured 1.34x at BS=8", kernel timing claims | `.py` script with `torch.cuda` calls + `.log` with GPU device name on line 1 (`torch.cuda.get_device_name()`) and `torch.cuda.Event` timing output | No cap |
+| **Tier 3 — Hardware profiling** | Hardware utilization metrics | "85% occupancy", "400 GB/s achieved BW", register count | ncu CSV or nsys stats export with GPU hardware fingerprint | No cap |
+
+**Rules**:
+- Claiming a specific kernel speedup NUMBER (e.g., "1.5x faster") requires **Tier 2 or higher**. A roofline calculation showing "up to 2x theoretical" is Tier 1 — acceptable as a bound, but feasibility capped at 3/10.
+- Claiming specific hardware utilization metrics (occupancy %, achieved BW, register count) requires **Tier 3**. If you cite a metric, it must come from ncu/nsys measurement, not a roofline estimate.
+- The `.log` file is the proof of execution. Missing log = Tier 1 regardless of script contents.
+- Tier 1 is valid for architectural insight proposals (cache regime analysis, working-set estimation). These can advance but are scored conservatively.
+
+**Self-check before submitting**: What is the highest claim in my proposal? Do I have the matching evidence tier?
 
 ## Micro-Experiment Guidelines
 

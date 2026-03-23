@@ -137,7 +137,16 @@ For each item, determine PASS or FAIL with specific evidence.
 
 1. **CUSTOM KERNEL MANDATE**: Does the proposal involve writing new or substantially modifying CUDA/Triton/CUTLASS kernel code? Config-only, flag-flipping, parameter-tuning = FAIL.
 
-2. **MICRO-EXPERIMENT EVIDENCE**: Do referenced micro-experiment result files actually exist at the cited paths? Check every path reference in the proposal.
+2. **EVIDENCE TIER VERIFICATION**: For each micro-experiment referenced in the proposal:
+   - 2a. **FILES EXIST**: Do referenced script and log files actually exist at the cited paths? (PASS/FAIL)
+   - 2b. **EVIDENCE TIER**: Read each script and log. Classify:
+     - Script uses only `import math`/`numpy` with no `torch.cuda`/`triton`/`CUDAGraph` calls → **Tier 1** (theoretical). Confirm feasibility subscore ≤ 3/10.
+     - Script contains `torch.cuda`/`triton`/`CUDAGraph` calls → **Tier 2** (kernel execution). Verify log file exists and contains GPU device name string (e.g., `GPU: NVIDIA L40S`).
+     - Log contains ncu/nsys profiler output (e.g., `==PROF==`, `launch__registers`, `CUDA Kernel Statistics`) → **Tier 3** (hardware profiling). Verify hardware fingerprint present.
+   - 2c. **CLAIM-EVIDENCE MATCH**: Read the proposal's claims and check:
+     - Proposal claims a specific kernel speedup NUMBER (e.g., "1.5x", "34% faster") with only Tier 1 evidence → **HARD FAIL** — speedup numbers require Tier 2+.
+     - Proposal claims specific hardware metrics (e.g., "85% occupancy", "400 GB/s") without Tier 3 evidence → **HARD FAIL** — hardware metrics require ncu/nsys measurement.
+     - Proposal presents architectural insight + Tier 1 evidence (e.g., "working set fits L2") → **PASS** (feasibility cap applied by scoring rubric).
 
 3. **CUDA GRAPH METHODOLOGY**: If kernel benchmarks were run in micro-experiments, does the methodology mention CUDA graph capture? Raw `torch.cuda.Event` timing without graph capture = FAIL.
 

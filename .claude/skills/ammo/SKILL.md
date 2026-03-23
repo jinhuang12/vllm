@@ -162,6 +162,25 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 When `--nsys-profile` is used, the sweep script automatically restricts `cudagraph_capture_sizes` to match `workload.batch_sizes` from target.json. This reduces the CUDA graph capture surface from ~50 default sizes to only the profiled batch sizes, mitigating `--cuda-graph-trace=node` replay hangs. This is NOT a parity violation — the profiled sizes are exact matches in vLLM's default capture list, so the graphs are identical to production.
 The lead should also instruct the researcher to run `scripts/nsys_probe.py` first to estimate profiling cost and determine safe `--nsys-output-len` values. See `references/nsys-profiling-guide.md` §3.10.
 
+### Stage 2b: Baseline ncu Sanity Check
+
+After bottleneck mining completes, the lead instructs the ammo-researcher to run a baseline ncu sanity check on the **top-3 bottleneck kernels** (by f_decode). This catches pathological baselines (dispatch bugs, near-zero SM utilization) before champions begin debate.
+
+**Command per kernel**:
+```bash
+ncu --metrics sm__warps_active.avg.pct_of_peak_sustained_active,dram__bytes.sum.per_second,smsp__inst_executed.sum \
+    --kernel-name <baseline_kernel> python baseline_invocation.py
+```
+
+**Red flag thresholds** (any one triggers investigation before debate begins):
+- SM utilization < 10% for non-trivial kernels (indicates dispatch bug — e.g., B200 n_groups=8 case showed 0.6%)
+- Achieved DRAM BW < 20% of theoretical peak for BW-bound kernels
+- Instruction count < 50% of expected for target shape
+
+If a red flag fires, the researcher must investigate before the lead proceeds to Stage 3. Findings are appended to `bottleneck_analysis.md` and shared with all champions.
+
+**Cost**: ~60 seconds per kernel, ~3-5 minutes total. GPU is already dedicated to profiling at this stage.
+
 ### Stage 3: Candidate Proposal + Adversarial Debate
 
 - **TeamCreate**: `ammo-round-{round_id}-{model_short}-{hardware}` — this is the **round team**, created once and reused through Stages 4-5.
@@ -219,7 +238,8 @@ T2:  Baseline capture + constraints.md                    [ammo-researcher subag
 T3:  GATE: verify_phase1_baseline.py                      [main]                        <- T2
 T4:  Bottleneck mining (grounded data only)                [ammo-researcher subagent]    <- T3
 T5:  GATE: Stage 2 review (no ungrounded estimates)       [main]                        <- T4
-T6:  TeamCreate round team + champion proposals + debate (Phase 0 [+delegates if enabled] -> rounds -> selection -> shutdown champions) [main + round team] <- T5
+T5b: Baseline ncu sanity check (top-3 kernels by f_decode) [ammo-researcher subagent]   <- T5
+T6:  TeamCreate round team + champion proposals + debate (Phase 0 [+delegates if enabled] -> rounds -> selection -> shutdown champions) [main + round team] <- T5b
 T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]                <- T6
 
   +- Per winning candidate (parallel, all in existing round team) ----------------------+
@@ -301,7 +321,7 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 | **WorktreeRemove** | `worktree-remove-cleanup.sh` | Cleans up worktree resources |
 
 Inline DA verification (integrated into helper agents — replaces non-functional Stop hook DAs for team members):
-- **ammo-delegate** → After Phase 0 proposal and each round's argument: 6-point DA audit (custom kernel mandate, micro-experiment evidence, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target). Writes audit files to `debate/delegate_work/` for orchestrator visibility.
+- **ammo-delegate** → After Phase 0 proposal and each round's argument: 7-point DA audit (custom kernel mandate, evidence tier verification with claim-evidence matching, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target, BS-gated sanity). Writes audit files to `debate/delegate_work/` for orchestrator visibility.
 - **ammo-impl-validator** → After Gates 5.1/5.2/5.3: 5-point DA section in validation report (Amdahl sanity, cross-track awareness, kernel-to-E2E coherence, scope adherence, Gate 5.2 cross-check).
 - **ammo-researcher** Stop → DA checks for ungrounded claims (subagent — Stop hooks work correctly).
 

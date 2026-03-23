@@ -315,6 +315,42 @@ For proposals that replace or modify kernels invoked per-layer (e.g., GEMM, norm
 
 Proposals that report only isolated kernel speedup for per-layer optimizations have their feasibility score capped at 6/10.
 
+## Micro-Experiment Artifact Requirements
+
+Every kernel benchmark must produce:
+
+1. A `.py` script in `debate/micro_experiments/` that is independently runnable
+2. A `.log` file with: GPU device name on line 1 (`torch.cuda.get_device_name()`), kernel timing in microseconds, iteration count
+3. For hardware utilization claims: an ncu CSV or nsys stats export
+
+The `.log` file is the proof of execution. Missing log = Tier 1 (theoretical) regardless of script contents, and feasibility is capped at 3/10.
+
+## NCU Triggers
+
+ncu profiling is **optional by default** and **required only when one of these triggers fires**:
+
+### Trigger 1: Triton Register Pressure Claims
+
+**When**: Champion proposes a Triton kernel AND claims occupancy or register-count improvement as a primary benefit.
+
+**Requirement**: Run `ncu --metrics l1tex__t_sector_hit_rate.pct,launch__registers_per_thread,sm__warps_active.avg.pct_of_peak_sustained_active` on the proposed kernel prototype before Round 1 scoring.
+
+**Rationale**: Register pressure in Triton's code generator cannot be estimated analytically — you must measure it.
+
+### Trigger 2: Hardware Metric Claims Require Measurement
+
+**When**: Any champion cites a specific hardware metric (achieved bandwidth GB/s, occupancy %, SMEM utilization, cache hit rate) as supporting evidence.
+
+**Requirement**: The cited metric must come from an ncu or nsys measurement, not a roofline calculation. If purely theoretical, the champion must label it as an estimate and cannot cite it as achieved.
+
+### Trigger 3: BW Assumption Divergence Escalation
+
+**When**: A champion's roofline calculation assumes an achieved bandwidth that diverges from nsys-derived achieved BW (from Stage 2 bottleneck_analysis.md) by more than 2x.
+
+**Requirement**: Before the proposal advances to scoring, require ncu verification of the actual achieved BW. The corrected BW value replaces the assumption in the Amdahl calculation.
+
+**Governance**: ncu mandatory requirements are limited to these 3 triggers. No new mandatory trigger may be added without a documented failure mode from 3+ campaigns.
+
 ## Teardown (Post-Debate)
 
 After winner selection:
