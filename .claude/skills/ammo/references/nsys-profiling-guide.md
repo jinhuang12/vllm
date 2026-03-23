@@ -390,6 +390,33 @@ Then apply the formula to choose `--nsys-output-len` for the real capture. The e
 | `--cuda-graph-trace=graph` | When you only need aggregate graph timing, not per-kernel (see section 3.6 for major caveats — kernel-level data is lost) |
 | Two-pass: nsys survey (OL=8) → targeted ncu on top 3 kernels | When device-level roofline data is needed for Stage 2 |
 
+### 3.10 Profiling Decision Tree
+
+Before attempting nsys profiling on models with TP > 1 or > 10B params, run the probe script to estimate cost:
+
+```bash
+python scripts/nsys_probe.py --artifact-dir {artifact_dir}
+```
+
+Decision tree based on probe results:
+
+```
+Probe succeeds?
+├── YES: All BS green/yellow?
+│   ├── YES → Run --nsys-profile with suggested --nsys-output-len
+│   └── NO (some BS red) →
+│       ├── Use suggested --nsys-output-len (auto-reduces OL for expensive BS)
+│       └── OR skip nsys for red BS, document the gap
+└── NO: Probe timed out at OL=2?
+    ├── Restrict --cudagraph-capture-sizes to [1] only, retry probe
+    ├── If still fails → use torch.profiler for kernel identification
+    └── Document all caveats in bottleneck_analysis.md
+```
+
+For small TP=1 models (< 10B params), the probe is optional — proceed directly to `--nsys-profile` with default settings.
+
+If nsys profiling fails AFTER the probe passed (unexpected), run the probe as a diagnostic to compare expected vs actual behavior.
+
 ## 4) Nsight Compute (ncu): targeted kernel profiling (device bottlenecks)
 
 ### 4.1 How to pick kernels for ncu

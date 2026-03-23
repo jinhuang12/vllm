@@ -50,11 +50,27 @@ If `--cuda-graph-trace=node` hangs during a full-run capture, do NOT fall back t
 
 Use the sweep script for ALL E2E latency measurements and nsys profiling. Do NOT call `vllm bench latency` directly — it wastes time reloading the model for each batch size and is error-prone (e.g., `--dtype bf16` is invalid, must be `bfloat16`; the sweep script reads config from target.json so these errors don't happen).
 
+**Pre-profiling probe (REQUIRED for TP > 1 or models > 10B params)**:
+
+Before running `--nsys-profile`, estimate profiling cost:
+
+```bash
+python .claude/skills/ammo/scripts/nsys_probe.py --artifact-dir {artifact_dir}
+```
+
+This takes ~5-15 minutes and outputs per-BS risk estimates with suggested
+`--nsys-output-len`, `--nsys-num-iters`, and `--nsys-timeout-s` values.
+See `references/nsys-profiling-guide.md` §3.9-3.10 for the theory.
+
+For small TP=1 models (< 10B params), the probe is optional — nsys
+profiling at default settings rarely has issues.
+
 **Combined E2E baseline + nsys profiling (default for Stage 1)**:
 ```bash
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
   --artifact-dir {artifact_dir} \
-  --nsys-profile
+  --nsys-profile \
+  --nsys-output-len {probe_suggested_OL}
 ```
 
 This loads the model ONCE per label, benchmarks all batch sizes from target.json, AND captures per-bucket nsys traces in `{artifact_dir}/e2e_latency/nsys/`. The target.json in the artifact dir controls model, workload, and env config.
@@ -93,6 +109,24 @@ The nsys trace captures warmup, prefill, and decode phases together. Since decod
 3. **Sanity-check instance counts**: A kernel's expected decode-step instance count is roughly `num_layers × decode_steps`. If a kernel shows 10-100x more instances than this, it's likely from autotuning, warmup, or graph capture — flag it as transient.
 
 4. **When f_total >> f_decode**: If a component has large share in the full trace but is absent from decode, it only affects startup or prefill latency. Note this explicitly so champions don't over-invest in a target that won't move E2E for decode-dominated workloads.
+
+## When nsys Profiling Fails
+
+If nsys `--cuda-graph-trace=node` fails or hangs for a batch size, follow this escalation hierarchy:
+
+1. **Reduce `--nsys-output-len`** to the probe's suggested value (or lower)
+2. **Restrict `--cudagraph-capture-sizes`** to `[target_bs]` only
+3. **Skip nsys for that BS** — document "BS=N profiling unavailable" in bottleneck_analysis.md
+4. **NEVER fall back to `--enforce-eager`** for profiling
+
+If a batch size has no profiling data, flag it explicitly:
+
+> WARNING: No nsys profiling data for BS={N}. Debate proposals targeting this batch size lack empirical grounding for kernel-level claims.
+
+If the probe itself times out at OL=2, the model may be too heavy for `--cuda-graph-trace=node` entirely. In that case:
+- Use `torch.profiler` for lightweight kernel identification
+- Or use `--cuda-graph-trace=graph` (loses per-kernel detail inside CUDA graphs — see nsys-profiling-guide.md §3.6 for caveats)
+- Document all methodology caveats prominently in bottleneck_analysis.md
 
 ## Key Constraints
 
