@@ -11,6 +11,7 @@ import fcntl
 import json
 import multiprocessing
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -30,10 +31,10 @@ from gpu_reservation import (
     LockTimeoutError,
     ReservationError,
     check_and_reclaim_expired,
-    command_hash,
     force_clear,
     read_state,
-    release_by_hash,
+    release_by_session,
+    reserve,
     write_reservation,
 )
 
@@ -136,16 +137,13 @@ class TestWriteReservation:
              mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
             write_reservation(
                 gpu_ids=[0, 1],
-                cmd_hash="aabbccdd11223344",
                 session_id="sess001",
-                cvd_requested="0,1",
                 command_snippet="python bench.py",
                 lease_hours=2.0,
             )
             state = read_state()
 
         assert state["gpus"]["0"] is not None
-        assert state["gpus"]["0"]["command_hash"] == "aabbccdd11223344"
         assert state["gpus"]["0"]["session_id"] == "sess001"
         assert state["gpus"]["1"] is not None
         assert state["gpus"]["2"] is None
@@ -159,9 +157,7 @@ class TestWriteReservation:
             with pytest.raises(ReservationError, match="not found in state"):
                 write_reservation(
                     gpu_ids=[7],
-                    cmd_hash="dead000000000000",
                     session_id="sess_x",
-                    cvd_requested="7",
                     command_snippet="python phantom.py",
                     lease_hours=2.0,
                 )
@@ -174,9 +170,7 @@ class TestWriteReservation:
              mock.patch("gpu_reservation._discover_gpu_count", return_value=1):
             write_reservation(
                 gpu_ids=[0],
-                cmd_hash="abcd000011112222",
                 session_id="sess_t",
-                cvd_requested="0",
                 command_snippet=long_snippet,
                 lease_hours=2.0,
             )
@@ -192,9 +186,7 @@ class TestWriteReservation:
             # First reservation succeeds
             write_reservation(
                 gpu_ids=[0],
-                cmd_hash="aaaa000011111111",
                 session_id="sess_a",
-                cvd_requested="0",
                 command_snippet="python a.py",
                 lease_hours=2.0,
             )
@@ -202,38 +194,10 @@ class TestWriteReservation:
             with pytest.raises(ReservationError):
                 write_reservation(
                     gpu_ids=[0],
-                    cmd_hash="bbbb000022222222",
                     session_id="sess_b",
-                    cvd_requested="0",
                     command_snippet="python b.py",
                     lease_hours=2.0,
                 )
-
-
-# ---------------------------------------------------------------------------
-# TestReleaseByHash
-# ---------------------------------------------------------------------------
-
-class TestReleaseByHash:
-    def test_releases_matching_hash(self, tmp_path):
-        """release_by_hash clears entries whose command_hash matches."""
-        state_dir = _make_temp_dir(tmp_path)
-        h = "cccc000033333333"
-        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=2):
-            write_reservation(
-                gpu_ids=[0, 1],
-                cmd_hash=h,
-                session_id="sess_c",
-                cvd_requested="0,1",
-                command_snippet="python c.py",
-                lease_hours=2.0,
-            )
-            release_by_hash(h)
-            state = read_state()
-
-        assert state["gpus"]["0"] is None
-        assert state["gpus"]["1"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +213,7 @@ class TestLeaseExpiry:
             # lease_hours=0 means it expires immediately (at the time of writing)
             write_reservation(
                 gpu_ids=[0],
-                cmd_hash="dddd000044444444",
                 session_id="sess_d",
-                cvd_requested="0",
                 command_snippet="python d.py",
                 lease_hours=0.0,
             )
@@ -276,17 +238,13 @@ class TestForceClear:
              mock.patch("gpu_reservation._discover_gpu_count", return_value=2):
             write_reservation(
                 gpu_ids=[0],
-                cmd_hash="eeee000055555555",
                 session_id="s1",
-                cvd_requested="0",
                 command_snippet="python e.py",
                 lease_hours=2.0,
             )
             write_reservation(
                 gpu_ids=[1],
-                cmd_hash="ffff000066666666",
                 session_id="s2",
-                cvd_requested="1",
                 command_snippet="python f.py",
                 lease_hours=2.0,
             )
@@ -306,18 +264,202 @@ class TestForceClear:
 
 
 # ---------------------------------------------------------------------------
-# TestCommandHash
+# TestReserve
 # ---------------------------------------------------------------------------
 
-class TestCommandHash:
-    def test_deterministic(self):
-        """Same input always produces the same hash."""
-        h1 = command_hash("python bench.py --model foo")
-        h2 = command_hash("python bench.py --model foo")
-        assert h1 == h2
+class TestReserve:
+    def test_basic_allocation(self, tmp_path):
+        """reserve(1) on a 4-GPU system returns [0] and marks GPU 0 reserved."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            result = reserve(num_gpus=1, session_id="s1")
+            state = read_state()
 
-    def test_16_chars(self):
-        """Hash output is exactly 16 hex characters."""
-        h = command_hash("anything")
-        assert len(h) == 16
-        assert all(c in "0123456789abcdef" for c in h)
+        assert result == [0]
+        assert state["gpus"]["0"] is not None
+        assert state["gpus"]["0"]["session_id"] == "s1"
+        assert state["gpus"]["1"] is None
+
+    def test_contiguous_allocation(self, tmp_path):
+        """reserve(2) on a 4-GPU system returns [0, 1] (contiguous block)."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            result = reserve(num_gpus=2, session_id="s1")
+
+        assert result == [0, 1]
+
+    def test_contiguous_skips_held(self, tmp_path):
+        """GPU 0 held, reserve(2) returns [1, 2] (next contiguous block)."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            # Hold GPU 0
+            write_reservation(gpu_ids=[0], session_id="other")
+            # Reserve 2 contiguous GPUs
+            result = reserve(num_gpus=2, session_id="s1")
+
+        assert result == [1, 2]
+
+    def test_contiguous_fails_fragmented(self, tmp_path):
+        """GPUs 0,2 held on 4-GPU system, reserve(2) fails (only [1] and [3] free)."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            # Hold GPUs 0 and 2 with different sessions
+            write_reservation(gpu_ids=[0], session_id="other_a")
+            write_reservation(gpu_ids=[2], session_id="other_b")
+            # Try to reserve 2 contiguous — should fail
+            with pytest.raises(ReservationError, match="No contiguous block"):
+                reserve(num_gpus=2, session_id="s1")
+
+    def test_auto_release_on_retry(self, tmp_path):
+        """Session 's1' holds GPUs 0,1. Calling reserve(2, 's1') releases old first."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            # First reservation
+            result1 = reserve(num_gpus=2, session_id="s1")
+            assert result1 == [0, 1]
+            # Retry — should auto-release [0,1] then re-allocate
+            result2 = reserve(num_gpus=2, session_id="s1")
+            assert result2 == [0, 1]
+            state = read_state()
+            assert state["gpus"]["0"]["session_id"] == "s1"
+            assert state["gpus"]["1"]["session_id"] == "s1"
+
+    def test_pool_exhausted(self, tmp_path):
+        """All 4 GPUs held by different sessions, reserve(1) fails."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            # Fill all GPUs with different sessions
+            for i in range(4):
+                write_reservation(gpu_ids=[i], session_id=f"other_{i}")
+            # Try to reserve 1 — should fail
+            with pytest.raises(ReservationError, match="Not enough free GPUs"):
+                reserve(num_gpus=1, session_id="s_new")
+
+    def test_reclaims_expired_before_allocating(self, tmp_path):
+        """GPU 0 has expired lease, reserve(1) reclaims it and returns [0]."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=1):
+            # Create an immediately-expiring reservation
+            write_reservation(
+                gpu_ids=[0],
+                session_id="old_session",
+                lease_hours=0.0,
+            )
+            time.sleep(0.01)
+            # Reserve should reclaim the expired lease and allocate GPU 0
+            result = reserve(num_gpus=1, session_id="new_session")
+
+        assert result == [0]
+
+
+# ---------------------------------------------------------------------------
+# TestReleaseBySession
+# ---------------------------------------------------------------------------
+
+class TestReleaseBySession:
+    def test_releases_all_session_gpus(self, tmp_path):
+        """release_by_session('s1') clears all GPUs held by s1."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            reserve(num_gpus=2, session_id="s1")
+            released = release_by_session("s1")
+            state = read_state()
+
+        assert sorted(released) == [0, 1]
+        assert state["gpus"]["0"] is None
+        assert state["gpus"]["1"] is None
+
+    def test_leaves_other_sessions(self, tmp_path):
+        """release_by_session('s1') only clears s1, leaves s2 intact."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+            write_reservation(gpu_ids=[0], session_id="s1")
+            write_reservation(gpu_ids=[1], session_id="s2")
+            released = release_by_session("s1")
+            state = read_state()
+
+        assert released == [0]
+        assert state["gpus"]["0"] is None
+        assert state["gpus"]["1"] is not None
+        assert state["gpus"]["1"]["session_id"] == "s2"
+
+    def test_unknown_session_returns_empty(self, tmp_path):
+        """release_by_session('nonexistent') returns []."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_gpu_count", return_value=2):
+            result = release_by_session("nonexistent")
+
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestCLI
+# ---------------------------------------------------------------------------
+
+class TestCLI:
+    def test_reserve_stdout_format(self, tmp_path):
+        """CLI 'reserve --num-gpus 2 --session-id test' prints '0,1' to stdout."""
+        state_dir = _make_temp_dir(tmp_path)
+        script = str(_SCRIPTS_DIR / "gpu_reservation.py")
+        env = os.environ.copy()
+        env["AMMO_GPU_RES_DIR"] = str(state_dir)
+
+        # Pre-create state so nvidia-smi isn't needed
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / "state.json"
+        state_file.write_text(json.dumps({
+            "gpus": {"0": None, "1": None, "2": None, "3": None},
+            "gpu_count": 4,
+            "audit": [],
+        }))
+
+        result = subprocess.run(
+            [sys.executable, script, "reserve", "--num-gpus", "2",
+             "--session-id", "test"],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == "0,1"
+
+    def test_reserve_failure_exits_nonzero(self, tmp_path):
+        """CLI 'reserve --num-gpus 1' when all GPUs held exits with code 1."""
+        state_dir = _make_temp_dir(tmp_path)
+        script = str(_SCRIPTS_DIR / "gpu_reservation.py")
+        env = os.environ.copy()
+        env["AMMO_GPU_RES_DIR"] = str(state_dir)
+
+        # Pre-create state with all GPUs held
+        state_dir.mkdir(parents=True, exist_ok=True)
+        now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        far_future = "2099-01-01T00:00:00Z"
+        state_file = state_dir / "state.json"
+        state_file.write_text(json.dumps({
+            "gpus": {
+                str(i): {
+                    "session_id": f"blocker_{i}",
+                    "reserved_at": now_str,
+                    "lease_expires": far_future,
+                    "command_snippet": "hold",
+                } for i in range(4)
+            },
+            "gpu_count": 4,
+            "audit": [],
+        }))
+
+        result = subprocess.run(
+            [sys.executable, script, "reserve", "--num-gpus", "1",
+             "--session-id", "new"],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 1
+        assert "Not enough free GPUs" in result.stderr
