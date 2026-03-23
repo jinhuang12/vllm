@@ -300,10 +300,5 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
-    elif envs.VLLM_TRITON_GEMM_SELECTIVE and current_platform.is_cuda_alike():
-        from vllm.model_executor.layers.triton_selective_gemm import (
-            selective_triton_gemm,
-        )
-        return selective_triton_gemm
     else:
         return default_unquantized_gemm

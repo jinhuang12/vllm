@@ -105,28 +105,7 @@ class Qwen2MoeMLP(nn.Module):
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
 
-        from vllm import envs
-        self._use_fused_silu = (
-            envs.VLLM_TRITON_GEMM_SELECTIVE
-            and quant_config is None
-        )
-
     def forward(self, x):
-        if self._use_fused_silu:
-            from vllm.model_executor.layers.triton_selective_gemm import (
-                should_use_fused_silu,
-            )
-            weight = self.gate_up_proj.weight
-            if should_use_fused_silu(x, weight):
-                out = torch.ops.vllm.fused_gate_up_silu(
-                    x.reshape(-1, x.shape[-1]), weight,
-                )
-                out = out.reshape(*x.shape[:-1], out.shape[-1])
-                out, _ = self.down_proj(out)
-                if self.expert_gate is not None:
-                    out = F.sigmoid(self.expert_gate(x)[0]) * out
-                return out
-
         gate_up, _ = self.gate_up_proj(x)
         out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)

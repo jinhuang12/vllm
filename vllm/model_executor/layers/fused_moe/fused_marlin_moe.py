@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
 
-import os
 from collections.abc import Callable
 
 import torch
@@ -13,8 +12,6 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
 )
-
-_FUSE_RELU2 = os.environ.get("VLLM_FUSE_RELU2", "0") == "1"
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -125,20 +122,9 @@ def _fused_marlin_moe(
     elif input_dtype == torch.float8_e4m3fn:
         gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
 
-    # Fuse relu2 into Marlin W1 epilogue when enabled and safe
-    can_fuse_relu2 = (
-        _FUSE_RELU2
-        and activation == MoEActivation.RELU2_NO_MUL
-        and not apply_router_weight_on_input
-    )
-
-    # When fusing relu2, write W1 output directly into intermediate_cache2
-    # to avoid a separate activation + copy step.
-    w1_output = intermediate_cache2 if can_fuse_relu2 else intermediate_cache1
-
-    w1_output = ops.moe_wna16_marlin_gemm(
+    intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         gate_up_input,
-        w1_output,
+        intermediate_cache1,
         w1,
         bias1,
         w1_scale,
@@ -163,18 +149,12 @@ def _fused_marlin_moe(
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
-        fuse_relu2=can_fuse_relu2,
     )
-    if can_fuse_relu2:
-        # relu2 already applied in kernel; output is in intermediate_cache2
-        intermediate_cache2 = w1_output
-    else:
-        intermediate_cache1 = w1_output
-        activation_func(
-            activation,
-            intermediate_cache2,
-            intermediate_cache1.view(-1, w13_num_shards * N),
-        )
+    activation_func(
+        activation,
+        intermediate_cache2,
+        intermediate_cache1.view(-1, w13_num_shards * N),
+    )
 
     if output is None:
         output = intermediate_cache3

@@ -83,7 +83,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int size_m, int size_n, int size_k,"
       "bool is_full_k, bool use_atomic_add,"
       "bool use_fp32_reduce, bool is_zp_float,"
-      "bool fuse_relu2,"
       "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
 
   m.def(

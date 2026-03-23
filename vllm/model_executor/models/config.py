@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
@@ -577,13 +576,6 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
                 mamba_ssm_cache_dtype,
             )
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
-
-        if os.environ.get("VLLM_MAMBA_BF16_STATE") == "1":
-            cache_config.mamba_ssm_cache_dtype = "bfloat16"
-            logger.info(
-                "Overriding mamba_ssm_cache_dtype to 'bfloat16' "
-                "via VLLM_MAMBA_BF16_STATE=1"
-            )
 
 
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):

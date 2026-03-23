@@ -93,7 +93,6 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
-    VLLM_TRITON_GEMM_SELECTIVE: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
@@ -160,7 +159,6 @@ if TYPE_CHECKING:
         "full",
         "relax",
     ] = "relax"
-    VLLM_GDN_FUSED_INTERGEMM: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
@@ -876,10 +874,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
-    # If set, use selective Triton GEMM dispatch with fused SiLU for decode.
-    "VLLM_TRITON_GEMM_SELECTIVE": lambda: bool(
-        int(os.getenv("VLLM_TRITON_GEMM_SELECTIVE", "0"))
-    ),
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (
         os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower()
@@ -1202,11 +1196,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "full",
             "relax",
         ],
-    ),
-    # Whether to use fused GDN inter-GEMM Triton kernels (OP-003).
-    # Fuses split/rearrange + RMSNormGated in GDN layers during decode.
-    "VLLM_GDN_FUSED_INTERGEMM": lambda: bool(
-        int(os.getenv("VLLM_GDN_FUSED_INTERGEMM", "0"))
     ),
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(

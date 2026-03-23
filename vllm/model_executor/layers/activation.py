@@ -458,27 +458,6 @@ class QuickGELU(CustomOp):
         return self.forward_cuda(x)
 
 
-@triton.jit
-def _relu2_fused_kernel(x_ptr, out_ptr, n_elements,
-                        BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(x_ptr + offsets, mask=mask)
-    x = tl.maximum(x, 0.0)
-    x = x * x
-    tl.store(out_ptr + offsets, x, mask=mask)
-
-
-def _fused_relu2_triton(x: torch.Tensor) -> torch.Tensor:
-    out = torch.empty_like(x)
-    n = x.numel()
-    BLOCK_SIZE = 1024
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    _relu2_fused_kernel[grid](x, out, n, BLOCK_SIZE=BLOCK_SIZE)
-    return out
-
-
 # --8<-- [start:relu2]
 @CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
@@ -493,10 +472,7 @@ class ReLUSquaredActivation(CustomOp):
         return torch.square(F.relu(x))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        import os
-
-        if os.environ.get("VLLM_FUSE_RELU2", "0") == "1":
-            return _fused_relu2_triton(x)
+        # TODO : implement cuda kernels
         return self.forward_native(x)
 
 

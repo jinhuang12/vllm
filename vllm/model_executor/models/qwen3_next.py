@@ -58,10 +58,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.fla.ops.fused_gdn_intergemm import (
-    VLLM_GDN_FUSED_INTERGEMM,
-    fused_split_rearrange,
-)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -622,17 +618,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
-        if VLLM_GDN_FUSED_INTERGEMM:
-            from vllm.model_executor.layers.fla.ops.fused_gdn_intergemm import (
-                fused_rmsnorm_gated,
-            )
-            core_attn_out = fused_rmsnorm_gated(
-                core_attn_out, z,
-                self.norm.weight,
-                eps=self.norm.eps,
-            )
-        else:
-            core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
@@ -739,37 +725,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             mixed_qkv_non_spec = None
 
-        # Fused split/rearrange: eliminates 3 contiguous-copy kernels
-        if VLLM_GDN_FUSED_INTERGEMM:
-            _kd = self.key_dim // self.tp_size
-            _vd = self.value_dim // self.tp_size
-            _nkh = self.num_k_heads // self.tp_size
-            _nvh = self.num_v_heads // self.tp_size
-            if mixed_qkv_spec is not None:
-                query_spec, key_spec, value_spec = fused_split_rearrange(
-                    mixed_qkv_spec, _kd, _vd,
-                    self.head_k_dim, self.head_v_dim, _nkh, _nvh,
-                )
-            else:
-                query_spec, key_spec, value_spec = None, None, None
-            if mixed_qkv_non_spec is not None:
-                query_non_spec, key_non_spec, value_non_spec = (
-                    fused_split_rearrange(
-                        mixed_qkv_non_spec, _kd, _vd,
-                        self.head_k_dim, self.head_v_dim, _nkh, _nvh,
-                    )
-                )
-            else:
-                query_non_spec, key_non_spec, value_non_spec = (
-                    None, None, None
-                )
-        else:
-            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(
-                mixed_qkv_spec
-            )
-            query_non_spec, key_non_spec, value_non_spec = (
-                self.rearrange_mixed_qkv(mixed_qkv_non_spec)
-            )
+        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
+            mixed_qkv_non_spec
+        )
 
         g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
