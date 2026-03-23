@@ -137,7 +137,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 
 **Lazy invalidation**: After re-profiling in the next round, the orchestrator checks each overlapped-debate winner's f-value against the new profiling data. If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`, the candidate is discarded (the target kernel's share shifted too much). If `f_old < 0.05`, skip invalidation for that candidate (the kernel is too small to measure f-shift reliably). Otherwise, the candidate proceeds to implementation. This replaces the old eager re-scoring protocol.
 
-**GPU allocation**: Debate micro-experiments are limited to CPU-based analysis (roofline calcs, ISA inspection, ncu --query-metrics static analysis). On multi-GPU systems (N >= 3), the last GPU is soft-reserved for debate micro-experiments. This avoids contention with implementation tracks.
+**GPU allocation**: Debate micro-experiments are limited to CPU-based analysis (roofline calcs, ISA inspection, ncu --query-metrics static analysis). Debate agents: CPU-only. MUST NOT use GPUs.
 
 **If round N is round 1**: Do NOT launch overlapped debate. Round 1 has no prior profiling data for the next round's debate to use.
 
@@ -277,7 +277,8 @@ These are NOT advisory. Violation blocks stage progression.
 2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
 4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Reminded by `ammo-pretool-guard.sh` — warns on raw `vllm bench latency`)*
-5. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
+5. **GPU isolation**: GPU commands MUST include a `CUDA_VISIBLE_DEVICES=X` prefix (from spawn prompt assignment) for GPU work, or `CUDA_VISIBLE_DEVICES=""` to explicitly signal no GPU is needed. The PreToolUse hook auto-reserves GPUs when CVD contains GPU IDs and blocks on contention. PostToolUse auto-releases. No manual reservation or release needed. *(Enforced by `ammo-pretool-guard.sh` PreToolUse + `ammo-gpu-release.sh` PostToolUse — one-shot block on first missing CVD, then trusts agent judgment)*
+6. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
 6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug. For BS-dependent optimizations, compute per-BS `f(BS) × kernel_speedup(BS)` — different batch sizes may have different `f` values. A partial regression at some batch sizes does not negate the optimization if it is gatable — see tiered verdict system in `references/validation-defaults.md`.
 7. **Custom kernel mandate**: Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected outright in the Phase 0 eligibility gate.
 
@@ -288,7 +289,8 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 | Hook Event | Script | Purpose |
 |------------|--------|---------|
 | **Stop** | `ammo-stop-guard.sh` | Blocks session end if campaign is active (one-shot: blocks once, then allows) |
-| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Warns on `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` (does not block) |
+| **PreToolUse** (Bash) | `ammo-pretool-guard.sh` | Warns on `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, raw `vllm bench latency` (does not block); GPU auto-reserve: reserves GPU IDs from CVD prefix before command runs, blocks on contention |
+| **PostToolUse** (Bash) | `ammo-gpu-release.sh` | GPU auto-release: clears reservation after GPU command completes |
 | **PreCompact** | `ammo-precompact.sh` | Saves campaign state checkpoint before compaction |
 | **SessionStart** | `ammo-postcompact.sh` | Injects resume context after compaction |
 | **WorktreeCreate** | `worktree-create-with-build.sh` | Sets up build environment in new worktrees |
@@ -303,7 +305,7 @@ Inline DA verification (integrated into helper agents — replaces non-functiona
 
 `state.json` in artifact directory tracks stage, status, debate, parallel tracks, and integration.
 
-**Session ID**: The lead SHOULD record the session ID in state.json at campaign start: `"session_id": "<uuid>"`. This enables the eval pipeline to extract ground-truth timing and agent cost data from session logs automatically.
+**Session ID**: The lead MUST record the session ID in state.json at campaign start: `"session_id": "<uuid>"`. This enables the eval pipeline to extract ground-truth timing and agent cost data from session logs automatically.
 
 **Stage timestamps and agent costs**: Auto-extracted from session logs by `parse_session_logs.py` during eval. No manual recording needed — the `stage_timestamps` and `agent_costs` fields in state.json are populated by the eval pipeline, not by the lead.
 
@@ -412,6 +414,8 @@ Run, don't modify:
 - `scripts/verify_validation_gates.py` — Stage 5 gate (supports `--track` for per-track validation)
 - `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `--labels baseline` for baseline-only sweeps (Stage 1), `--labels opt` for opt-only (Stage 5), or `--labels baseline,opt` (default, A/B comparison). Also supports `workload_matrix` for multi-dimensional sweeps and `--nsys-profile` for per-bucket nsys traces without model reload. **WARNING**: If `opt_env` in target.json still contains placeholder keys (e.g., `<ENABLE_FLAG>`), the script will fail fast — update `opt_env` before running with `--labels opt`.
 - `scripts/generate_validation_report.py` — Structured reporting
+- `scripts/gpu_status.py` — Print current GPU reservation state (orchestrator/human diagnostic)
+- `scripts/gpu_force_clear.py` — Force-clear stale GPU reservations after crashes (orchestrator-only)
 
 ## References
 
@@ -457,6 +461,7 @@ After interruption or compaction:
 1. Read this skill file (you are the LEAD — delegate, don't implement).
 2. Read `state.json` from artifact directory.
 3. Check `campaign.status` and `stage` to determine where you are.
+3b. Check GPU reservation state: run `python .claude/skills/ammo/scripts/gpu_status.py`. If stale reservations exist from the crashed session, clear them: `python .claude/skills/ammo/scripts/gpu_force_clear.py --all --session-id <crashed_session_id>`. If the crashed session ID is unknown, use `--force-no-session`. Re-spawned agents will have their GPUs auto-reserved by hooks when they run commands.
 4. If Stage 3 debate active: check debate artifacts in `debate/` or `debate/campaign_round_N/`.
 4b. If Stages 4-5 active AND `debate.next_round_overlap.active` is `true`:
    - Check `debate.next_round_overlap.phase` to determine debate progress.

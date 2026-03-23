@@ -57,7 +57,7 @@ We're working on optimization {op_id}. Here's what I need up front:
 
 - Artifact dir: {artifact_dir}
 - Target kernel: {kernel_name} (from debate/summary.md)
-- GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
+- GPU assignment — Kernel work: CUDA_VISIBLE_DEVICES={kernel_cvd} / E2E sweep: CUDA_VISIBLE_DEVICES={e2e_cvd}
 - **Worktree: cd into my worktree first — `cd $CLAUDE_PROJECT_DIR/.claude/worktrees/{worktree_name}` then `source .venv/bin/activate`**
 
 Initial research package:
@@ -104,7 +104,7 @@ Implementation committed at {sha}. Ready for independent validation.
 - Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
 - Kill criteria: {kill_criteria}
 - Target batch sizes: {batch_sizes from target.json}
-- GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
+- GPU assignment — Kernel work: CUDA_VISIBLE_DEVICES={kernel_cvd} / E2E sweep: CUDA_VISIBLE_DEVICES={e2e_cvd}
 
 Run all three gates independently:
 - Gate 5.1: Write YOUR OWN correctness tests
@@ -207,11 +207,22 @@ Baseline data:
 - Summary table: `{artifact_dir}/constraints.md` — "Baseline E2E latency" section
 - Kernel breakdown: `{artifact_dir}/constraints.md` — "Baseline Truth Snapshot" section
 
-## GPU Coordination
+## GPU Usage
 
-- **You have priority.** If you need the GPU (compilation, smoke test), tell the validator.
-- **Coordinate before GPU-intensive work.** Brief message: "I need GPU for compilation."
-- **During validation**: Validator has exclusive GPU access. Don't run GPU operations.
+Your spawn prompt includes GPU assignments:
+  Kernel work:  CUDA_VISIBLE_DEVICES=X
+  E2E sweep:    CUDA_VISIBLE_DEVICES=Y
+
+Prefix GPU commands with the appropriate CUDA_VISIBLE_DEVICES value:
+  CUDA_VISIBLE_DEVICES=0 python benchmark_kernel.py
+  CUDA_VISIBLE_DEVICES=0,1,2,3 python run_vllm_bench_latency_sweep.py ...
+
+If a command does NOT need GPUs but matches GPU patterns (e.g., a torch
+script doing CPU tensor ops), prefix with CUDA_VISIBLE_DEVICES="" to skip reservation.
+
+The hooks auto-manage GPU reservations — no manual reserve/release needed.
+If a command blocks ("GPU held by..."), wait briefly and retry.
+If persistent blocking, report to orchestrator via SendMessage.
 
 ## Worktree Build Rules
 

@@ -31,14 +31,57 @@ Worktrees are created automatically by the Agent tool when spawning `ammo-impl-c
 
 The validator agent shares the champion's worktree (same track team). Both agents may be active simultaneously — GPU access is coordinated via SendMessage, with the champion having priority.
 
-## GPU Assignment
+## TP-Aware GPU Partitioning
 
-| Track | `CUDA_VISIBLE_DEVICES` | Usage |
-|-------|----------------------|-------|
-| Track 0 (op_id 1) | `0` | Kernel benchmarks, micro-validation |
-| Track 1 (op_id 2) | `1` | Kernel benchmarks, micro-validation |
-| Track 2 (op_id 3) | `2` | Kernel benchmarks, micro-validation |
-| E2E benchmarks | All GPUs | Sequential via `flock` on `/tmp/ammo_gpu_locks/` |
+The orchestrator computes GPU assignments at track spawn time:
+
+```
+gpu_count = state.json -> gpu_resources.gpu_count
+tp = state.json -> target.tp
+num_tracks = len(debate.selected_winners)
+can_partition = (gpu_count >= tp * num_tracks)
+```
+
+**Assignment algorithm**: Sequential by track index. In exclusive mode: track 0 gets GPUs `[0..TP-1]`, track 1 gets GPUs `[TP..2*TP-1]`, etc. In shared mode: track N gets kernel GPU `N` (one GPU each), all tracks share the same E2E CVD (all TP GPUs).
+
+### Exclusive Mode (can_partition = true)
+
+Each track gets TP GPUs exclusively. Fully parallel kernel AND E2E work.
+
+Spawn prompt includes:
+```
+GPU assignment (EXCLUSIVE):
+  Kernel work:  CUDA_VISIBLE_DEVICES=0,1
+  E2E sweep:    CUDA_VISIBLE_DEVICES=0,1
+```
+
+### Shared Mode (can_partition = false)
+
+Tracks share GPUs for E2E sweeps. Kernel benchmarks get 1 GPU each.
+
+Spawn prompt includes:
+```
+GPU assignment (SHARED — E2E sweeps share GPUs):
+  Kernel work:  CUDA_VISIBLE_DEVICES=0
+  E2E sweep:    CUDA_VISIBLE_DEVICES=0,1,2,3
+  WARNING: E2E sweeps may block if another track's sweep is running.
+```
+
+The orchestrator records the GPU plan in `state.json` at `gpu_assignment`:
+```json
+{
+  "gpu_assignment": {
+    "mode": "exclusive|shared",
+    "gpu_count": 4,
+    "tp": 2,
+    "num_tracks": 2,
+    "tracks": {
+      "op003": {"kernel_cvd": "0,1", "e2e_cvd": "0,1"},
+      "op007": {"kernel_cvd": "2,3", "e2e_cvd": "2,3"}
+    }
+  }
+}
+```
 
 Within a track, GPU access is coordinated via SendMessage — the champion has priority, and the validator yields when the champion needs the GPU for compilation or smoke tests. During validation, the champion is idle and the validator has exclusive GPU access.
 
@@ -73,7 +116,9 @@ Agent(
     Artifact dir: {artifact_dir}
     Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
     Bottleneck analysis: {artifact_dir}/bottleneck_analysis.md
-    GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
+    GPU assignment ({mode}):
+      Kernel work:  CUDA_VISIBLE_DEVICES={kernel_cvd}
+      E2E sweep:    CUDA_VISIBLE_DEVICES={e2e_cvd}
 
     ## Stage 1 Baseline (DO NOT RE-RUN)
     Baseline E2E latency files (captured from clean main in Stage 1):
@@ -110,7 +155,9 @@ Agent(
     Your champion is impl-champion-{op_id}.
 
     Artifact dir: {artifact_dir}
-    GPU assignment: CUDA_VISIBLE_DEVICES={gpu_id}
+    GPU assignment ({mode}):
+      Kernel work:  CUDA_VISIBLE_DEVICES={kernel_cvd}
+      E2E sweep:    CUDA_VISIBLE_DEVICES={e2e_cvd}
 
     Wait for initial tasks from your champion via SendMessage.
     You support the champion throughout: research, profiling, codebase lookups, proactive advisories.
@@ -299,12 +346,12 @@ The orchestrator MUST NOT advance to Stage 6 integration until:
 
 | Agent Type | GPU Access |
 |-----------|-----------|
-| Implementation champions | Assigned GPU per track (as today) |
+| Implementation champions | Assigned GPU per track (kernel_cvd from spawn prompt) |
 | Implementation validators | Shared GPU with their champion (coordinated via SendMessage) |
 | Debate champions | CPU-based analysis only (roofline, ISA, ncu --query-metrics) |
 | Debate delegates | CPU-based analysis only |
 
-On systems with 3+ GPUs, the last GPU is soft-reserved for debate micro-experiments that need GPU access. It returns to the implementation pool when debate is idle.
+Debate agents: CPU-only. MUST NOT use GPUs.
 
 ### Debate Results Handling
 
