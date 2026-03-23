@@ -57,7 +57,7 @@ We're working on optimization {op_id}. Here's what I need up front:
 
 - Artifact dir: {artifact_dir}
 - Target kernel: {kernel_name} (from debate/summary.md)
-- GPU pool: Acquire at runtime using gpu_reservation.py reserve --num-gpus N
+- GPU pool: `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>` (kernel: N=1, E2E: N={tp})
 - **Worktree: cd into my worktree first — `cd $CLAUDE_PROJECT_DIR/.claude/worktrees/{worktree_name}` then `source .venv/bin/activate`**
 
 Initial research package:
@@ -104,7 +104,7 @@ Implementation committed at {sha}. Ready for independent validation.
 - Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
 - Kill criteria: {kill_criteria}
 - Target batch sizes: {batch_sizes from target.json}
-- GPU pool: Acquire at runtime using gpu_reservation.py reserve --num-gpus N
+- GPU pool: `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>` (kernel: N=1, E2E: N={tp})
 
 Run all three gates independently:
 - Gate 5.1: Write YOUR OWN correctness tests

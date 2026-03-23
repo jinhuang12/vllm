@@ -137,7 +137,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 
 **Lazy invalidation**: After re-profiling in the next round, the orchestrator checks each overlapped-debate winner's f-value against the new profiling data. If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`, the candidate is discarded (the target kernel's share shifted too much). If `f_old < 0.05`, skip invalidation for that candidate (the kernel is too small to measure f-shift reliably). Otherwise, the candidate proceeds to implementation. This replaces the old eager re-scoring protocol.
 
-**GPU allocation**: Debate micro-experiments are limited to CPU-based analysis (roofline calcs, ISA inspection, ncu --query-metrics static analysis). Debate agents: CPU-only. MUST NOT use GPUs.
+**GPU allocation**: Debate champions may run brief GPU micro-benchmarks using the pool (`--num-gpus 1`). Debate delegates are restricted to static analysis only (`ncu --query-metrics`, roofline calcs, ISA inspection) — no kernel benchmarks.
 
 **If round N is round 1**: Do NOT launch overlapped debate. Round 1 has no prior profiling data for the next round's debate to use.
 
