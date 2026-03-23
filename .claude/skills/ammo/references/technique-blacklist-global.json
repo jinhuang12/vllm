@@ -1,0 +1,16 @@
+[
+  {
+    "technique": "split-k",
+    "target": "cutlass_moe_gemm",
+    "reason": "CUTLASS EVT (GemmUniversalWithVisitor) asserts against kGemmSplitKParallel. DefaultGemm workaround adds FP32 workspace overhead causing 13-17% regression. 0% success rate across 5+ attempts in all AMMO campaigns.",
+    "source": "cross-campaign",
+    "added": "2026-03-23"
+  },
+  {
+    "technique": "persistent_cta_double_buffer",
+    "target": "gdn_recurrent_l40s",
+    "reason": "Double-buffered persistent CTA requires 2x128KB SMEM > L40S SM limit of 100KB. Failed twice on same target (85d8ded68, c08b370fc).",
+    "source": "cross-campaign",
+    "added": "2026-03-23"
+  }
+]

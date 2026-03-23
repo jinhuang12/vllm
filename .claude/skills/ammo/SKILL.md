@@ -168,10 +168,11 @@ The lead should also instruct the researcher to run `scripts/nsys_probe.py` firs
 - Spawn 2-4 ammo-champion agents into the round team. Each reads the grounded bottleneck_analysis.md independently.
 - **Delegation**: If `state.json` has `debate.delegation.enabled: true`, the orchestrator MUST spawn Sonnet delegate agents alongside champions (1-N per champion, per `delegates_per_champion`). Skipping delegates when the flag is `true` is a protocol violation. To disable delegation for a specific round, the orchestrator MUST update `delegation.enabled` to `false` in state.json WITH user approval first. Champions direct delegates via SendMessage for research and micro-experiments. See `orchestration/debate-protocol.md` § Delegation.
 - **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists. With delegation, champions may direct delegates to extract profiling data and run roofline calculations.
+- **Constraint Pre-screening Gate**: After Phase 0 proposals, run `scripts/constraint_check.py` against proposals. Eliminates proposals violating hard constraints (SMEM budget, API incompatibility, blacklisted techniques). See `orchestration/debate-protocol.md` § Constraint Pre-screening Gate.
 - **Debate rounds**: Champions argue for their proposals, critique others, rebut. See `orchestration/debate-protocol.md`.
 - Main session selects 2-3 winners using scoring rubric (`references/debate-scoring-rubric.md`).
 - **After selection**: Shut down debate champions and delegates via `shutdown_request` (they are no longer needed). The **round team persists** — implementation agents will be spawned into it in Stages 4-5. Do NOT call TeamDelete here.
-- **Debate is always mandatory.** If all champions independently converge on the same candidate in Phase 0 with micro-experiment evidence, the lead may shorten to 1 debate round instead of 2.
+- **Debate is always mandatory.** Minimum 2 debate rounds required — no convergence shortcut (see `orchestration/debate-protocol.md` § No Convergence Shortcut).
 
 ### Stages 4-5: Parallel Worktree Tracks (Adversarial Validation)
 
@@ -332,6 +333,8 @@ Inline DA verification (integrated into helper agents — replaces non-functiona
       "champion_delegate_mapping": {},
       "delegate_results": {}
     },
+    "technique_blacklist_path": null,  /* path to technique_blacklist.json, initialized from global + round failures */
+    "constraint_check_report": null,   /* path to last constraint check report */
     "next_round_overlap": {
       "active": false,       /* whether an overlapped debate is running during Stages 4-5 */
       "phase": null,         /* "phase_0" | "debating" | "selecting" | "selection_complete" | null */
@@ -366,6 +369,7 @@ Inline DA verification (integrated into helper agents — replaces non-functiona
     "status": "active",                          /* active | paused | campaign_complete | campaign_exhausted */
     "current_round": 1,
     "diminishing_returns_threshold_pct": 0.5,    /* stop when top bottleneck < this % */
+    "e2e_deflation_factor": 2.0,       /* multiply predicted E2E improvement by 1/this for scoring. Default: 2.0 (median observed overestimate is 3x, 2x is conservative). */
     "noise_tolerance_pct": 0.5,                  /* per-BS verdict: speedup >= (1.0 - this) = NOISE. From target.json gating block. */
     "catastrophic_regression_pct": 5.0,          /* per-BS verdict: speedup < (1.0 - this) = CATASTROPHIC. From target.json gating block. */
     "cumulative_e2e_speedup": 1.0,               /* multiplicative across shipped rounds. For GATED_PASS tracks: uses min post-gating speedup across all BS. */
@@ -420,6 +424,7 @@ Run, don't modify:
 - `scripts/generate_validation_report.py` — Structured reporting
 - `scripts/gpu_status.py` — Print current GPU reservation state (orchestrator/human diagnostic)
 - `scripts/gpu_force_clear.py` — Force-clear stale GPU reservations after crashes (orchestrator-only)
+- `scripts/constraint_check.py` — Debate pre-screening gate: SMEM budget, technique blacklist, codebase state
 
 ## References
 
@@ -437,6 +442,7 @@ Run, don't modify:
 | Debate scoring | `references/debate-scoring-rubric.md` |
 | Validator troubleshooting | `references/validator-troubleshooting.md` |
 | DA audit checklist | `references/da-audit-checklist.md` |
+| Technique blacklist | `references/technique-blacklist-global.json` |
 
 ## Orchestration Docs
 
