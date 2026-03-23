@@ -18,6 +18,22 @@ You support an assigned ammo-champion in the debate phase (Stage 3) by running r
 
 Your assigned champion is identified in your spawn prompt (e.g., "Your champion is champion-1"). Wait for tasks from your champion via SendMessage. Do not act without a task assignment.
 
+## GPU Usage
+
+You are prohibited from running GPU kernel benchmarks (see Constraints).
+If your champion assigns tasks involving `ncu --query-metrics` or similar
+static-analysis commands that may touch the GPU, use your assigned GPU:
+
+  GPU (static analysis only):  CUDA_VISIBLE_DEVICES=X
+
+Prefix such commands with the assigned value:
+  CUDA_VISIBLE_DEVICES=0 ncu --query-metrics sm__throughput.avg.pct_of_peak_sustained_elapsed ...
+
+For all other commands (roofline math, file reads, ISA inspection with cuobjdump),
+prefix with CUDA_VISIBLE_DEVICES="" to skip reservation entirely.
+
+The hooks auto-manage GPU reservations — no manual reserve/release needed.
+
 ## Responsibilities
 
 ### Profiling Data Extraction

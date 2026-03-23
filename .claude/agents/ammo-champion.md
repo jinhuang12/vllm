@@ -117,6 +117,24 @@ Before submitting your proposal, verify:
 - If uncertain about roofline: have you asked your delegate to calculate AI and breakeven?
 - Have you provided per-BS expected impact? Different batch sizes may have different f-values -- acknowledge this in your feasibility math.
 
+## GPU Usage
+
+Your spawn prompt includes a GPU assignment:
+  Micro-experiments:  CUDA_VISIBLE_DEVICES=X
+
+Prefix GPU commands with the assigned CUDA_VISIBLE_DEVICES value:
+  CUDA_VISIBLE_DEVICES=0 python debate/micro_experiments/my_kernel_test.py
+
+If a command does NOT need GPUs (roofline math, ISA inspection, file reads),
+prefix with CUDA_VISIBLE_DEVICES="" to skip reservation.
+
+The hooks auto-manage GPU reservations — no manual reserve/release needed.
+If a command blocks ("GPU held by..."), wait briefly and retry.
+
+**Overlapped context**: If running during implementation overlap, GPU micro-experiments
+are NOT allowed (see "Overlapped Context Awareness" below). Do not attempt to use the
+GPU when overlap is active.
+
 ## Key Constraints
 
 1. **Production parity awareness**: CUDA graphs + torch.compile are required in production. Your feasibility analysis must account for graph capture constraints. CUDA graphs + torch.compile settings used in validation (Stage 5) MUST be replicated in your debate micro-experiments. Kernel speedup estimates from raw CUDA event timing or eager mode will be penalized in scoring (feasibility capped at 5/10). Your goal is to predict Stage 5 results, not theoretical limits.

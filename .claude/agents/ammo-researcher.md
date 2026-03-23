@@ -67,6 +67,21 @@ nsys stats --report cuda_gpu_kern_sum \
   {artifact_dir}/e2e_latency/nsys/baseline_bs{i}.nsys-rep
 ```
 
+## GPU Usage
+
+Your spawn prompt includes a GPU assignment:
+  E2E sweep + nsys:  CUDA_VISIBLE_DEVICES=X
+
+Prefix all GPU commands with the assigned CUDA_VISIBLE_DEVICES value:
+  CUDA_VISIBLE_DEVICES=0 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py ...
+
+If a command does NOT need GPUs (pure Python analysis, file reads, roofline math),
+prefix with CUDA_VISIBLE_DEVICES="" to skip reservation.
+
+The hooks auto-manage GPU reservations — no manual reserve/release needed.
+If a command blocks ("GPU held by..."), wait briefly and retry.
+If persistent blocking, report to orchestrator via SendMessage.
+
 ## Steady-State vs Transient Classification (CRITICAL)
 
 The nsys trace captures warmup, prefill, and decode phases together. Since decode-heavy workloads (output_len >> input_len) spend most time in the decode loop, the **decode-only (FULL CUDA graph) breakdown is the primary optimization target**.
