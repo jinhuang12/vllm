@@ -78,7 +78,6 @@ bench.baseline_extra_args, bench.opt_extra_args.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
@@ -378,87 +377,6 @@ def _prepare_out_root(
             out_root.replace(archived)
     out_root.mkdir(parents=True, exist_ok=True)
     return out_root
-
-
-def _acquire_gpu_lock(*, artifact_dir: Path, is_child: bool) -> Optional[Any]:
-    """System-wide inter-process lock keyed by visible GPUs.
-
-    Uses /tmp/ammo_gpu_locks/ (not artifact_dir) so that locks work across
-    different agents using different artifact directories on the same machine.
-    This prevents running multiple sweeps concurrently on the same GPUs, which
-    makes measurements meaningless due to contention.
-
-    Child processes (spawned by a lock-holding parent) skip acquisition.
-    """
-    if is_child:
-        return None
-
-    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    key = "all" if cuda_visible is None else (cuda_visible.strip() or "empty")
-    key = _sanitize_filename(key)
-
-    hostname = socket.gethostname()
-    lock_dir = Path("/tmp/ammo_gpu_locks")
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"vllm_bench_latency_{hostname}_{key}.lock"
-
-    fh = open(lock_path, "a+", encoding="utf-8")
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        fh.seek(0)
-        existing = fh.read().strip()
-        raise SystemExit(
-            f"Another AMMO benchmark is running on the same GPU(s) "
-            f"(CUDA_VISIBLE_DEVICES={cuda_visible!r}).\n"
-            f"Lock file: {lock_path}\n"
-            f"Current holder (best-effort):\n{existing}\n"
-            "If this is stale, delete the lock file."
-        )
-
-    # Record holder info for debugging.
-    fh.seek(0)
-    fh.truncate(0)
-    holder = {
-        "pid": os.getpid(),
-        "host": hostname,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "cuda_visible_devices": cuda_visible,
-        "artifact_dir": str(artifact_dir),
-        "cmdline": sys.argv,
-    }
-    fh.write(json.dumps(holder, indent=2, sort_keys=True) + "\n")
-    fh.flush()
-    return fh
-
-
-def _check_gpu_idle() -> None:
-    """Advisory check: warn if other GPU compute processes are detected.
-
-    Runs nvidia-smi to list active compute processes. Prints a warning if any
-    are found, but does NOT block execution (the flock is the real guard).
-    """
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,name,used_memory", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
-            # Filter out our own PID
-            other_procs = [l for l in lines if not l.startswith(f"{os.getpid()},")]
-            if other_procs:
-                print(
-                    f"WARNING: Other GPU compute processes detected. "
-                    f"Benchmark results may be unreliable due to contention:",
-                    file=sys.stderr,
-                )
-                for proc in other_procs:
-                    print(f"  {proc}", file=sys.stderr)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass  # nvidia-smi not available or timed out; skip advisory check
 
 
 def _run_cmd_streaming(
@@ -1072,6 +990,15 @@ def main() -> None:
 
     args = p.parse_args()
 
+    # Transition safety: warn if old locking system files exist
+    old_lock_dir = Path('/tmp/ammo_gpu_locks')
+    if old_lock_dir.exists() and any(old_lock_dir.glob('*.lock')):
+        print(
+            'WARNING: Old GPU lock files found at /tmp/ammo_gpu_locks/. '
+            'GPU reservation is now managed by hooks. Old locks can be safely deleted.',
+            file=sys.stderr,
+        )
+
     # Validate --nsys-profile constraints early.
     if args.nsys_profile:
         if not shutil.which("nsys"):
@@ -1330,13 +1257,11 @@ def main() -> None:
         "results": [],
     }
 
-    # Acquire GPU lock for the entire run (prevents meaningless contention).
-    is_child = bool(args._child_label)
-    lock_handle = _acquire_gpu_lock(artifact_dir=artifact_dir, is_child=is_child)
+    # GPU reservation is now managed by PreToolUse/PostToolUse hooks.
+    # The hooks auto-reserve when CUDA_VISIBLE_DEVICES=X is in the command
+    # and auto-release when the command completes. No in-script locking needed.
 
-    # Advisory check: warn if other GPU processes are running.
-    if not is_child:
-        _check_gpu_idle()
+    is_child = bool(args._child_label)
 
     # Record the per-bucket plan deterministically (for stable paths + repro commands).
     planned: List[Dict[str, Any]] = []
@@ -1757,12 +1682,6 @@ def main() -> None:
 
     print(f"\nWrote: {out_json_path}")
     print(f"Wrote: {out_md_path}")
-
-    if lock_handle is not None:
-        try:
-            lock_handle.close()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":
