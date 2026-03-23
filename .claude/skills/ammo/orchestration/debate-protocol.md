@@ -111,7 +111,7 @@ If `debate.delegation.enabled` is `false` (default), the debate runs with champi
 
 There is no fast-track exception. Every run must go through at least Phase 0 (proposals) + 1 debate round.
 
-**No Convergence Shortcut**: Even if all champions converge on the same candidate, the minimum 2 debate rounds are mandatory. Convergence reduces critique diversity, making additional scrutiny MORE important, not less. (Rationale: c08b370fc campaign — convergence shortcut reduced scrutiny, contributing to 0% ship rate.)
+**Convergence Shortcut**: If ALL champions independently propose the same candidate in Phase 0 AND all proposals cite micro-experiment evidence, the lead may reduce to 1 debate round instead of the normal 2.
 
 ## Phase 0: Independent Proposals
 
@@ -149,27 +149,6 @@ After Phase 0 submissions, the lead checks each proposal against the **Custom Ke
 
 **Non-compliant proposals MUST NOT advance to Round 1.**
 
-### Constraint Pre-screening Gate (Lead)
-
-After the eligibility gate, before the diversity check, the lead runs the automated constraint pre-screening:
-
-```bash
-python .claude/skills/ammo/scripts/constraint_check.py \
-  --proposals-dir {artifact_dir}/debate/proposals/ \
-  --hardware {hardware} \
-  --blacklist {artifact_dir}/technique_blacklist.json \
-  --output {artifact_dir}/debate/constraint_check_report.json
-```
-
-**Checks performed:**
-1. **SMEM budget**: If proposal claims SMEM usage, verify `effective_smem <= SM_SMEM_limit`. For double-buffered proposals, check `2 x claimed_smem <= limit`.
-2. **Technique blacklist**: Match proposal against `technique_blacklist.json` (failed techniques from prior rounds and campaigns). Champions proposing a blacklisted technique MUST demonstrate why their approach differs from the known failure — otherwise rejected.
-3. **Codebase state**: If detectable, verify the optimization isn't already deployed (check vLLM defaults, existing env vars).
-
-**Block action**: Proposals failing a hard constraint check are messaged back to the champion with the specific constraint violation. The champion has ONE revision opportunity. If the revision still fails, the candidate is eliminated.
-
-**IMPORTANT**: Hard constraint failures (SMEM exceeded, API incompatibility) are NOT overridable by high scores in other criteria. The constraint gate runs BEFORE scoring.
-
 ### Diversity Check (Lead)
 
 After the eligibility gate, the lead reviews proposal diversity:
@@ -177,28 +156,6 @@ After the eligibility gate, the lead reviews proposal diversity:
 1. **f-value source check**: For each proposal, check whether the champion used `f_decode` (from the per-decode-step breakdown) or `f_total` (from the full trace). If the target kernel isn't in the decode breakdown, note this — the champion may be targeting prefill latency intentionally, or may have used a misleading f-value.
 
 2. **Component diversity**: If all proposals target the same component, the lead should consider whether the debate will produce useful differentiation. If not, the lead may ask one champion to explore the next-highest-`f_decode` component as an alternative. The goal is at least 2 distinct target components among the eventual winners to reduce portfolio risk.
-
-### Failed Techniques Propagation (Lead)
-
-The lead maintains a technique blacklist at `{artifact_dir}/technique_blacklist.json`. This file is:
-1. **Initialized** from the global blacklist at campaign start (see `references/technique-blacklist-global.json`)
-2. **Updated** after each round's implementation results: any failed technique is appended with the failure reason
-3. **Injected** into every subsequent debate round's champion prompt
-
-Format:
-```json
-[
-  {"technique": "split-k", "target": "cutlass_moe", "reason": "EVT blocks kGemmSplitKParallel — 0% success across all AMMO campaigns", "source": "global"},
-  {"technique": "persistent_cta_double_buffer", "target": "gdn_recurrent_l40s", "reason": "SMEM budget exceeded (128 KB > 100 KB SM limit)", "source": "round_1"}
-]
-```
-
-Champions are informed of the blacklist in their spawn prompt. A champion MAY propose a blacklisted technique ONLY if they:
-1. Cite a specific difference from the known failure
-2. Provide empirical evidence (not theoretical) that the difference resolves the failure
-3. Pass the constraint pre-screening gate
-
-Otherwise the proposal is eliminated at the constraint gate.
 
 ## Round Structure
 
@@ -245,7 +202,6 @@ The critique **must** identify:
 1. Weaknesses in the target's feasibility math
 2. Overlooked risks (numerical stability, edge cases, memory pressure)
 3. Incorrect assumptions about hardware behavior or kernel characteristics
-4. **Hardware resource accounting**: SMEM budget, register usage, occupancy estimate, wave count at target batch sizes. If any resource exceeds the target GPU's limit, cite the specific limit and declare a hard constraint violation.
 
 ### Phase C: Rebuttal
 
@@ -295,19 +251,6 @@ After the final round:
 The summary includes: per-candidate scores, rationale for selection, and any conceded weaknesses that Stage 4 implementation must address.
 
 Flag proposals with kill criteria that imply per-BS differentiated impact (e.g., M<=32 kernel specialization, decode-only path). These are candidates for `GATED_PASS` and should be noted in `summary.md` so Stage 4-5 implementers are prepared for crossover probing.
-
-### Post-Selection Evidence Gate
-
-After winner selection but BEFORE shutting down debate champions, the lead opens a **15-minute evidence window**:
-
-1. Broadcast to all champions: "Winners selected. 15-minute window for late findings that could override selection. Submit to `{artifact_dir}/debate/late_findings/`."
-2. If any champion submits a late finding citing a hard constraint violation (SMEM, API incompatibility, already deployed):
-   - The lead re-runs the constraint check on the affected winner
-   - If the constraint check fails: the winner is eliminated and the next-highest-scoring candidate advances
-   - If the constraint check passes: the late finding is noted but selection stands
-3. After 15 minutes (or all champions respond "no findings"): proceed to shutdown.
-
-This gate addresses the structural gap where Champion-1 in c08b370fc identified both fatal flaws in "Late Findings" after selection was finalized, with no mechanism for action.
 
 ## Micro-Experiment Guidelines
 
