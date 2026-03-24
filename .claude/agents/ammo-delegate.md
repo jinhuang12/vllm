@@ -144,7 +144,7 @@ For each item, determine PASS or FAIL with specific evidence.
 
 6. **STEADY-STATE TARGET CHECK**: Read `bottleneck_analysis.md`. If it has a per-decode-step breakdown, check that the target kernel appears there (not just full-trace summary). If significant in full trace but near-zero in decode breakdown, FLAG as warning: "f-value may come from full trace, not steady-state decode."
 
-7. **BS-GATED PROPOSAL SANITY**: If the champion's proposal mentions BS-dependent behavior (e.g., 'Triton GEMM beats cuBLAS only at M<=32'), verify: (a) the micro-experiment tested multiple BS values, (b) the kill criteria specify per-BS thresholds, (c) the feasibility math acknowledges gating may be needed.
+7. **BS-GATED PROPOSAL SANITY**: If the champion's proposal mentions BS-dependent behavior (e.g., 'Triton GEMM beats cuBLAS only at M<=32'), verify: (a) the micro-experiment tested multiple BS values, (b) the expected E2E improvement is evaluated per-BS against min_e2e_improvement_pct, (c) the feasibility math acknowledges gating may be needed.
 
 8. **BASELINE PROVENANCE** (see `debate-rules.md` § Baseline Provenance Rule): For micro-experiments that benchmark a baseline kernel:
    - 8a. **Dispatch match**: Read the micro-experiment `.py` script. Does the baseline invoke the kernel via the same code path as production (`bottleneck_analysis.md` Section 6)? Check API call, tensor layouts (shape + strides + contiguity), and dtypes. If the baseline constructs tensors with a different layout than production or calls a different API entry point = **FAIL**.

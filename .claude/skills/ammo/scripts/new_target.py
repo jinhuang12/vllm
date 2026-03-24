@@ -98,7 +98,7 @@ def _constraints_md(fields: TargetFields) -> str:
 
 """
 
-def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold: int = 3,
+def _state_json(fields: TargetFields, artifact_dir: Path, min_e2e_improvement_pct: float = 1.0,
                 enable_delegation: bool = True, delegates_per_champion: int = 1,
                 noise_tolerance_pct: float = 0.5,
                 catastrophic_regression_pct: float = 5.0) -> Dict[str, Any]:
@@ -162,7 +162,7 @@ def _state_json(fields: TargetFields, artifact_dir: Path, diminishing_threshold:
         "campaign": {
             "status": "active",
             "current_round": 1,
-            "diminishing_returns_threshold_pct": diminishing_threshold,
+            "min_e2e_improvement_pct": min_e2e_improvement_pct,
             "noise_tolerance_pct": noise_tolerance_pct,
             "catastrophic_regression_pct": catastrophic_regression_pct,
             "cumulative_e2e_speedup": 1.0,
@@ -235,8 +235,8 @@ def main() -> None:
 
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--ep", type=int, default=1)
-    p.add_argument("--diminishing-returns-threshold", type=float, default=0.5,
-                   help="Stop campaign when top bottleneck < this %% of total latency (default: 0.5)")
+    p.add_argument("--min-e2e-improvement", type=float, default=1.0,
+                   help="Stop campaign when no candidate can yield >= this %% E2E improvement (default: 1.0)")
 
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--input-len", type=int, default=64)
@@ -271,7 +271,7 @@ def main() -> None:
 
     _write_text(artifact_dir / "constraints.md", _constraints_md(fields), force=args.force)
     _write_json(artifact_dir / "state.json", _state_json(
-        fields, artifact_dir, args.diminishing_returns_threshold,
+        fields, artifact_dir, args.min_e2e_improvement,
         enable_delegation=args.enable_delegation,
         delegates_per_champion=args.delegates_per_champion,
         noise_tolerance_pct=args.noise_tolerance_pct,

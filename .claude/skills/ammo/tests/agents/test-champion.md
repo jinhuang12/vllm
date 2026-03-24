@@ -169,7 +169,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 **What I do:**
 1. Concede explicitly in the rebuttal.
 2. Acknowledge: "Champion-2's register pressure calculation is correct. Occupancy drops to ~25% at production shapes. The 1.8x does not transfer."
-3. Re-run micro-experiment at [32, 4096, 128] or revise kill criteria/E2E downward.
+3. Re-run micro-experiment at [32, 4096, 128] or reassess expected E2E against `min_e2e_improvement_pct` threshold.
 4. Propose concrete mitigation if one exists (e.g., kernel tiling).
 
 **What I do NOT do:**

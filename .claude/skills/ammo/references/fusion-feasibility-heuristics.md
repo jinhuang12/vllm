@@ -7,7 +7,7 @@ These heuristics are **filters**, not proofs. Their job is to reject fusion idea
 - H1: Memory-hop time-saved upper bound
 - H2: DRAM vs L2 best-case and worst-case
 - H3: W2-fusion ROI (when K is large)
-- H4: Occupancy + underfill kill criteria
+- H4: Occupancy + underfill stop-ship signals
 - H5: Kernel-count wins require API time to be material
 
 ## Search anchors
@@ -97,7 +97,7 @@ Conclusion: **don’t fuse W2 just to remove the intermediate** unless:
 
 ---
 
-## H4: Occupancy + underfill kill criteria
+## H4: Occupancy + underfill stop-ship signals
 
 Any fused design that increases regs/SMEM can lose even if it removes hops.
 

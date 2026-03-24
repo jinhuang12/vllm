@@ -92,7 +92,7 @@ When the champion sends a validation handoff (with commit SHA and artifact paths
 
 ### The Independence Rule
 
-**Write your OWN correctness tests and benchmarks.** Do NOT read or execute the champion's test files or benchmark scripts. Derive test methodology from the **optimization plan and kill criteria**, not from the implementation or your support work. This is non-negotiable — it's the structural guarantee against reward hacking.
+**Write your OWN correctness tests and benchmarks.** Do NOT read or execute the champion's test files or benchmark scripts. Derive test methodology from the **optimization plan and debate summary (debate/summary.md)**, not from the implementation or your support work. This is non-negotiable — it's the structural guarantee against reward hacking.
 
 Why this matters even though you've been helping the champion: your support work (research, profiling, codebase lookups) provides factual information about the codebase. Your validation tests probe whether the IMPLEMENTATION is correct and performant. These are different activities. You can know everything about the codebase and still write unbiased validation tests, as long as you derive them from what the optimization SHOULD do (the plan) rather than what it DOES do (the implementation).
 
@@ -100,7 +100,7 @@ Why this matters even though you've been helping the champion: your support work
 
 Derive test methodology from:
 1. The optimization plan (`{artifact_dir}/debate/summary.md`)
-2. The kill criteria
+2. The min_e2e_improvement_pct threshold (see references/validation-defaults.md)
 3. `{artifact_dir}/target.json` — `workload.batch_sizes`
 4. `references/validation-defaults.md` — tolerance starting points
 
@@ -272,7 +272,7 @@ Shared track rules (production parity, all batch sizes, Stage 1 baseline): see `
 
 Validator-specific rules:
 1. **Independent validation tests/benchmarks are non-negotiable.** When validating, write your OWN. Do NOT use the champion's scripts or be influenced by them.
-2. **Raw data for Gates 5.1/5.2; mechanical verdicts for Gate 5.3.** Report raw microseconds and milliseconds for Gates 5.1 and 5.2 (the champion interprets significance). For Gate 5.3, compute per-BS verdicts using the tiered threshold system from `references/validation-defaults.md` — this is deterministic classification, not subjective judgment. The champion evaluates kill criteria and makes the final track determination.
+2. **Raw data for Gates 5.1/5.2; mechanical verdicts for Gate 5.3.** Report raw microseconds and milliseconds for Gates 5.1 and 5.2 (the champion interprets significance). For Gate 5.3, compute per-BS verdicts using the tiered threshold system from `references/validation-defaults.md` — this is deterministic classification, not subjective judgment. The champion evaluates E2E results against the min_e2e_improvement_pct threshold and makes the final track determination.
 3. **No source modification.** You do NOT edit kernel code, vLLM source, or csrc/ files. Only the champion modifies source.
 4. **Champion has GPU priority.** If the champion needs the GPU (compilation, smoke test), yield immediately. Coordinate via SendMessage before GPU-intensive work.
 5. **Write support outputs to artifact dir.** Research findings, ncu profiles, scaffolding all go to `{artifact_dir}/tracks/{op_id}/validator_prep/`. Never write to worktree source directories.

@@ -19,7 +19,7 @@ Only the champion compiles. The validator never runs cmake. The validator only e
 
 ## Independent Validation Principle
 
-When validating, the validator writes its OWN correctness tests and benchmarks from the **optimization plan and kill criteria** — not from the champion's scripts or implementation. This is the structural guarantee against reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation).
+When validating, the validator writes its OWN correctness tests and benchmarks from the **optimization plan and debate summary** — not from the champion's scripts or implementation. This is the structural guarantee against reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation).
 
 The validator can know everything about the codebase from its support work and still write unbiased validation tests, as long as tests are derived from what the optimization SHOULD do (the plan) rather than what it DOES do (the implementation).
 
@@ -33,7 +33,7 @@ Layer 1: Independent Validator
   Reports raw timings (Gates 5.1/5.2) and mechanical per-BS verdicts (Gate 5.3)
 
 Layer 2: Champion Review
-  Evaluates kill criteria against validator's raw data
+  Evaluates E2E results against min_e2e_improvement_pct threshold
   Cross-checks Gate 5.2 numbers against own smoke-test
   Writes final validation_results.md with evidence chain
 

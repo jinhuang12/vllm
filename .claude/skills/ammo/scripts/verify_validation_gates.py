@@ -8,7 +8,7 @@ Checks:
 1. Benchmark uses vLLM baseline (fused_experts/fused_moe), NOT naive PyTorch
 2. Tests include numerical comparison (torch.allclose), not just smoke tests
 3. Production parity: torch.compile enabled (not TORCH_COMPILE_DISABLE=1)
-4. All kill criteria are evaluated (not marked "TODO" or "optional")
+4. All tracks have an explicit Decision verdict (PASS/FAIL/GATED_PASS, not "TODO")
 5. state.json gate status is properly recorded
 
 Exit codes:
@@ -329,15 +329,16 @@ def check_production_parity(artifact_dir: Path) -> GateResult:
         )
 
 
-def check_kill_criteria_complete(artifact_dir: Path) -> GateResult:
-    """Gate 4.4: Check all kill criteria are evaluated (not TODO/optional).
+def check_decision_completeness(artifact_dir: Path) -> GateResult:
+    """Gate 4.4: Check all tracks have a Decision section with explicit verdict.
 
-    Reads kill criteria directly from tracks/{op_id}/validation_results.md files.
+    Reads tracks/{op_id}/validation_results.md and verifies each has a Decision
+    section containing an explicit PASS/FAIL/GATED_PASS verdict (not TODO/TBD).
     """
     tracks_dir = artifact_dir / "tracks"
     if not tracks_dir.exists():
         return GateResult(
-            name="kill_criteria_complete",
+            name="decision_completeness",
             status="FAIL",
             message="No tracks/ directory found",
             evidence=[f"Expected: {tracks_dir}"],
@@ -346,87 +347,72 @@ def check_kill_criteria_complete(artifact_dir: Path) -> GateResult:
     validation_files = list(tracks_dir.glob("*/validation_results.md"))
     if not validation_files:
         return GateResult(
-            name="kill_criteria_complete",
+            name="decision_completeness",
             status="FAIL",
             message="No validation_results.md files found in tracks/",
             evidence=[f"Searched: {tracks_dir}/*/validation_results.md"],
         )
 
-    # Parse kill criteria from validation_results.md files
-    all_incomplete: List[str] = []
-    all_complete: List[str] = []
-    tracks_checked: List[str] = []
+    valid_verdicts = {"PASS", "FAIL", "GATED_PASS"}
+    incomplete_tracks: List[str] = []
+    complete_tracks: List[str] = []
 
     for vf in validation_files:
         track_id = vf.parent.name
-        tracks_checked.append(track_id)
         content = vf.read_text(encoding="utf-8", errors="ignore")
 
-        # Extract kill criteria section — look for "Kill Criteria" or "kill_criteria"
-        # heading and parse status entries beneath it
-        in_kill_section = False
+        # Find Decision section and extract verdict
+        in_decision = False
+        found_verdict = None
         for line in content.split("\n"):
-            # Detect start of kill criteria section
-            if re.search(r"(?i)(kill\s*criteria|kill_criteria)", line) and (
-                line.strip().startswith("#") or line.strip().startswith("**")
-            ):
-                in_kill_section = True
+            if re.search(r"(?i)^#{1,3}\s*(decision|determination|overall)", line):
+                in_decision = True
                 continue
-            # Detect start of a new section (end of kill criteria)
-            if in_kill_section and line.strip().startswith("#"):
-                in_kill_section = False
-                continue
-            if not in_kill_section:
+            if in_decision and line.strip().startswith("#"):
+                break
+            if not in_decision:
                 continue
 
-            # Parse criterion lines (e.g., "- correctness: PASS", "- **latency**: PASS")
-            criterion_match = re.match(
-                r"\s*[-*]\s*\*{0,2}(\w[\w\s]*?)\*{0,2}\s*:\s*(.+)", line
-            )
-            if criterion_match:
-                criterion = criterion_match.group(1).strip()
-                result = criterion_match.group(2).strip()
-                result_upper = result.upper()
-                label = f"{track_id}/{criterion}: {result}"
-                if "TODO" in result_upper or "OPTIONAL" in result_upper or "SKIP" in result_upper:
-                    all_incomplete.append(label)
-                else:
-                    # GATED_PASS counts as a passing terminal verdict
-                    # alongside PASS/FAIL for kill criterion evaluation
-                    all_complete.append(label)
+            line_upper = line.upper()
+            # Check for incomplete markers
+            if any(marker in line_upper for marker in ("TODO", "TBD", "OPTIONAL", "SKIP")):
+                found_verdict = "INCOMPLETE"
+                break
+            # Check for valid verdicts
+            for verdict in valid_verdicts:
+                if verdict in line_upper:
+                    found_verdict = verdict
+                    break
+            if found_verdict:
+                break
 
-    if not all_complete and not all_incomplete:
+        if found_verdict in valid_verdicts:
+            complete_tracks.append(f"{track_id}: {found_verdict}")
+        else:
+            reason = "INCOMPLETE" if found_verdict == "INCOMPLETE" else "no Decision section or missing verdict"
+            incomplete_tracks.append(f"{track_id}: {reason}")
+
+    if incomplete_tracks:
         return GateResult(
-            name="kill_criteria_complete",
+            name="decision_completeness",
             status="FAIL",
-            message="No kill criteria found in validation_results.md files",
+            message=f"{len(incomplete_tracks)} track(s) missing final verdict",
             evidence=[
-                f"Checked tracks: {', '.join(tracks_checked)}",
-                "Expected: a 'Kill Criteria' section with criterion status entries",
-            ],
-        )
-
-    if all_incomplete:
-        return GateResult(
-            name="kill_criteria_complete",
-            status="FAIL",
-            message=f"{len(all_incomplete)} kill criteria not evaluated",
-            evidence=[
-                "INCOMPLETE criteria:",
-                *[f"  - {c}" for c in all_incomplete],
+                "INCOMPLETE tracks:",
+                *[f"  - {t}" for t in incomplete_tracks],
                 "",
-                "COMPLETE criteria:",
-                *[f"  - {c}" for c in all_complete],
+                "COMPLETE tracks:",
+                *[f"  - {t}" for t in complete_tracks],
                 "",
-                "BLOCKER: All kill criteria must be evaluated before SHIP decision",
+                "BLOCKER: All tracks must have an explicit PASS/FAIL/GATED_PASS decision before SHIP",
             ],
         )
 
     return GateResult(
-        name="kill_criteria_complete",
+        name="decision_completeness",
         status="PASS",
-        message=f"All {len(all_complete)} kill criteria evaluated across {len(tracks_checked)} track(s)",
-        evidence=[f"  - {c}" for c in all_complete],
+        message=f"All {len(complete_tracks)} track(s) have explicit verdicts",
+        evidence=[f"  - {t}" for t in complete_tracks],
     )
 
 
@@ -545,7 +531,7 @@ def verify_phase4(artifact_dir: Path) -> VerificationReport:
         check_baseline_is_vllm(artifact_dir),
         check_numerical_comparison(artifact_dir),
         check_production_parity(artifact_dir),
-        check_kill_criteria_complete(artifact_dir),
+        check_decision_completeness(artifact_dir),
         check_state_json_gates(artifact_dir),
     ]
 
@@ -578,7 +564,7 @@ def verify_phase4(artifact_dir: Path) -> VerificationReport:
         report.recommendation = (
             "Validation INVALID. Do NOT declare optimization complete. "
             "Fix all blockers: ensure vLLM baseline, numerical comparison, "
-            "production parity, and complete kill criteria evaluation."
+            "production parity, and complete decision verdicts."
         )
     elif report.warnings:
         report.overall_status = "WARN"

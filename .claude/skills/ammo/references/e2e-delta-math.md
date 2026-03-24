@@ -21,13 +21,13 @@ So the best‑case end‑to‑end improvement is upper‑bounded by the fraction
 ## Practical usage in Phase 1 / Phase 4
 
 1. Measure `f` using Nsight Systems (or by timing a config that disables component optimizations for comparison).
-2. Decide the target end‑to‑end improvement `I_target` (e.g., 5% at BS≤8).
+2. The minimum required E2E improvement is `min_e2e_improvement_pct` from `state.json` (default: 1%). See `references/validation-defaults.md` for how this threshold is applied at each decision point.
 3. Solve for required component improvement:
 ```
-I_target <= f * (1 - s)  =>  (1 - s) >= I_target / f
+min_e2e_improvement_pct <= f * (1 - s)  =>  (1 - s) >= min_e2e_improvement_pct / f
 ```
 
-If `I_target / f` is implausibly large, switch to:
+If `min_e2e_improvement_pct / f` is implausibly large, switch to:
 - a simpler optimization approach to harvest the most reliable µs wins, or
 - document the limitation and stop.
 

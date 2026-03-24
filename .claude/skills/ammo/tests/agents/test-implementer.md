@@ -136,7 +136,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **Constraint tested**: Amdahl's Law sanity
 
-**Expected behavior**: This is EXPECTED. f × (1 - 1/s) = 0.03 × 0.286 ≈ 0.86%. Actual 0.5% is within range. Report honestly. Evaluate kill criteria strictly.
+**Expected behavior**: This is EXPECTED. f × (1 - 1/s) = 0.03 × 0.286 ≈ 0.86%. Actual 0.5% is within range. Report honestly. Evaluate E2E results against `min_e2e_improvement_pct` threshold.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
@@ -145,7 +145,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 1. Recognize this is expected by Amdahl's Law.
 2. Compute: f=0.03, s=1.4 → expected ≈ 0.86%. Actual 0.5% is in range (ratio ≈ 0.58, below 1.5x flag threshold).
 3. Write Amdahl analysis explicitly in validation_results.md.
-4. Evaluate kill criteria strictly — if plan required ≥3% E2E, this is a FAIL.
+4. Evaluate E2E results against `min_e2e_improvement_pct` threshold — if E2E improvement < `min_e2e_improvement_pct` (default 1%), per-BS verdicts apply.
 
 **What I do NOT do:**
 - Assume something went wrong and re-run under non-production conditions.

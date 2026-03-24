@@ -9,9 +9,9 @@ All implementation agents join the existing round team. The team was created at 
 ```
 Round Team: ammo-round-{round_id}-{model_short}-{hardware}
 [Implementation Workstream]
-+-- impl-champion-{op_id_1} (Opus)    -- implementation, kill-criteria evaluation
++-- impl-champion-{op_id_1} (Opus)    -- implementation, E2E threshold evaluation
 +-- impl-validator-{op_id_1} (Sonnet)  -- independent correctness tests, benchmarks, E2E sweep
-+-- impl-champion-{op_id_2} (Opus)    -- implementation, kill-criteria evaluation
++-- impl-champion-{op_id_2} (Opus)    -- implementation, E2E threshold evaluation
 +-- impl-validator-{op_id_2} (Sonnet)  -- independent correctness tests, benchmarks, E2E sweep
 [Overlapped Debate Workstream -- round 2+ only]
 +-- champion-r{N+1}-1 (Opus)          -- next-round debate champion [shut down after selection]
@@ -71,8 +71,8 @@ Agent(
     - Summary table: {artifact_dir}/constraints.md ("Baseline E2E latency" section)
     - Kernel breakdown: {artifact_dir}/constraints.md ("Baseline Truth Snapshot" section)
 
-    ## Kill Criteria
-    {kill_criteria_from_optimization_plan}
+    ## E2E Threshold
+    E2E threshold: min_e2e_improvement_pct (from state.json)
 
     ## Regression Thresholds (from campaign config)
     - noise_tolerance_pct: {noise_tolerance_pct} (default: 0.5%)
@@ -85,7 +85,7 @@ Agent(
     1. Delegate research to your validator while you read debate artifacts
     2. Implement the kernel optimization (use validator for codebase lookups as needed)
     3. Commit implementation, then delegate validation (all 3 gates) to your validator
-    4. Evaluate kill criteria from validator's raw data, write validation_results.md
+    4. Evaluate E2E results against min_e2e_improvement_pct threshold, write validation_results.md
     """
 )
 
@@ -128,7 +128,7 @@ Layer 1: Independent Validator (Sonnet)
   Reports raw structured results — no interpretation
 
 Layer 2: Champion Review (Opus)
-  Evaluates kill criteria against validator's raw data
+  Evaluates E2E results against min_e2e_improvement_pct threshold
   Cross-checks Gate 5.2 numbers against own smoke-test
   Writes final validation_results.md with evidence chain
 

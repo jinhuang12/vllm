@@ -55,7 +55,7 @@ Stage 7b: Report Generation          [general-purpose subagent, background]     
 
 Stages 1-6 form the **inner loop** of a round. Stage 7 decides whether to iterate. A single round-scoped team persists from Stage 3 through Stage 5; it is created at debate start and deleted after all implementation tracks complete. During Stages 4-5 (round 2+), the orchestrator may launch the next round's debate concurrently -- debate champions are spawned into the same round team alongside implementation agents (see Overlapped Debate below).
 
-The campaign continues until the **diminishing returns threshold** is met (see Campaign Loop below).
+The campaign continues until no remaining optimization candidate's projected E2E exceeds `min_e2e_improvement_pct` (see Campaign Loop below).
 
 ## Campaign Loop
 
@@ -68,16 +68,16 @@ Round N:
   3. Implement + Validate (Stages 4-5) — parallel worktree tracks
      + Overlapped: Round N+1 debate starts during implementation (round 2+, same team)
   4. Integrate (Stage 6) — ship or round-fail
-  5. Campaign Evaluation (Stage 7) — diminishing returns check → next round or stop
+  5. Campaign Evaluation (Stage 7) — E2E threshold check → next round or stop
 ```
 
-### Diminishing Returns
+### Campaign Stop Condition
 
 After each round's integration:
 
-1. Read the top bottleneck's share of total decode latency from profiling data.
-2. Compare against `campaign.diminishing_returns_threshold_pct` (default: 0.5%).
-3. If below threshold: no single kernel optimization can yield meaningful E2E gains → **stop**.
+1. Read the top bottleneck's share of total decode latency (`f`) from profiling data.
+2. If `f < min_e2e_improvement_pct` (default: 1.0%): even complete elimination of that component cannot yield the minimum E2E improvement (Amdahl's Law) → **stop**.
+3. No deflation applied — Amdahl's ceiling is a physical bound, not an estimate. See `references/validation-defaults.md` § Minimum E2E Improvement Threshold.
 
 **After SHIP**: Re-profile first (bottleneck landscape shifted), then check the NEW top bottleneck.
 **After EXHAUSTED**: Check threshold against EXISTING profiling data (no re-profile needed).
@@ -385,7 +385,7 @@ Inline DA verification (integrated into helper agents — replaces non-functiona
   "campaign": {
     "status": "active",                          /* active | paused | campaign_complete | campaign_exhausted */
     "current_round": 1,
-    "diminishing_returns_threshold_pct": 0.5,    /* stop when top bottleneck < this % */
+    "min_e2e_improvement_pct": 1.0,               /* stop when top bottleneck f < this %. See references/validation-defaults.md */
     "e2e_deflation_factor": 2.0,       /* multiply predicted E2E improvement by 1/this for scoring. Default: 2.0 (median observed overestimate is 3x, 2x is conservative). */
     "noise_tolerance_pct": 0.5,                  /* per-BS verdict: speedup >= (1.0 - this) = NOISE. From target.json gating block. */
     "catastrophic_regression_pct": 5.0,          /* per-BS verdict: speedup < (1.0 - this) = CATASTROPHIC. From target.json gating block. */

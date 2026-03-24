@@ -175,7 +175,7 @@ For GATED_PASS tracks, use the **minimum post-gating speedup across all batch si
    - If any candidates survive invalidation: move them to `debate.selected_winners`. Clear `debate.next_round_overlap` to initial state. Skip Step 8 (debate) -- proceed directly to Stages 4-5.
    - If all candidates are invalidated: clear `debate.next_round_overlap` to initial state. Proceed to Step 8 (fresh debate).
 6. Read the new top bottleneck's share of total decode latency.
-7. If `top_bottleneck_share < campaign.diminishing_returns_threshold_pct`: set `campaign.status = "campaign_complete"`. Done.
+7. If `top_bottleneck_share < campaign.min_e2e_improvement_pct`: set `campaign.status = "campaign_complete"`. Done.
 8. Else: increment `campaign.current_round`, enter Stage 3 for the next round.
 
 ### If EXHAUSTED (no candidates passed this round)

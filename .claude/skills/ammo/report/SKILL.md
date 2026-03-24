@@ -103,7 +103,7 @@ The report is for engineers who have never heard of AMMO. Translate ALL internal
 | Round | Optimization iteration |
 | f_decode | Component share of decode latency (define on first use) |
 | Ship / shipped | Merged / accepted / deployed |
-| Kill criteria / kill criterion | Acceptance threshold (minimum required improvement) |
+| Minimum E2E improvement threshold | Campaign-wide threshold for optimization viability (min_e2e_improvement_pct, default 1%) |
 | Stage 1 baseline | Original baseline measurement (do not re-run) |
 | Co-located baseline | Same-session baseline comparison |
 | Gate 5.1 / 5.2 / 5.3 | Correctness / kernel performance / E2E validation |

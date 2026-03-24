@@ -513,7 +513,7 @@ cat > "$ARTIFACT_DIR/state.json" << 'EOF'
   "campaign": {
     "status": "active",
     "current_round": 1,
-    "diminishing_returns_threshold_pct": 3,
+    "min_e2e_improvement_pct": 3,
     "cumulative_e2e_speedup": 1.0,
     "rounds": [],
     "shipped_optimizations": []
@@ -539,7 +539,7 @@ cat > "$ARTIFACT_DIR/state.json" << 'EOF'
   "campaign": {
     "status": "active",
     "current_round": 1,
-    "diminishing_returns_threshold_pct": 3,
+    "min_e2e_improvement_pct": 3,
     "cumulative_e2e_speedup": 1.0,
     "rounds": [{"round_id": 1, "shipped": [], "implementation_results": {}}],
     "shipped_optimizations": []
@@ -565,7 +565,7 @@ cat > "$ARTIFACT_DIR/state.json" << 'EOF'
   "campaign": {
     "status": "campaign_complete",
     "current_round": 1,
-    "diminishing_returns_threshold_pct": 3,
+    "min_e2e_improvement_pct": 3,
     "cumulative_e2e_speedup": 1.12,
     "rounds": [{"round_id": 1, "top_bottleneck_share_pct": 2.1, "shipped": ["op001"], "implementation_results": {"op001": {"status": "PASSED"}}}],
     "shipped_optimizations": ["op001"]
@@ -591,7 +591,7 @@ cat > "$ARTIFACT_DIR/state.json" << 'EOF'
   "campaign": {
     "status": "active",
     "current_round": 1,
-    "diminishing_returns_threshold_pct": 3,
+    "min_e2e_improvement_pct": 3,
     "cumulative_e2e_speedup": 1.0,
     "rounds": [{"round_id": 1, "top_bottleneck_share_pct": 8.5, "shipped": [], "implementation_results": {"op001": {"status": "FAILED"}}}],
     "shipped_optimizations": []

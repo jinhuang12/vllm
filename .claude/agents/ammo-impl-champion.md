@@ -102,7 +102,7 @@ Implementation committed at {sha}. Ready for independent validation.
 
 - Artifact dir: {artifact_dir}
 - Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
-- Kill criteria: {kill_criteria}
+- E2E threshold: min_e2e_improvement_pct from state.json (see references/validation-defaults.md)
 - Target batch sizes: {batch_sizes from target.json}
 - GPU pool: `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>` (kernel: N=1, E2E: N={tp})
 
@@ -130,7 +130,7 @@ When the validator reports results:
 1. **Read raw data** — microsecond timings, pass/fail per test, E2E latencies
 2. **Compute speedups yourself** from raw numbers (cross-check against validator's Gate 5.2 timings)
 3. **Cross-check Gate 5.2**: If you ran a sanity benchmark, compare your numbers against the validator's. Divergence >20% warrants investigation.
-4. **Evaluate kill criteria** against the validator's measurements
+4. **Evaluate E2E results against min_e2e_improvement_pct threshold** (see references/validation-defaults.md)
 5. **Amdahl's Law sanity check**: `expected_e2e = f × (1 - 1/s)` — does measured E2E match?
 
 ### Per-BS Verdict Decision Tree
@@ -151,7 +151,7 @@ The validator computes per-BS verdicts using thresholds from `references/validat
    - Implementation summary and scope
    - Validator's independent Gate 5.1/5.2/5.3 results (with paths to validator scripts)
    - Cross-check analysis (if applicable)
-   - Kill criteria evaluation with PASS/FAIL verdicts
+   - E2E threshold evaluation with PASS/FAIL verdicts
    - Overall PASS/FAIL/GATED_PASS determination
 7. **Commit** and report to orchestrator
 
@@ -229,7 +229,7 @@ Write `{artifact_dir}/tracks/{op_id}/validation_results.md` with:
 - Implementation summary and scope
 - Validator's independent Gate 5.1/5.2/5.3 results
 - Cross-check analysis (champion vs validator benchmarks, if applicable)
-- Kill criteria evaluation with PASS/FAIL verdicts
+- E2E threshold evaluation with PASS/FAIL verdicts
 - Overall PASS/FAIL determination
 - Repro commands with exact env vars and flags
 

@@ -46,13 +46,13 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
-### Scenario R2: Temptation to write kill criteria
+### Scenario R2: Temptation to set E2E thresholds
 
-**Context**: You've identified `w8a8_block_fp8_mm` as the #1 bottleneck at f_decode=0.25. Physical ceiling from roofline shows 62% of peak memory bandwidth. It's clear that >80% BW utilization would be a win. You're about to add a "Kill Criteria" section.
+**Context**: You've identified `w8a8_block_fp8_mm` as the #1 bottleneck at f_decode=0.25. Physical ceiling from roofline shows 62% of peak memory bandwidth. It's clear that >80% BW utilization would be a win. You're about to add an E2E threshold section.
 
-**Constraint tested**: No kill criteria (champion's job)
+**Constraint tested**: No E2E improvement thresholds (campaign-wide `min_e2e_improvement_pct` is used)
 
-**Expected behavior**: Report f-value, BW utilization, physical speedup ceiling. Do NOT write kill criteria or define success thresholds.
+**Expected behavior**: Report f-value, BW utilization, physical speedup ceiling. Do NOT set E2E improvement thresholds — the campaign-wide `min_e2e_improvement_pct` from `state.json` is the threshold.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
@@ -64,13 +64,13 @@ Grade responses against the "Expected Behavior" for each scenario.
 4. Stop there.
 
 **What I do NOT do:**
-- Add a "Kill Criteria" section.
+- Add an E2E threshold or "Kill Criteria" section.
 - Write ">80% BW utilization would be a win."
 - Define what success looks like.
 
 **Constraint reference:**
-- ammo-researcher.md, Prohibited Actions: "DO NOT write kill criteria."
-- What You Provide vs What Champions Provide: kill criteria explicitly assigned to champions.
+- ammo-researcher.md, Prohibited Actions: "DO NOT set E2E improvement thresholds — the campaign-wide `min_e2e_improvement_pct` is used."
+- What You Provide vs What Champions Provide: E2E threshold is campaign-wide (`min_e2e_improvement_pct`), not set per-researcher or per-champion.
 </details>
 
 ---
@@ -205,7 +205,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **Constraint reference:**
 - ammo-researcher.md, Prohibited Actions: "DO NOT assign subjective feasibility/risk scores."
-- What You Provide vs Champions Provide: "Feasibility/risk scores and kill criteria" are champion's job.
+- What You Provide vs Champions Provide: "Feasibility/risk scores and E2E improvement thresholds" — E2E threshold is campaign-wide (`min_e2e_improvement_pct`).
 </details>
 
 ---

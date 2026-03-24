@@ -219,7 +219,7 @@ After the final round:
 
 The summary includes: per-candidate scores, rationale for selection, and any conceded weaknesses that Stage 4 implementation must address.
 
-Flag proposals with kill criteria that imply per-BS differentiated impact (e.g., M<=32 kernel specialization, decode-only path). These are candidates for `GATED_PASS` and should be noted in `summary.md` so Stage 4-5 implementers are prepared for crossover probing.
+Flag proposals with per-BS differentiated impact (e.g., M<=32 kernel specialization, decode-only path). These are candidates for `GATED_PASS` and should be noted in `summary.md` so Stage 4-5 implementers are prepared for crossover probing.
 
 ### Post-Selection Evidence Gate
 

@@ -228,7 +228,7 @@ This technique is motivated by SonicMoE's router top-k optimization for small `K
 - `nsys` kernel ranking: router/top‑k kernel time decreases materially, or a slow `torch.topk` kernel disappears.
 - End-to-end: any win is limited by MoE share `f` (use `references/e2e-delta-math.md` to sanity-check expected delta).
 
-**Kill criteria**
+**Stop-ship signals**
 - No MoE GPU kernel-time reduction in the target buckets under CUDA graphs.
 - Any correctness mismatch beyond declared tolerances (especially routing weights semantics).
 - You needed to broaden the dispatch envelope so far that maintenance risk dominates.
@@ -264,7 +264,7 @@ Baseline pattern (common):
 - Activation/quant kernels disappear or shrink substantially; total MoE GPU kernel time decreases under CUDA graphs.
 - W1 kernel may get slightly slower, but total should improve; validate with both `nsys` and a small `ncu` spot-check for spills/occupancy regression.
 
-**Kill criteria**
+**Stop-ship signals**
 - W1 kernel slows enough (regs/spills/occupancy drop) that total MoE kernel time does not improve.
 - Any quantization metadata mismatch (silent accuracy loss risk).
 - Baseline already had the epilogue fused (no remaining work to delete).

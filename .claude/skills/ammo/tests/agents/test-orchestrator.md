@@ -390,7 +390,7 @@ State:
 ```json
 {
   "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2, "diminishing_returns_threshold_pct": 3, "shipped_optimizations": ["op001", "op003"], "cumulative_e2e_speedup": 1.25 }
+  "campaign": { "status": "active", "current_round": 2, "min_e2e_improvement_pct": 3, "shipped_optimizations": ["op001", "op003"], "cumulative_e2e_speedup": 1.25 }
 }
 ```
 Context: Re-profiling done. New top bottleneck = 2.1% of decode latency (below 3% threshold).
@@ -426,7 +426,7 @@ State:
 ```json
 {
   "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2, "diminishing_returns_threshold_pct": 3, "rounds": [{"round_id": 1, "shipped": ["op001"]}, {"round_id": 2, "shipped": []}] }
+  "campaign": { "status": "active", "current_round": 2, "min_e2e_improvement_pct": 3, "rounds": [{"round_id": 1, "shipped": ["op001"]}, {"round_id": 2, "shipped": []}] }
 }
 ```
 Context: Round 2 had no passing candidates. EXISTING profiling shows top bottleneck at 8.5%.

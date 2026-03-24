@@ -41,7 +41,7 @@ The debate has a proposal phase followed by debate rounds. The main session (mod
 - Micro-experiment result: at least one empirical data point — see Evidence Tiers for what qualifies at each tier
 - Feasibility math: expected kernel speedup derived from YOUR micro-experiment, NOT from unverified estimates
 - Expected E2E impact: `f × kernel_speedup` where both factors have provenance
-- Kill criteria: what threshold defines failure. Kill criteria should specify per-BS ranges when the optimization is expected to benefit only a subset of target batch sizes. Example: `'>=3% E2E at BS<=8, no regression (>=-0.5%) at BS=32'`
+- E2E threshold: The campaign-wide `min_e2e_improvement_pct` threshold applies (see `references/validation-defaults.md`). Do NOT invent per-optimization thresholds.
 - Kernel Code Scope: specific kernel files to create/modify, language (CUDA/Triton/CUTLASS), estimated LOC — demonstrates this is custom kernel work
 - Micro-Experiment Cache Audit: warm/cold cache testing for BW-bound kernels, L2-busting for fusion proposals (see `references/debate-rules.md`)
 

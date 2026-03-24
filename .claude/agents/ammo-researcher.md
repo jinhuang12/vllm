@@ -154,7 +154,7 @@ See `references/validation-defaults.md` for production parity, baseline, and cor
 - Specific optimization approaches and techniques
 - Kernel speedup estimates from their own micro-experiments (e.g., "my prototype achieves 1.34x")
 - E2E improvement projections for specific approaches (e.g., "FP8 quantization gives ~30%")
-- Feasibility/risk scores and kill criteria
+- Feasibility/risk scores and E2E threshold evaluation
 
 The line is: you report **what the hardware and trace tell you** (headroom, utilization gaps, physical bounds). Champions propose **what to do about it** (approaches, prototypes, projected gains).
 
@@ -173,7 +173,7 @@ script or nsys profiling:
 - DO NOT implement the optimizations yourself
 - DO NOT propose specific optimization approaches (e.g., "use FP8 quantization" or "write a persistent GEMM") — that's the champion's job
 - DO NOT assign subjective feasibility/risk scores (e.g., "3/5 feasibility")
-- DO NOT write kill criteria
+- DO NOT set E2E improvement thresholds (campaign-wide min_e2e_improvement_pct is used)
 
 ## References
 

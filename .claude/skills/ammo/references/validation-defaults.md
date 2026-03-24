@@ -8,6 +8,7 @@ Use this as the **default** guidance for Validation Stage (Stage 5) validation a
 - Default correctness tolerances (starting points)
 - Default kernel perf gate (Stage 5.2)
 - Default end-to-end gate (Stage 5.3)
+- **Minimum E2E improvement threshold** (campaign-wide viability gate)
 - Required reporting checklist for `validation_results.md`
 
 ---
@@ -244,7 +245,27 @@ When the track verdict is `GATING_REQUIRED`:
 6. If re-validation passes: track status = `GATED_PASS`
 7. If re-validation fails or gating infeasible: track status = `FAIL` (one gating attempt per track)
 
-Target batch sizes are defined per optimization in the kill criteria. Use `references/e2e-delta-math.md` to set realistic expectations for E2E delta given component share `f`.
+Target batch sizes are defined in `target.json`. Use `references/e2e-delta-math.md` to set realistic expectations for E2E delta given component share `f`.
+
+## Minimum E2E Improvement Threshold
+
+All optimization candidates must meet a minimum expected E2E improvement to be worth pursuing. This single threshold replaces per-optimization ad-hoc criteria.
+
+**Default**: `min_e2e_improvement_pct: 1.0` (configurable in `state.json` and `target.json`)
+
+### Where It's Checked
+
+| Decision Point | Check | Deflation Applied? | Rationale |
+|---------------|-------|-------------------|-----------|
+| **Pre-debate (campaign stop)** | `max(f_values) < threshold` | No | Amdahl's ceiling is a physical bound, not an estimate |
+| **Post-debate (candidate gate)** | `max(deflated_e2e_projections) < threshold` | Yes | Champion speedup estimates are systematically optimistic |
+| **Post-validation (GATED_PASS)** | At least one BS shows E2E improvement ≥ threshold | No | Per-BS verdict system handles regression classification |
+
+**Pre-debate/campaign-stop math**: If the top bottleneck's share of decode latency (`f`) is less than `min_e2e_improvement_pct`, even complete elimination of that component cannot yield the minimum improvement (Amdahl's Law). No deflation — this is physics.
+
+**Post-debate math**: `deflated_e2e = f × (1 - 1/s) / e2e_deflation_factor`. If no candidate's deflated E2E exceeds the threshold, none are worth implementing.
+
+**GATED_PASS rule**: An optimization that benefits some batch sizes but regresses others is still worth pursuing if at least one BS shows E2E improvement ≥ `min_e2e_improvement_pct`.
 
 ## Required reporting checklist for `{artifact_dir}/validation_results.md`
 
