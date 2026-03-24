@@ -148,17 +148,57 @@ Gate 5.2 Results:
 - Raw JSON path: {path}
 ```
 
-### Gate 5.3: E2E Sweep
+### Gate 5.3a: Kernel Execution Proof (nsys)
+
+**Run BEFORE the E2E measurement sweep.** This confirms the optimized kernel actually dispatches under production conditions. If it doesn't, skip Gate 5.3b entirely — there's no point measuring E2E latency for a kernel that isn't running.
+
+The champion provides the expected kernel name(s) in their validation handoff message.
+
+```bash
+# Step 1: Minimal nsys proof run (~85s for 4B, ~4.5min for 70B)
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus {tp}) && \
+CUDA_VISIBLE_DEVICES=$CVD \
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --labels opt \
+  --nsys-profile \
+  --nsys-output-len 2 \
+  --nsys-num-iters 1 \
+  --out-name kernel_proof
+
+# Step 2: Extract kernel names from the trace
+nsys stats --report cuda_gpu_kern_sum --format csv \
+  {artifact_dir}/kernel_proof/nsys/opt_bs1.nsys-rep
+```
+
+Check the `nsys stats` output for the expected kernel name. Report:
+
+```
+Gate 5.3a: Kernel Execution Proof
+- nsys-rep: {path}
+- Expected kernel: "{name}" -> FOUND ({N} invocations) / NOT FOUND
+- Status: PASS / FAIL
+```
+
+**If FAIL**: Stop. Do not run Gate 5.3b. Report to champion: "Optimized kernel '{name}' not found in nsys trace. The optimization is not activating under production conditions (CUDA graphs + torch.compile). Gate 5.3 is INCONCLUSIVE."
+
+**Note**: The nsys proof run uses `--nsys-output-len 2 --nsys-num-iters 1` to minimize cost. Its latency numbers are NOT valid for performance comparison — ignore them. The only output that matters is the `.nsys-rep` file.
+
+### Gate 5.3b: E2E Sweep
+
+**Only runs after Gate 5.3a passes.**
 
 Run the sweep script:
 ```bash
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus {tp}) && \
+CUDA_VISIBLE_DEVICES=$CVD \
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
   --artifact-dir {artifact_dir} --labels opt
 ```
 
 Report:
 ```
-Gate 5.3 Results:
+Gate 5.3b Results:
 - Per-batch-size latencies (ms):
   BS={}: avg_latency={}, p50={}, p99={}
   ...
@@ -170,7 +210,7 @@ Gate 5.3 Results:
 
 Report deltas in milliseconds, not percentages. The champion interprets significance.
 
-### Per-BS Tiered Verdict (Gate 5.3 Extension)
+### Per-BS Tiered Verdict (Gate 5.3b Extension)
 
 After running E2E benchmarks at all campaign batch sizes:
 
@@ -212,13 +252,17 @@ After all three gates, send one comprehensive report:
 ### Gate 5.2: Kernel Benchmarks (Raw Timings)
 [results]
 
-### Gate 5.3: E2E Sweep
+### Gate 5.3a: Kernel Execution Proof (nsys)
+[results]
+
+### Gate 5.3b: E2E Sweep
 [results]
 
 ### Files Written
 - validator_tests/test_correctness.py
 - validator_tests/benchmark_kernel.py
 - validator_tests/gate_5_2_results.json
+- kernel_proof/nsys/
 - validator_tests/gate_5_3_sweep/
 ```
 
@@ -243,7 +287,7 @@ After completing Gates 5.1/5.2/5.3, run these additional DA checks before sendin
 
 2. **CROSS-TRACK AWARENESS**: Read `state.json` `parallel_tracks`. If other tracks exist with C++ changes (`csrc/`) and THIS track is Python-only, FLAG: ".so contamination risk — this track may have inherited another track's compiled C++ changes via the worktree."
 
-3. **KERNEL-TO-E2E COHERENCE**: If your Gate 5.2 shows meaningful kernel speedup (>1.1x) but Gate 5.3 E2E improvement is within noise (<1%), FLAG: "Kernel is faster but E2E is not — the optimized code path may not be executing during E2E. Investigate whether the optimization activates under production conditions."
+3. **KERNEL-TO-E2E COHERENCE**: If your Gate 5.2 shows meaningful kernel speedup (>1.1x) but Gate 5.3b E2E improvement is within noise (<1%), FLAG: "Kernel is faster but E2E gain is small — investigate whether f-value is lower than expected." (Note: Gate 5.3a already confirms the kernel dispatches, so this is likely an Amdahl's Law effect, not a dispatch failure.)
 
 4. **SCOPE ADHERENCE**: Read `{artifact_dir}/debate/summary.md` for the planned scope of this op_id. Compare against files created/modified in the worktree (`git diff --name-only main`). If planned components were omitted, check whether the champion documented descoping rationale. If not, FLAG.
 

@@ -106,10 +106,15 @@ Implementation committed at {sha}. Ready for independent validation.
 - Target batch sizes: {batch_sizes from target.json}
 - GPU pool: `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>` (kernel: N=1, E2E: N={tp})
 
-Run all three gates independently:
+Kernel proof info (for Gate 5.3a nsys verification):
+- expect_kernel: "{optimized_kernel_function_name}"
+  (Triton = Python function name, CUDA C++ = kernel function name)
+
+Run all gates independently:
 - Gate 5.1: Write YOUR OWN correctness tests
 - Gate 5.2: Write YOUR OWN benchmark script from the template
-- Gate 5.3: Run the E2E sweep script
+- Gate 5.3a: nsys kernel execution proof (run BEFORE 5.3b — skip 5.3b if kernel not found)
+- Gate 5.3b: E2E sweep
 
 Report all raw results back to me.
 """)

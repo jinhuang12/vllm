@@ -208,7 +208,28 @@ Reporting requirements:
 
 ## Default end-to-end gate (Stage 5.3)
 
-Run E2E under identical knobs and capture/compile settings.
+### Gate 5.3a: Kernel Execution Proof (NON-NEGOTIABLE)
+
+Before the E2E measurement sweep, the validator runs a minimal nsys-profiled run to confirm the optimized kernel actually dispatches under production conditions (CUDA graphs + torch.compile).
+
+```bash
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --labels opt \
+  --nsys-profile --nsys-output-len 2 --nsys-num-iters 1 \
+  --out-name kernel_proof
+```
+
+Then verifies via `nsys stats --report cuda_gpu_kern_sum` that the expected kernel name (provided by champion) appears in the GPU trace.
+
+- **If kernel found**: PASS. Proceed to Gate 5.3b.
+- **If kernel NOT found**: FAIL. Do NOT run Gate 5.3b. E2E results would be inadmissible — the optimization is not activating.
+- **Latency numbers from this run are INVALID** (nsys overhead). Only the `.nsys-rep` trace matters.
+
+Cost: ~85s (4B/L40S), ~4.5 min (70B/8xH100).
+
+### Gate 5.3b: E2E Measurement Sweep
+
+Run E2E under identical knobs and capture/compile settings. **Only runs after Gate 5.3a passes.**
 
 Default iteration counts:
 - **Profiling** (Stage 1): `--num-iters 1` (keep traces small)
@@ -289,8 +310,7 @@ Include:
 4) **Kernel perf (production parity)**
 - bucket set and capture mode
 - baseline vs optimized per-bucket µs table
-- fastpath evidence that optimized kernels executed (enablement log line or
-  `require_patterns` match from the sweep script's fastpath_evidence config)
+- Gate 5.3a kernel execution proof (nsys trace confirming optimized kernel dispatched)
 
 5) **E2E latency**
 - baseline vs optimized per-bucket table
