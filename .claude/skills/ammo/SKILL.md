@@ -322,7 +322,7 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 
 Inline DA verification (integrated into helper agents — replaces non-functional Stop hook DAs for team members):
 - **ammo-delegate** → After Phase 0 proposal and each round's argument: 7-point DA audit (custom kernel mandate, evidence tier verification with claim-evidence matching, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target, BS-gated sanity). Writes audit files to `debate/delegate_work/` for orchestrator visibility.
-- **ammo-impl-validator** → After Gates 5.1/5.2/5.3: 5-point DA section in validation report (Amdahl sanity, cross-track awareness, kernel-to-E2E coherence, scope adherence, Gate 5.2 cross-check).
+- **ammo-impl-validator** → After Gates 5.1/5.2/5.3: 5+ point DA section in validation report (Amdahl sanity, cross-track awareness, kernel-to-E2E coherence, scope adherence, Gate 5.2 cross-check; plus conditional GATED_PASS checks).
 - **ammo-researcher** Stop → DA checks for ungrounded claims (subagent — Stop hooks work correctly).
 
 ## State Management
@@ -457,7 +457,12 @@ Run, don't modify:
 | Code templates | `references/code-templates.md` |
 | Debate scoring | `references/debate-scoring-rubric.md` |
 | Validator troubleshooting | `references/validator-troubleshooting.md` |
-| DA audit checklist | `references/da-audit-checklist.md` |
+| Debate-phase agent rules | `references/debate-rules.md` |
+| Implementation-phase agent rules | `references/impl-track-rules.md` |
+| GPU reservation pattern | `references/gpu-pool.md` |
+| Teammate messaging patterns | `references/agent-responsiveness-guide.md` |
+
+**Architectural boundary**: Agent files reference `references/*.md` for domain rules. Orchestration docs (`orchestration/*.md`) are orchestrator-only — agents do not read them directly.
 
 ## Orchestration Docs
 

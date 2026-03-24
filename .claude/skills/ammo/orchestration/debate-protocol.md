@@ -70,7 +70,6 @@ The mapping is stored in `state.json` at `debate.delegation.champion_delegate_ma
 
 ### Delegate Constraints
 
-- **No GPU kernel benchmarks**: Roofline calculations, codebase research, and `ncu --query-metrics` (static) only. No kernel benchmarks that require GPU allocation — this avoids GPU contention with implementation tracks.
 - **No vLLM source modifications**: Research and analysis only.
 - **15-minute task timeout**: Champions should time-box delegate tasks. If a delegate exceeds the timeout, the champion proceeds with partial data.
 
@@ -111,7 +110,7 @@ If `debate.delegation.enabled` is `false` (default), the debate runs with champi
 
 There is no fast-track exception. Every run must go through at least Phase 0 (proposals) + 1 debate round.
 
-**No Convergence Shortcut**: Even if all champions converge on the same candidate, the minimum 2 debate rounds are mandatory. Convergence reduces critique diversity, making additional scrutiny MORE important, not less. (Rationale: c08b370fc campaign — convergence shortcut reduced scrutiny, contributing to 0% ship rate.)
+**No Convergence Shortcut**: Even if all champions converge on the same candidate, the minimum 2 debate rounds are mandatory. Convergence reduces critique diversity, making additional scrutiny MORE important, not less.
 
 ## Phase 0: Independent Proposals
 
@@ -123,20 +122,7 @@ Each champion writes:
 {artifact_dir}/debate/proposals/{champion_id}_proposal.md
 ```
 
-Required sections in the proposal file:
-
-| Section | Contents |
-|---------|----------|
-| **Candidate Specification** | What kernel/component to optimize and the proposed technique |
-| **Grounded Data** | Cite measured timings, component share `f`, bandwidth utilization from bottleneck_analysis.md |
-| **Micro-Experiment Result** | At least one empirical data point: roofline calc, ncu query, or tiny prototype (MANDATORY) |
-| **Feasibility Math** | Expected kernel speedup derived from the micro-experiment, NOT from Stage 2 |
-| **Expected E2E Impact** | `f × kernel_speedup` where both factors have provenance. If optimization is batch-size-dependent, report per-BS projections and note gating candidacy |
-| **Kill Criteria** | What threshold defines failure for this candidate. Include per-BS ranges when the optimization is expected to benefit only a subset of target batch sizes. Format: `beneficial_range: [BS_lo, BS_hi], improvement_threshold: 1.03, regression_tolerance: 0.5%` |
-| **Kernel Code Scope** | Specific kernel files to create/modify, language (CUDA/Triton/CUTLASS), estimated LOC — demonstrates this is custom kernel work |
-| **Micro-Experiment Cache Audit** | For BW-bound kernels (AI < breakeven): (1) Were both warm-cache and cold-cache times reported? (2) If warm/cold > 1.5x, was cold-cache speedup used for E2E? For fusion proposals: was the fused kernel tested under production L2 conditions (data footprint matching pipeline working set)? |
-
-**CRITICAL**: `kernel_speedup` estimates MUST come from the champion's own micro-experiment. Stage 2 does not provide speedup estimates.
+Champions write proposals per `references/debate-rules.md` (see Evidence Tiers for claim-evidence requirements, Micro-Experiment Rules for allowed/forbidden experiments, Baseline Provenance Rule for API matching, and Micro-Experiment Artifact Requirements for proof-of-execution).
 
 ### Proposal Eligibility Gate (Lead)
 
@@ -155,11 +141,11 @@ After the eligibility gate, the lead reviews proposal diversity:
 
 1. **f-value source check**: For each proposal, check whether the champion used `f_decode` (from the per-decode-step breakdown) or `f_total` (from the full trace). If the target kernel isn't in the decode breakdown, note this — the champion may be targeting prefill latency intentionally, or may have used a misleading f-value.
 
-2. **Component diversity**: If all proposals target the same component, the lead should consider whether the debate will produce useful differentiation. If not, the lead may ask one champion to explore the next-highest-`f_decode` component as an alternative. The goal is at least 2 distinct target components among the eventual winners to reduce portfolio risk.
+2. **Component diversity**: If all proposals target the same component, the lead should consider whether the debate will produce useful differentiation. If not, the lead may ask one champion to explore the next-highest-`f_decode` component as an alternative. The goal is at least 3 distinct target components among the eventual winners to reduce portfolio risk.
 
 ## Round Structure
 
-Normal minimum: **2 rounds** (no convergence shortcut). Maximum: **4 rounds**. Each round has three sequential phases.
+Normal minimum: **2 rounds**. Maximum: **5 rounds**. Each round has three sequential phases.
 
 ### Phase A: Evidence Presentation
 
@@ -171,16 +157,7 @@ Each champion writes:
 {artifact_dir}/debate/round_{N}/{op_id}_argument.md
 ```
 
-Required sections in the argument file:
-
-| Section | Contents |
-|---------|----------|
-| **Claim** | One-sentence optimization thesis |
-| **Evidence** | Profiling data, calculations, or references supporting the claim |
-| **Feasibility Math** | FLOPs/bytes analysis, register pressure, occupancy estimates |
-| **Expected E2E Impact** | Projected latency or throughput improvement with derivation |
-
-Champions **may** run micro-experiments during this phase (see Micro-Experiment Guidelines below).
+Champions write arguments per `references/debate-rules.md` (see Evidence Tiers for required evidence levels). Champions (or delegates) **must** run micro-experiments during this phase (see `references/debate-rules.md` § Micro-Experiment Rules).
 
 ### Phase B: Critique
 
@@ -197,12 +174,7 @@ Each champion writes:
 {artifact_dir}/debate/round_{N}/{op_id}_critique_{target_id}.md
 ```
 
-The critique **must** identify:
-
-1. Weaknesses in the target's feasibility math
-2. Overlooked risks (numerical stability, edge cases, memory pressure)
-3. Incorrect assumptions about hardware behavior or kernel characteristics
-4. **Hardware resource accounting**: SMEM budget, register usage, occupancy estimate, wave count at target batch sizes. If any resource exceeds the target GPU's limit, cite the specific limit and declare a hard constraint violation.
+Critiques must address: feasibility math weaknesses, overlooked risks, incorrect assumptions, and hardware resource accounting (SMEM budget, register usage, occupancy, wave count). See `references/debate-rules.md` for evidence tier requirements.
 
 ### Phase C: Rebuttal
 
@@ -214,11 +186,7 @@ Each champion responds to the critique they received and writes:
 {artifact_dir}/debate/round_{N}/{op_id}_rebuttal.md
 ```
 
-The rebuttal **must** do one or more of:
-
-- Provide counter-evidence disproving the critique
-- Concede valid points explicitly
-- Propose concrete mitigation for acknowledged weaknesses
+Rebuttals must provide counter-evidence, concede valid points explicitly, or propose concrete mitigation for acknowledged weaknesses. See `references/debate-rules.md` for evidence tier requirements.
 
 ## Communication Flow
 
@@ -231,9 +199,9 @@ The main session moderates the debate using `SendMessage`:
 
 ## Convergence Criteria
 
-Stop early (before round 4) if **either** condition is met:
+Stop early (only after exceeding minimum rounds) if **either** condition is met:
 
-1. **Clear winners**: The top 2-3 candidates have no unaddressed critiques remaining, and all other candidates have conceded material weaknesses.
+1. **Clear winners**: The top 3-4 candidates have no unaddressed critiques remaining, and all other candidates have conceded material weaknesses.
 2. **Stagnation**: Round N+1 arguments substantially repeat round N with no new evidence or counter-arguments introduced.
 
 ## Winner Selection
@@ -242,7 +210,7 @@ After the final round:
 
 1. Main session reads **all** debate artifacts across all rounds.
 2. Scores each candidate per `references/debate-scoring-rubric.md`.
-3. Selects **2-3 winners** to advance to Stage 4 parallel tracks.
+3. Selects **3-4 winners** to advance to Stage 4 parallel tracks.
 4. Writes the decision to:
 
 ```
@@ -266,90 +234,9 @@ After winner selection but BEFORE shutting down debate champions, the lead opens
 
 This gate addresses the structural gap where Champion-1 in c08b370fc identified both fatal flaws in "Late Findings" after selection was finalized, with no mechanism for action.
 
-## Micro-Experiment Guidelines
+## Debate Rules Reference
 
-### Allowed
-
-| Experiment Type | Constraint |
-|----------------|------------|
-| Roofline calculations | Pure arithmetic, no GPU required |
-| ISA inspection | `cuobjdump`, `ncu --query-metrics`, static analysis only |
-| Tiny kernel prototypes | <100 lines of code, <2 min wall-clock execution |
-| nsys single-kernel traces | One kernel invocation, existing binary only |
-| Memory layout analysis | Static analysis of tensor shapes and strides |
-| Kernel-level benchmarks | MUST use CUDA graph capture for both baseline and candidate kernels. Raw CUDA event timing without graph capture is INVALID for kernel speedup claims. See validation-defaults.md Kernel-Level Benchmark Requirements. |
-
-### Forbidden
-
-| Experiment Type | Reason |
-|----------------|--------|
-| Full-model benchmarks | Too slow, belongs in Stage 5 |
-| vLLM source modifications (except dispatch verification) | Belongs in Stage 4. **Exception**: Champions MAY run a minimal `import vllm` forward pass (no weight modifications, no training) to verify their kernel is invoked under torch.compile. This "dispatch verification" test uses existing model weights and takes <30 seconds. |
-| Model weight downloads | Too slow, too large |
-| Any experiment >2 min | Blocks debate progress |
-| Kernel benchmarks without CUDA graph capture | Inflates/deflates results due to launch overhead asymmetry (see OP-001 postmortem) |
-
-### Cache-Sensitivity Requirements (BW-Bound Kernels)
-
-For kernels identified as bandwidth-bound (AI < breakeven threshold), micro-experiments MUST report:
-1. Loop-warmed time (100+ iterations on same tensors)
-2. Cold-cache time (single iteration after L2 flush or fresh random tensors)
-
-If the warm/cold ratio exceeds 1.5x, the speedup is cache-dependent. Use the cold-cache result for E2E projections and flag this in the proposal's feasibility math.
-
-### Fusion-Specific Cache Testing
-
-For proposals that fuse multiple kernels into one, the above requirements are necessary but not sufficient:
-
-1. **Pipeline working set check**: Estimate total per-iteration working set (num_layers x per_layer_state). If this exceeds 2x the GPU's L2 cache, isolated benchmarks on small tensors overstate the fused kernel's benefit.
-2. **L2-busting methodology**: Test the fused kernel with chained distinct data totaling > 2.5x L2 cache size, forcing DRAM streaming. This simulates production L2 competition.
-3. **Report both**: Report speedup under (a) isolated warm-cache and (b) L2-busted cold conditions. If (a)/(b) > 1.5x, the E2E estimate MUST use the cold-cache speedup.
-
-### Pipeline-Level Simulation (Fusion and BW-Bound Proposals)
-
-For proposals that replace or modify kernels invoked per-layer (e.g., GEMM, normalization, activation):
-
-1. **Multi-layer benchmark**: Run the candidate kernel N times sequentially (N = num_layers or min(N, 8)) with distinct input data per invocation, totaling > 2x L2 cache size.
-2. **Launch overhead accounting**: For proposals replacing a fused/monolithic kernel with multiple separate kernels, explicitly measure and report the launch overhead (typically 2-5 us per launch under CUDA graphs). The pipeline speedup must account for this overhead.
-3. **Report pipeline speedup, not just kernel speedup**: The proposal's E2E projection must use pipeline speedup (including launch overhead and multi-layer L2 effects), not raw kernel speedup from isolated benchmarks.
-
-Proposals that report only isolated kernel speedup for per-layer optimizations have their feasibility score capped at 6/10.
-
-## Micro-Experiment Artifact Requirements
-
-Every kernel benchmark must produce:
-
-1. A `.py` script in `debate/micro_experiments/` that is independently runnable
-2. A `.log` file with: GPU device name on line 1 (`torch.cuda.get_device_name()`), kernel timing in microseconds, iteration count
-3. For hardware utilization claims: an ncu CSV or nsys stats export
-
-The `.log` file is the proof of execution. Missing log = Tier 1 (theoretical) regardless of script contents, and feasibility is capped at 3/10.
-
-## NCU Triggers
-
-ncu profiling is **optional by default** and **required only when one of these triggers fires**:
-
-### Trigger 1: Triton Register Pressure Claims
-
-**When**: Champion proposes a Triton kernel AND claims occupancy or register-count improvement as a primary benefit.
-
-**Requirement**: Run `ncu --metrics l1tex__t_sector_hit_rate.pct,launch__registers_per_thread,sm__warps_active.avg.pct_of_peak_sustained_active` on the proposed kernel prototype before Round 1 scoring.
-
-**Rationale**: Register pressure in Triton's code generator cannot be estimated analytically — you must measure it.
-
-### Trigger 2: Hardware Metric Claims Require Measurement
-
-**When**: Any champion cites a specific hardware metric (achieved bandwidth GB/s, occupancy %, SMEM utilization, cache hit rate) as supporting evidence.
-
-**Requirement**: The cited metric must come from an ncu or nsys measurement, not a roofline calculation. If purely theoretical, the champion must label it as an estimate and cannot cite it as achieved.
-
-### Trigger 3: BW Assumption Divergence Escalation
-
-**When**: A champion's roofline calculation assumes an achieved bandwidth that diverges from nsys-derived achieved BW (from Stage 2 bottleneck_analysis.md) by more than 2x.
-
-**Requirement**: Before the proposal advances to scoring, require ncu verification of the actual achieved BW. The corrected BW value replaces the assumption in the Amdahl calculation.
-
-**Governance**: ncu mandatory requirements are limited to these 3 triggers. No new mandatory trigger may be added without a documented failure mode from 3+ campaigns.
+Micro-experiment guidelines, artifact requirements, baseline provenance rules, and NCU triggers are defined in `references/debate-rules.md`. Champions and delegates must read this reference. The lead uses NCU Trigger 4 (Baseline BW Discrepancy) during the eligibility gate.
 
 ## Teardown (Post-Debate)
 
@@ -416,7 +303,7 @@ When running as an overlapped debate during Stages 4-5:
 
 2. **Artifact paths MUST use campaign-round scoping**: `debate/campaign_round_{N+1}/`. This is already enforced by the debate gate hook for round 2+, and remains enforced for overlapped debates.
 
-3. **Micro-experiments are CPU-only during overlap**: Since GPUs are allocated to implementation tracks, debate champions are limited to roofline calculations, ISA inspection, and `ncu --query-metrics` (static analysis). The existing delegate constraint (no GPU kernel benchmarks) already covers this.
+3. **GPU access during overlap**: Debate champions may run GPU micro-benchmarks via the pool (`--num-gpus 1`). If the pool is exhausted, the reserve call blocks — keep experiments brief to minimize contention with implementation tracks. Debate delegates remain restricted to static analysis (no GPU kernel benchmarks). See `references/gpu-pool.md` for the reservation pattern.
 
 4. **Phase timing may be longer**: The orchestrator interleaves debate moderation with implementation monitoring. Debate phases may take longer to start because the orchestrator is busy gating implementation results. Champions should NOT assume a phase will start within any specific time window.
 

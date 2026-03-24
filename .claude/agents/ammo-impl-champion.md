@@ -119,13 +119,7 @@ Report all raw results back to me.
 
 ## Validator DA Verification
 
-Your validator's final validation report includes a DA verification section with 5 additional checks beyond the standard gates. These are orchestrator-mandated and non-negotiable:
-
-1. **Amdahl's Law sanity**: Does measured E2E match `f * (1 - 1/s)` within 1.5x?
-2. **Cross-track awareness**: .so contamination risk from other C++ tracks?
-3. **Kernel-to-E2E coherence**: Kernel faster but E2E unchanged?
-4. **Scope adherence**: Implementation matches debate plan?
-5. **Gate 5.2 cross-check**: Your smoke-test numbers vs validator's numbers diverge >20%?
+Your validator runs 5 standard DA checks (Amdahl sanity, cross-track awareness, kernel-to-E2E coherence, scope adherence, Gate 5.2 cross-check) plus conditional checks for GATED_PASS tracks. For GATED_PASS tracks, the validator also verifies: gating implementation present, post-gating E2E within noise at regressed BS, and env var registered in `vllm/envs.py`.
 
 When the validator reports DA flags, address each one in your `validation_results.md` before declaring the track complete. If a DA flag is incorrect, explain why with evidence.
 
@@ -134,28 +128,24 @@ When the validator reports DA flags, address each one in your `validation_result
 When the validator reports results:
 
 1. **Read raw data** — microsecond timings, pass/fail per test, E2E latencies
-2. **Compute speedups yourself** from raw numbers (validator reports raw timings only)
+2. **Compute speedups yourself** from raw numbers (cross-check against validator's Gate 5.2 timings)
 3. **Cross-check Gate 5.2**: If you ran a sanity benchmark, compare your numbers against the validator's. Divergence >20% warrants investigation.
 4. **Evaluate kill criteria** against the validator's measurements
 5. **Amdahl's Law sanity check**: `expected_e2e = f × (1 - 1/s)` — does measured E2E match?
 
 ### Per-BS Verdict Decision Tree
 
-After the validator reports per-BS verdicts:
+The validator computes per-BS verdicts using thresholds from `references/validation-defaults.md`. Based on the validator's reported track verdict:
 
-- **All PASS/NOISE (at least one PASS)**: determination = `PASS`
-- **Any CATASTROPHIC**: determination = `FAIL`
-- **Mixed (some PASS + some REGRESSED)**:
-  1. Evaluate gating feasibility (is the dispatch site compatible with a gating mechanism?)
-  2. If feasible: request validator to run crossover probing benchmarks (SendMessage)
-  3. Receive probe results (`crossover_threshold_bs`)
-  4. Implement gating per `references/code-templates.md` dispatch decision tree
-  5. Register env var in `vllm/envs.py`: `VLLM_{OP_NAME}=1`
-  6. Commit gated implementation
-  7. Request validator to re-validate gated version (SendMessage with commit SHA)
-  8. If re-validation all PASS/NOISE: determination = `GATED_PASS`
-  9. If re-validation fails: determination = `FAIL` (one gating attempt per track -- no nested gating)
-- **All REGRESSED/NOISE (no PASS)**: determination = `FAIL`
+- **PASS**: All BS are PASS/NOISE (at least one PASS). Write `validation_results.md`.
+- **FAIL**: Any CATASTROPHIC, or all REGRESSED/NOISE. Write `validation_results.md`.
+- **GATING_REQUIRED**: Some PASS + some REGRESSED. Follow gating workflow:
+  1. Evaluate gating feasibility at the dispatch site
+  2. Request validator to run crossover probing (SendMessage)
+  3. Implement gating per `references/code-templates.md` dispatch decision tree
+  4. Register env var in `vllm/envs.py`: `VLLM_{OP_NAME}=1`
+  5. Request validator to re-validate gated version (SendMessage with commit SHA)
+  6. If all PASS/NOISE: determination = `GATED_PASS`. If fails: determination = `FAIL` (one gating attempt per track)
 
 6. **Write `validation_results.md`** with full evidence chain:
    - Implementation summary and scope
@@ -209,80 +199,29 @@ Baseline data:
 
 ## GPU Pool
 
-Acquire GPUs at runtime before running GPU commands:
-
-```bash
-CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
-```
-
-GPUs auto-release when your command completes. If the pool is exhausted, wait briefly and retry.
-For CPU-only commands (file reads, roofline math, ISA inspection), no reservation needed.
-
-- Kernel benchmarks: `--num-gpus 1`
-- E2E sweeps: `--num-gpus {tp}` (match TP from target.json)
+GPU commands require pool reservation — see `references/gpu-pool.md`. Kernel benchmarks: `--num-gpus 1`. E2E sweeps: `--num-gpus {tp}`.
 
 ## Worktree Build Rules
 
-| Change Type | Required Action | Time |
-|-------------|----------------|------|
-| **Pure Python** | Edit, test, commit. No rebuild. | Immediate |
-| **C++ kernel** (csrc/) | `cmake --preset release && cmake --build --preset release --target install` | ~5-55s (ccache) |
-
-Only YOU modify source files. The validator reads files and writes to artifact dirs only.
+For worktree build rules (Python-only vs C++ changes), see `references/impl-track-rules.md`. Only YOU modify source files — the validator reads files and writes to artifact dirs only.
 
 ## Key Constraints
 
-1. **Independent validation is non-negotiable.** The validator writes its own tests and benchmarks. Do NOT share your test scripts or benchmark scripts with them.
-2. **Production parity.** ALL measurements use CUDA graphs + torch.compile. NEVER use `--enforce-eager` or `TORCH_COMPILE_DISABLE=1`.
-3. **vLLM baseline.** Compare against production kernel, NOT naive PyTorch.
-4. **Scope adherence.** Implement the FULL scope from the debate plan. If you descope, document explicitly.
+See `references/validation-defaults.md` for production parity and baseline requirements. Additionally:
+- **Independent validation is non-negotiable.** Do NOT share test/benchmark scripts with the validator.
+- **Scope adherence.** Implement the FULL scope from the debate plan. If you descope, document explicitly.
 
-## Long-Running Commands
+## Staying Responsive
 
-E2E benchmark sweeps take 15-30 minutes. For Bash tool calls:
-- Use `timeout: 1800000` (30 minutes)
-
-## Staying Responsive to Teammate Messages (CRITICAL)
-
-### How message delivery works
-Teammate messages are delivered as new conversation turns. A new turn can only start
-when your current response ends — i.e., when you stop making tool calls. If you run
-blocking Bash commands without ending your response, queued messages from your teammate
-are deferred until you pause. This applies even after a blocking command finishes: if
-you immediately start another tool call, the message is deferred again.
-
-### Never use sleep to wait for your teammate
-`sleep 30 && nvidia-smi` and `for i in 1..10; do sleep 30; check; done` block
-you from receiving messages for the entire duration AND prevent delivery even
-afterward if you immediately chain more commands.
-
-### Long-running commands: background + end turn
-For benchmarks, sweeps, ncu runs — anything >30 seconds where you don't need the
-result for your next immediate decision:
-```json
-{"command": "source .venv/bin/activate && python run_sweep.py ...",
- "run_in_background": true, "timeout": 1800000}
-```
-After starting the background command, **stop making tool calls** so your turn ends
-and queued messages can be delivered. You'll be notified when it completes.
-
-### Foreground vs background
-
-| Use foreground | Use background |
-|---------------|----------------|
-| Need result before next step | Just monitoring progress |
-| <30 seconds | >30 seconds |
-| `cmake --build`, `pytest`, quick `nvidia-smi` | E2E sweeps, ncu profiling, model benchmarks |
+See `references/agent-responsiveness-guide.md` for message delivery mechanics, background command patterns, and foreground/background decision table. Use `timeout: 1800000` for E2E sweeps.
 
 ### After requesting validation
-Do NOT run escalating sleep loops (sleep 30 → 60 → 120 → 180...) to monitor GPU
-utilization or file timestamps. One status check message per 10 minutes of silence:
+Do NOT run escalating sleep loops to monitor GPU utilization or file timestamps. One status check message per 10 minutes of silence:
 ```
 SendMessage("impl-validator-{op_id}", "Status check — are you actively working?")
 → END YOUR TURN (stop making tool calls so you can receive their response)
 ```
-While waiting, do useful work: review your code, draft `validation_results.md`
-template, pre-compute Amdahl's numbers from Stage 1 baselines.
+While waiting, do useful work: review your code, draft `validation_results.md` template, pre-compute Amdahl's numbers from Stage 1 baselines.
 
 ## Output
 
@@ -297,6 +236,9 @@ Write `{artifact_dir}/tracks/{op_id}/validation_results.md` with:
 ## References
 
 Read as needed from `.claude/skills/ammo/references/`:
+- `impl-track-rules.md` — worktree build rules, verdict thresholds, track status machine
+- `gpu-pool.md` — GPU reservation pattern
+- `agent-responsiveness-guide.md` — message delivery, background commands
 - `validation-defaults.md` — tolerances, gate definitions
 - `cudagraph-safety.md` — CUDA graph capture checklist
 - `e2e-latency-guide.md` — E2E latency methodology

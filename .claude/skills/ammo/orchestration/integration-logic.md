@@ -23,8 +23,8 @@ After all parallel tracks complete in Stage 5, the main session determines how t
 For each passing track, compute the file diff against main:
 
 ```bash
-git diff --name-only main...ammo/{op_id}
-```
+# Worktree branch is named like: '{op_id}-{desc}' (i.e. op002-triton-gemm-silu-fusion)
+git diff --name-only main...{op_id}-{desc}
 
 ### Step 2: Classify Overlap
 
@@ -37,8 +37,8 @@ Example with two passing tracks:
 
 ```bash
 # Get changed files for each track
-FILES_OP001=$(git diff --name-only main...ammo/op001)
-FILES_OP002=$(git diff --name-only main...ammo/op002)
+FILES_OP001=$(git diff --name-only main...op001-{desc})
+FILES_OP002=$(git diff --name-only main...op002-{desc})
 
 # Check for overlap
 comm -12 <(echo "$FILES_OP001" | sort) <(echo "$FILES_OP002" | sort)
@@ -55,8 +55,8 @@ When multiple passing candidates modify **different components**, create an inte
 git checkout -b ammo/integration main
 
 # Cherry-pick each passing track
-git cherry-pick ammo/{op_id_1}
-git cherry-pick ammo/{op_id_2}
+git cherry-pick {op_id_1}
+git cherry-pick {op_id_2}
 
 # Run correctness tests for both components
 pytest tests/path/to/component_1_tests.py

@@ -20,72 +20,61 @@ Your assigned champion is identified in your spawn prompt (e.g., "Your champion 
 
 ## GPU Pool
 
-Acquire GPUs at runtime before running GPU commands:
-
-```bash
-CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
-```
-
-GPUs auto-release when your command completes. If the pool is exhausted, wait briefly and retry.
-For CPU-only commands (file reads, roofline math, ISA inspection), no reservation needed.
-
-Use `--num-gpus 1` for static analysis commands (e.g., `ncu --query-metrics`).
+GPU commands require pool reservation — see `references/gpu-pool.md`. Use `--num-gpus 1` for static analysis commands (e.g., `ncu --query-metrics`). No GPU kernel benchmarks — delegates are restricted to static analysis.
 
 ## Responsibilities
 
-### Profiling Data Extraction
-- Read and parse `{artifact_dir}/bottleneck_analysis.md` to extract component shares (f-values), bandwidth utilization, kernel timings
-- Distinguish `f_decode` (per-decode-step breakdown) from `f_total` (full trace) — always report both when available
-- Parse nsys CSV/SQLite exports to compute kernel-level statistics
-- Cross-reference kernel names to vLLM source code locations (`vllm/`, `csrc/`)
+Do whatever the champion needs. Common tasks include:
 
-### Codebase Research
-- Find kernel implementations referenced in profiling data
-- Trace call paths from Python model code to CUDA/Triton kernels
-- Identify existing optimizations, dispatch conditions, and enable flags
-- Report file paths with line numbers
+### Research & Analysis
+- Trace call paths for target kernels (primary AND secondary dispatch paths)
+- Audit dispatch conditions (dtype guards, shape guards, env flags) with file:line refs
+- Extract profiling data and f-values from bottleneck_analysis.md
+- Compute exact tensor shapes per batch size from model config
+- Search git history for prior optimization attempts
+- Look up unfamiliar code patterns, utility functions, callers
+- Compute Amdahl's ceiling and breakeven speedup from f-values
 
-### Micro-Experiments
-- Write roofline model calculations (pure arithmetic, no GPU required)
-- Analyze ISA using `cuobjdump` or static analysis
-- Write tiny kernel prototypes (<100 lines of code, <2 min wall-clock execution)
-- Run `ncu --query-metrics` for occupancy estimates (single kernel, static analysis only)
-- Memory layout analysis (stride calculations, bank conflict checks)
+### Profiling
+- Run `ncu --set full` on baseline kernels for roofline analysis
+- Capture occupancy, memory BW utilization, compute utilization, SMEM usage
+- Profile related kernels for comparison points
 
-### Cache-Sensitivity Testing (BW-Bound Kernels)
-If your champion asks you to test a bandwidth-bound kernel (AI < breakeven threshold), report both:
-- Loop-warmed time (100+ iterations on same tensors)
-- Cold-cache time (single iteration after L2 flush or fresh random tensors)
-- Warm/cold ratio and whether the speedup is cache-dependent (>1.5x ratio)
+### Script Execution
+- Run scripts the champion requests (test harnesses, profiling tools, data extraction)
+- Report results back promptly
 
-### Cache-Sensitivity Audit (On Champion Request)
+### Proactive Intelligence
+Don't just wait for assignments. While working, flag things you notice:
+- Dispatch conditions that could prevent the optimization from activating
+- Edge cases in tensor shapes that could break SMEM budgets
+- Prior failed attempts at similar optimizations
+- Code patterns that suggest integration risks
 
-When your champion requests a cache-sensitivity audit, follow this checklist:
-1. **Roofline AI**: Compute arithmetic intensity = FLOPs / bytes_transferred for the target kernel.
-2. **Breakeven AI**: Look up peak compute (TFLOPS) and peak BW (GB/s) for the target GPU from `references/gpu-configs.md`. Breakeven = peak_compute / peak_BW.
-3. **BW-bound?**: Is AI < breakeven? If yes, the kernel is bandwidth-bound and cache-sensitive.
-4. **Pipeline working set**: Estimate num_layers x per_layer_state_bytes. Compare against GPU L2 cache. If working set > 2x L2, isolated benchmarks with small data will overstate gains.
-5. **Warm/cold verification**: If micro-experiment data exists, check warm vs cold ratio. If > 1.5x, recommend cold-cache speedup for E2E projections.
-6. Write findings to `{artifact_dir}/debate/delegate_work/{delegate_id}_cache_audit.md`.
+Use the ADVISORY format for proactive findings:
+```
+ADVISORY: [one-sentence summary]. Details at {path}.
+```
+Write detailed findings to `{artifact_dir}/debate/delegate_work/{delegate_id}_prep.md`.
 
 ## Structured Result Format
 
 When reporting results to your champion, use this structure:
 
 ```
-## Delegate Research Report: {task_description}
+## Delegate Task Report: {task_description}
 
 ### Target
 - Kernel: {kernel_name}
 - Source: {file_path}:{line_number}
 
-### Profiling Data
+### Profiling Data (if applicable)
 - f_decode: {value} (from per-decode-step breakdown)
 - f_total: {value} (from full trace)
 - Bandwidth utilization: {achieved_bw} / {peak_bw} = {pct}%
 - Kernel call frequency: {N} calls per decode step
 
-### Micro-Experiment
+### Micro-Experiment (if applicable)
 - Methodology: {description}
 - CUDA graphs used: {yes/no}
 - Result: {timing or speedup}
@@ -109,10 +98,9 @@ When reporting results to your champion, use this structure:
 2. **Scope**: Research and analysis only. Do NOT implement kernel optimizations — that is for ammo-impl-champion + ammo-impl-validator in Stages 4-5.
 3. **No sub-agents**: You cannot spawn sub-agents. If a task needs decomposition, tell your champion and await guidance.
 4. **No vLLM source modifications**: Do not modify any files in `vllm/`, `csrc/`, or any production code.
-5. **No GPU kernel benchmarks**: Do not run CUDA kernel benchmarks that require GPU allocation. Roofline calculations, ISA inspection, and `ncu --query-metrics` (static analysis) are allowed. Full kernel benchmarks are reserved for Stage 4-5 implementers.
-6. **File outputs**: Write results to `{artifact_dir}/debate/delegate_work/{delegate_id}_{task_name}.md` and micro-experiment scripts to the same directory. Report paths to your champion.
-7. **Phase scope**: You are active during Phase 0 (proposal research) and optionally Phase C (rebuttal counter-evidence). During Phase A (evidence) and Phase B (critique), wait for champion instructions -- do not act independently.
-8. **Overlapped context**: If running during implementation overlap, you share the team with implementation agents. Do not message them. Focus only on tasks from your champion.
+5. **File outputs**: Write results to `{artifact_dir}/debate/delegate_work/{delegate_id}_{task_name}.md` and micro-experiment scripts to the same directory. Report paths to your champion.
+6. **Phase scope**: You are active during Phase 0 (proposal research) and optionally Phase C (rebuttal counter-evidence). During Phase A (evidence) and Phase B (critique), wait for champion instructions -- do not act independently.
+7. **Overlapped context**: If running during implementation overlap, you share the team with implementation agents. Do not message them. Focus only on tasks from your champion.
 
 ## Communication
 
@@ -158,6 +146,11 @@ For each item, determine PASS or FAIL with specific evidence.
 
 7. **BS-GATED PROPOSAL SANITY**: If the champion's proposal mentions BS-dependent behavior (e.g., 'Triton GEMM beats cuBLAS only at M<=32'), verify: (a) the micro-experiment tested multiple BS values, (b) the kill criteria specify per-BS thresholds, (c) the feasibility math acknowledges gating may be needed.
 
+8. **BASELINE PROVENANCE** (see `debate-rules.md` § Baseline Provenance Rule): For micro-experiments that benchmark a baseline kernel:
+   - 8a. **Dispatch match**: Read the micro-experiment `.py` script. Does the baseline invoke the kernel via the same code path as production (`bottleneck_analysis.md` Section 6)? Check API call, tensor layouts (shape + strides + contiguity), and dtypes. If the baseline constructs tensors with a different layout than production or calls a different API entry point = **FAIL**.
+   - 8b. **BW cross-check**: Compare the micro-experiment's reported baseline BW against Stage 2 ncu sanity check BW (in `ncu_sanity_check_results.md` or `bottleneck_analysis.md`) for the same shape. If divergence >10%, flag: "BASELINE BW DISCREPANCY: micro-exp reports {X} GB/s vs Stage 2 {Y} GB/s for {shape}. NCU Trigger 4 applies — champion must provide launch-grid cross-reference before scoring."
+   - 8c. **Statement check**: Does the proposal explicitly state the baseline invocation (API call, tensor layouts, shape)? Missing statement = FAIL.
+
 ### Output Protocol
 
 1. **Write audit file**: `{artifact_dir}/debate/delegate_work/{delegate_id}_da_audit_{phase}.md`
@@ -183,6 +176,9 @@ Your DA findings are grounded in the orchestrator's published checklist — obje
 ## References
 
 Read as needed from `.claude/skills/ammo/references/`:
+- `debate-rules.md` — micro-experiment guidelines, evidence tiers, baseline provenance (for DA audit context)
+- `gpu-pool.md` — GPU reservation pattern and contention handling
+- `agent-responsiveness-guide.md` — message delivery patterns during long-running commands
 - `gpu-configs.md` — hardware specs for roofline models
 - `e2e-delta-math.md` — E2E improvement math (f x kernel_speedup)
 - `nsys-profiling-guide.md` — nsys commands, report exports

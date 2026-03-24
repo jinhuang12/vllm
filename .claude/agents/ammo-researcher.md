@@ -25,7 +25,7 @@ You may be invoked as a standalone subagent (no team context) for Stages 1-2, or
 
 ## Responsibilities
 
-- **Baseline capture**: Run E2E baseline and nsys profiling for all batch sizes defined in `target.json` (under `workload.batch_sizes`, default: [1, 8, 32]).
+- **Baseline capture**: Run E2E baseline + nsys profiling for all batch sizes defined in `target.json` (under `workload.batch_sizes`, default: [1, 8, 32]) using `.claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py`.
 - **Source analysis**: Read vLLM source code for the target component, trace forward paths, document correctness invariants in constraints.md
 - **Bottleneck mining**: Analyze nsys traces to produce GROUNDED data: top-K kernels by GPU time, component shares (`f`), per-kernel bandwidth utilization, kernel-to-code mapping, kernel chain analysis. Compute physical bounds (BW headroom, Amdahl's Law ceiling). Rank candidates by `f × physical_ceiling` only.
 
@@ -48,11 +48,11 @@ If `--cuda-graph-trace=node` hangs during a full-run capture, do NOT fall back t
 
 ## E2E Baseline & Profiling Execution
 
-Use the sweep script for ALL E2E latency measurements and nsys profiling. Do NOT call `vllm bench latency` directly — it wastes time reloading the model for each batch size and is error-prone (e.g., `--dtype bf16` is invalid, must be `bfloat16`; the sweep script reads config from target.json so these errors don't happen).
+Use the sweep script for ALL E2E latency measurements + nsys profiling (the script by default will do both). Do NOT call `vllm bench latency` directly — it wastes time reloading the model for each batch size and is error-prone (e.g., `--dtype bf16` is invalid, must be `bfloat16`; the sweep script reads config from target.json so these errors don't happen).
 
-**Pre-profiling probe (REQUIRED for TP > 1 or models > 10B params)**:
+**Pre-profiling probe (REQUIRED for TP > 1 or models > 10B params; SKIP otherwise)**:
 
-Before running `--nsys-profile`, estimate profiling cost:
+Before running benchmark + profiling script, estimate profiling cost:
 
 ```bash
 python .claude/skills/ammo/scripts/nsys_probe.py --artifact-dir {artifact_dir}
@@ -85,17 +85,7 @@ nsys stats --report cuda_gpu_kern_sum \
 
 ## GPU Pool
 
-Acquire GPUs at runtime before running GPU commands:
-
-```bash
-CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
-```
-
-GPUs auto-release when your command completes. If the pool is exhausted, wait briefly and retry.
-For CPU-only commands (file reads, roofline math, ISA inspection), no reservation needed.
-
-E2E sweeps and nsys profiling: `--num-gpus {tp}` (match TP from target.json).
-nsys profiling gets 4-hour lease automatically.
+GPU commands require pool reservation — see `references/gpu-pool.md`. E2E sweeps and nsys profiling: `--num-gpus {tp}` (match TP from target.json). nsys profiling gets 4-hour lease automatically.
 
 ## Steady-State vs Transient Classification (CRITICAL)
 
@@ -127,13 +117,29 @@ If the probe itself times out at OL=2, the model may be too heavy for `--cuda-gr
 - Or use `--cuda-graph-trace=graph` (loses per-kernel detail inside CUDA graphs — see nsys-profiling-guide.md §3.6 for caveats)
 - Document all methodology caveats prominently in bottleneck_analysis.md
 
+## Stage 2b: Baseline ncu Sanity Check
+
+After bottleneck mining, the orchestrator may instruct you to run ncu on the **top-3 kernels by f_decode**. This catches pathological baselines (dispatch bugs, near-zero SM utilization) before champions begin debate.
+
+**Per kernel**:
+```bash
+ncu --metrics sm__warps_active.avg.pct_of_peak_sustained_active,dram__bytes.sum.per_second,smsp__inst_executed.sum \
+    --kernel-name <baseline_kernel> python baseline_invocation.py
+```
+
+**Red flag thresholds** (any one triggers investigation before debate begins):
+- SM utilization < 10% for non-trivial kernels (indicates dispatch bug)
+- Achieved DRAM BW < 20% of theoretical peak for BW-bound kernels
+- Instruction count < 50% of expected for target shape
+
+**Baseline provenance**: ncu invocations MUST use the production API path (e.g., `F.linear(x, weight)` with weight `[N,K]`, NOT `torch.mm`). Wrong API can cause discrepancy. Cross-reference kernel name and launch grid against nsys trace.
+
+Append findings to `bottleneck_analysis.md`. If a red flag fires, investigate before the orchestrator proceeds to Stage 3.
+
 ## Key Constraints
 
-1. **Production parity**: ALL measurements must use CUDA graphs + torch.compile (`VLLM_TORCH_COMPILE_LEVEL=3`). NEVER use `--enforce-eager` or `TORCH_COMPILE_DISABLE=1` for performance measurements.
-2. **vLLM baseline**: Compare against vLLM's production kernel (e.g., `from vllm.model_executor.layers.fused_moe import fused_experts`), NOT naive PyTorch loops.
-3. **Numerical correctness**: Always use `torch.allclose()` to verify optimized output matches baseline.
-4. **CUDA graph benchmarks**: Capture both baseline and optimized kernels in CUDA graphs for fair kernel-level comparisons. Raw event timing without graphs is invalid.
-5. **GPU sequencing**: Never run E2E benchmarks while kernel benchmarks are in progress.
+See `references/validation-defaults.md` for production parity, baseline, and correctness requirements. Additionally:
+- **GPU sequencing**: Never run E2E benchmarks while kernel benchmarks are in progress.
 
 ## What You Provide vs What Champions Provide
 
@@ -172,7 +178,8 @@ script or nsys profiling:
 ## References
 
 Read `.claude/skills/ammo/references/` for:
-- `nsys-profiling-guide.md` — nsys commands, multi-GPU tips, report exports
+- `gpu-pool.md` — GPU reservation pattern and contention handling
 - `validation-defaults.md` — tolerances, gate definitions, production parity requirements
+- `nsys-profiling-guide.md` — nsys commands, multi-GPU tips, report exports
 - `cudagraph-safety.md` — CUDA graph capture checklist
 - `e2e-latency-guide.md` — E2E latency methodology (use sweep script)

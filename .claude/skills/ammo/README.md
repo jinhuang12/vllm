@@ -124,7 +124,6 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 │   ├── e2e-latency-guide.md              # vllm bench latency methodology
 │   ├── validation-defaults.md            # Correctness tolerances, gate thresholds
 │   ├── validator-troubleshooting.md      # Investigation playbook (max 3 hypothesis cycles)
-│   ├── da-audit-checklist.md             # Devil's advocate audit investigation template
 │   ├── nsys-profiling-guide.md           # nsys/ncu capture and CSV export
 │   ├── fusion-feasibility-heuristics.md  # ROI math for fusion candidates
 │   ├── gpu-configs.md                    # Hardware specs (SMEM, registers, TMA availability)

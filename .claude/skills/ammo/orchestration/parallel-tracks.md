@@ -33,28 +33,11 @@ The validator agent shares the champion's worktree (same track team). Both agent
 
 ### GPU Pool
 
-All agents share a machine-wide GPU pool managed by `gpu_reservation.py`. Agents acquire GPUs dynamically at command time:
-
-```bash
-CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
-```
-
-- **Kernel benchmarks**: `--num-gpus 1` (single GPU sufficient)
-- **E2E sweeps**: `--num-gpus {tp}` (must match tensor parallelism from target.json)
-- **Contiguous allocation**: For TP>1, the pool allocates contiguous GPU blocks. If no contiguous block is available, the command fails and the agent should retry.
-- **Auto-release**: PostToolUse hook releases GPUs when the command completes. Lease expiry (2h default, 4h for nsys) handles crashes.
-- **Contention**: If the pool is exhausted, the reserve command fails. Agent should wait briefly and retry.
-
-No GPU pre-assignment in spawn prompts. Agents discover available GPUs at runtime.
+All agents share a machine-wide GPU pool. See `references/gpu-pool.md` for the reservation pattern and contention handling.
 
 ## Worktree Build Rules (CRITICAL)
 
-| Change Type | Required Action | Time |
-|-------------|----------------|------|
-| **Pure Python** (model code, Triton kernels, configs) | Edit, test, commit. **NO rebuild.** | Immediate |
-| **C++ kernel** (csrc/ changes) | `cmake --preset release && cmake --build --preset release --target install` | ~5-55s (ccache) |
-
-**Only the champion compiles.** The validator never runs cmake. The validator only executes against committed, compiled code.
+See `references/impl-track-rules.md` § Build Rules for the change-type/action matrix. Only the champion compiles — the validator never runs cmake.
 
 ## Per-Track Execution Pipeline
 
@@ -133,33 +116,9 @@ Agent(
 )
 ```
 
-### Collaboration Timeline
+### Collaboration Timeline and Key Rules
 
-The champion and validator work as a team with fluid collaboration. Both may be active simultaneously, except during the validation phase when the champion must remain idle:
-
-```
-Early:     Validator researches + profiles (ncu, dispatch, shapes)
-           Champion reads debate artifacts, receives research report
-           Both active — validator assists champion as needed
-
-Mid:       Champion implements kernel (sole source modifier)
-           Validator assists: codebase lookups, proactive advisories, prep work
-           Champion has GPU priority for compilation/smoke tests
-
-Late:      Champion commits implementation, requests validation
-           Validator runs independent Gates 5.1/5.2/5.3 (writes OWN tests/benchmarks)
-           Champion IDLE during validation (validator needs stable code + GPU)
-
-Final:     Champion evaluates validator's raw data, writes validation_results.md
-           DA Stop hook fires on champion
-```
-
-### Key Rules (Not Phases)
-
-1. **Only the champion modifies source files** (csrc/, vllm/, etc.). The validator reads files and writes to `{artifact_dir}/tracks/{op_id}/validator_prep/`.
-2. **Champion has GPU priority.** Validator coordinates via SendMessage before GPU-intensive work (ncu profiling). Champion signals when it needs the GPU.
-3. **Independent validation is non-negotiable.** When validating, the validator writes its OWN correctness tests and benchmarks from the optimization plan — not from the champion's scripts. This is the reward hacking prevention mechanism.
-4. **During validation, champion is idle.** The validator needs stable committed code and exclusive GPU access for accurate measurements.
+Champion-validator collaboration follows the fluid timeline in `references/impl-track-rules.md` § Collaboration. Key rules: only champion modifies source, champion has GPU priority, independent validation is non-negotiable, champion idle during validation. See `references/impl-track-rules.md` § Track Rules for full details.
 
 ### Three Layers of Verification
 
@@ -179,34 +138,9 @@ Layer 3: DA Stop Hook (Sonnet, frontmatter on champion)
   production parity, independent validation existence, benchmark cross-check
 ```
 
-### Handling Validation Failures
+### Handling Validation Failures and GATING_REQUIRED
 
-When the validator reports a gate failure:
-
-1. Validator reports failure details to champion
-2. Champion diagnoses root cause
-3. Champion fixes implementation, recompiles if needed, commits
-4. Champion re-delegates validation with new commit SHA
-5. Validator re-runs ALL gates from scratch with fresh independent tests
-
-The validator writes new tests each re-delegation cycle — the champion cannot "fix" by influencing the test methodology.
-
-### GATING_REQUIRED Verdict
-
-When the validator reports a `GATING_REQUIRED` track verdict (some BS PASS, some REGRESSED):
-
-1. Validator reports per-BS verdict table to champion (SendMessage with structured verdict data)
-2. Champion evaluates gating feasibility (is the dispatch site compatible with a gating mechanism?)
-3. If feasible: champion requests validator to run crossover probing benchmarks (SendMessage)
-4. Validator runs kernel sweep + E2E confirmation per `references/crossover-probing.md`, reports probe results to champion (SendMessage with `crossover_threshold_bs`)
-5. Champion implements gating mechanism per `references/code-templates.md` dispatch decision tree
-6. Champion registers env var in `vllm/envs.py`: `VLLM_{OP_NAME}=1`
-7. Champion requests validator to re-validate gated version (SendMessage with commit SHA)
-8. Validator re-validates at all BS — all must be PASS or NOISE
-9. If re-validation passes: champion writes `GATED_PASS` to `validation_results.md`
-10. If re-validation fails OR gating infeasible at step 2: track `FAIL` (one gating attempt per track — no nested gating)
-
-**Important**: The validator runs benchmarks and reports results. The validator does NOT implement gating code (Hard Rule 6: no source modification). The champion directs the workflow; the validator executes benchmark requests.
+When validation fails or a GATING_REQUIRED verdict is reported, follow the workflows in `references/impl-track-rules.md` § Validation Failures and § GATING_REQUIRED. Key principle: the validator re-runs ALL gates from scratch with fresh independent tests each cycle. For GATING_REQUIRED, one gating attempt per track — no nested gating.
 
 ## Result Collection
 
@@ -225,7 +159,7 @@ For `GATED_PASS` tracks, the `state.json` `parallel_tracks.{op_id}` entry includ
 
 ### Pass Criteria (Tiered Verdict System)
 
-A track's verdict is determined by per-BS E2E results using the tiered verdict system (see `references/validation-defaults.md` §5.3):
+Track verdicts are determined by the tiered verdict system. See `references/validation-defaults.md` §5.3 for threshold values and computation logic. Summary:
 
 | Track Verdict | Condition |
 |--------------|-----------|
