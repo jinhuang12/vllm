@@ -1,11 +1,17 @@
 #!/bin/bash
 # Stop hook — AMMO orchestrator continuation nudge.
 #
-# Only fires for the ORCHESTRATOR (not teammates) and only at stages
-# where the orchestrator should autonomously continue:
-#   - Stage 7 (campaign evaluation): should proceed to next round or Stage 7b
-#   - Stage 7b (report generation): should spawn report subagent
-#   - Any stage with active overlapped debate that hasn't completed
+# Fires for the ORCHESTRATOR (not teammates) when campaign artifacts exist
+# and work remains. Exits silently when:
+#   - No state.json in kernel_opt_artifacts/
+#   - Campaign is terminal (complete/exhausted) AND REPORT.md exists
+#
+# Nudges at:
+#   - Stage 7 (active): proceed to next round or set terminal status + 7b
+#   - Stage 7 (terminal, no report): spawn report subagent (closes the 7b gap)
+#   - Stage 7b: spawn report subagent
+#   - Stages 4-5 with missing overlapped debate (round 2+)
+#   - Any stage with active overlapped debate
 #
 # Teammates are excluded by checking if the session is the team lead.
 #
@@ -53,17 +59,22 @@ if [ -f "$MARKER" ]; then
     exit 0
 fi
 
-# ── Find active campaign ──
+# ── Find campaign ──
 STATE_FILE=""
+ARTIFACT_DIR=""
 for d in "$PROJECT_DIR"/kernel_opt_artifacts/*/; do
     [ -f "$d/state.json" ] || continue
-    s=$(jq -r '.campaign.status // empty' "$d/state.json" 2>/dev/null)
-    if [ "$s" = "active" ]; then
-        STATE_FILE="$d/state.json"
-        break
-    fi
+    STATE_FILE="$d/state.json"
+    ARTIFACT_DIR="$d"
+    break
 done
-[ -z "$STATE_FILE" ] && exit 0  # no active campaign
+[ -z "$STATE_FILE" ] && exit 0  # no campaign artifacts
+
+# ── Fully done check: terminal status + report exists → nothing left to do ──
+STATUS=$(jq -r '.campaign.status // empty' "$STATE_FILE" 2>/dev/null)
+if [[ "$STATUS" != "active" ]] && [[ -f "${ARTIFACT_DIR}REPORT.md" ]]; then
+    exit 0
+fi
 
 STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILE" 2>/dev/null)
 ROUND=$(jq -r '.campaign.current_round // 1' "$STATE_FILE" 2>/dev/null)
@@ -74,10 +85,17 @@ OVERLAP_ACTIVE=$(jq -r '.debate.next_round_overlap.active // false' "$STATE_FILE
 NUDGE=""
 case "$STAGE" in
     7_campaign_eval*)
-        NUDGE="You are at Stage 7 (Campaign Evaluation). Do NOT stop or ask the user.
+        if [ "$STATUS" = "active" ]; then
+            NUDGE="You are at Stage 7 (Campaign Evaluation). Do NOT stop or ask the user.
 Autonomously decide: check diminishing returns threshold in state.json.
 - If above threshold: update state to next round and continue to Stage 1 (re-profile).
 - If below threshold: set campaign status to campaign_complete or campaign_exhausted, then IMMEDIATELY proceed to Stage 7b (spawn report subagent)."
+        else
+            # Terminal status but no REPORT.md (we passed the fully-done check above)
+            NUDGE="Campaign is $STATUS but REPORT.md has not been generated.
+Spawn the report subagent NOW: read .claude/skills/ammo/report/SKILL.md and spawn a
+general-purpose subagent to generate REPORT.md in ${ARTIFACT_DIR}."
+        fi
         ;;
     7b_report*|*report_gen*)
         NUDGE="You are at Stage 7b (Report Generation). Spawn the report subagent now:
@@ -118,7 +136,7 @@ esac
 touch "$MARKER"
 
 cat >&2 <<EOF
-AMMO: Campaign active (stage: $STAGE, round: $ROUND).
+AMMO: Campaign at stage $STAGE, status $STATUS, round $ROUND.
 
 $NUDGE
 EOF
