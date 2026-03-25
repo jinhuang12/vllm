@@ -601,8 +601,8 @@ EOF
 
 run_test "Campaign gate active with exhausted round allows (no shipped = no re-profile needed)" 0 '{
   "hook_event_name": "TaskCompleted",
-  "task_subject": "GATE: diminishing returns check",
-  "task_description": "Check diminishing returns",
+  "task_subject": "GATE: mechanical threshold check",
+  "task_description": "Mechanical threshold check",
   "team_name": "ammo-test-hookguard",
   "cwd": "'"$TMPDIR"'"
 }'

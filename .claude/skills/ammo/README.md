@@ -1,6 +1,6 @@
 # AMMO - Automated Model Micro-Optimizer
 
-A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment target (model, hardware, dtype, TP), AMMO profiles the inference pipeline, identifies bottlenecks, debates optimization strategies adversarially, implements and validates candidates in parallel worktrees, and ships the ones that pass. The campaign loops until diminishing returns.
+A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment target (model, hardware, dtype, TP), AMMO profiles the inference pipeline, identifies bottlenecks, debates optimization strategies adversarially, implements and validates candidates in parallel worktrees, and ships the ones that pass. The campaign loops until `f < min_e2e_improvement_pct` (mechanical threshold — no orchestrator discretion).
 
 ## Campaign Workflow
 
@@ -10,7 +10,7 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 
  The campaign is an iterative loop of 7 stages. Each iteration (round) discovers,
  debates, and implements optimizations. The loop repeats until the top bottleneck
- falls below the diminishing returns threshold (default 3%).
+ falls below the mechanical stop threshold (default 1.0%).
 
  ┌─────────────────────────────────────────────────────────────────────────────────┐
  │                          ROUND N (Stages 1-7)                                  │
@@ -92,13 +92,13 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
  │                                                                                 │
  │  IF SHIP:                              IF round EXHAUSTED:                      │
  │    1. Record shipped candidates          1. Record failed round                 │
- │    2. Update cumulative speedup          2. Check diminishing returns           │
+ │    2. Update cumulative speedup          2. Mechanical threshold check           │
  │    3. Re-profile (new baseline)             on EXISTING profile (no re-profile) │
  │    4. Bottleneck mining on new baseline     │                                   │
- │    5. Check diminishing returns             │                                   │
+ │    5. Mechanical threshold check             │                                   │
  │       │                                     │                                   │
  │       v                                     v                                   │
- │  top bottleneck < 3%?                  top bottleneck < 3%?                     │
+ │  top bottleneck f < 1.0%?              top bottleneck f < 1.0%?                 │
  │    YES → campaign_complete               YES → campaign_exhausted               │
  │    NO  → next round (Stage 3)            NO  → new debate from existing data    │
  │                                                                                 │
@@ -170,6 +170,7 @@ The **lead** (main Claude session) orchestrates all stages, manages `state.json`
 5. **Full-model E2E** - Download weights, never skip
 6. **E2E delta math** - `improvement = f x kernel_speedup` (small `f` = small E2E, not a bug)
 7. **Custom kernel mandate** - Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected at Phase 0.
+8. **Autonomous campaign loop** — The orchestrator MUST NOT ask the user whether to continue. Stop condition is mechanical: `f < min_e2e_improvement_pct` → stop, else continue. No qualitative judgment overrides this.
 
 ## Hook Enforcement
 

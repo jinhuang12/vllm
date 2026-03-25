@@ -289,7 +289,7 @@ if [ "$IS_GATE_CAMPAIGN" = "true" ]; then
         exit 2
     fi
 
-    # If campaign is still active, verify diminishing returns was checked
+    # If campaign is still active, verify mechanical threshold was checked
     if [ "$CAMPAIGN_STATUS" = "active" ]; then
         TOP_BOTTLENECK=$(jq -r --argjson r "$CURRENT_ROUND" \
             '[.campaign.rounds[] | select(.round_id == $r)][0].top_bottleneck_share_pct // empty' \
@@ -297,7 +297,7 @@ if [ "$IS_GATE_CAMPAIGN" = "true" ]; then
 
         if [ -z "$TOP_BOTTLENECK" ]; then
             echo "BLOCKED: Campaign evaluation requires top_bottleneck_share_pct in round $CURRENT_ROUND entry." >&2
-            echo "  This field records the top bottleneck's share of total latency for the diminishing returns check." >&2
+            echo "  This field records the top bottleneck's share of total latency for the mechanical threshold check." >&2
             exit 2
         fi
     fi

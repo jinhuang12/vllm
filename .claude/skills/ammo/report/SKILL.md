@@ -177,7 +177,7 @@ Every section is required unless marked optional.
 
 ### 8. Remaining Opportunities
 - Table: untried bottlenecks with estimated impact
-- Why the optimization effort concluded (diminishing returns threshold)
+- Why the optimization effort concluded (mechanical stop threshold: `f < min_e2e_improvement_pct`)
 - Brief description of most promising remaining candidates
 
 ### 9. Key Lessons (standalone callout boxes)

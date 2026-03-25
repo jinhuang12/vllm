@@ -76,6 +76,11 @@ if [[ "$STATUS" != "active" ]] && [[ -f "${ARTIFACT_DIR}REPORT.md" ]]; then
     exit 0
 fi
 
+# ── Paused check: user explicitly paused → allow stop ──
+if [[ "$STATUS" = "paused" ]]; then
+    exit 0
+fi
+
 STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILE" 2>/dev/null)
 ROUND=$(jq -r '.campaign.current_round // 1' "$STATE_FILE" 2>/dev/null)
 OVERLAP_ACTIVE=$(jq -r '.debate.next_round_overlap.active // false' "$STATE_FILE" 2>/dev/null)
@@ -87,9 +92,9 @@ case "$STAGE" in
     7_campaign_eval*)
         if [ "$STATUS" = "active" ]; then
             NUDGE="You are at Stage 7 (Campaign Evaluation). Do NOT stop or ask the user.
-Autonomously decide: check diminishing returns threshold in state.json.
-- If above threshold: update state to next round and continue to Stage 1 (re-profile).
-- If below threshold: set campaign status to campaign_complete or campaign_exhausted, then IMMEDIATELY proceed to Stage 7b (spawn report subagent)."
+Execute mechanical threshold check: read f (top bottleneck share) from profiling data, compare to min_e2e_improvement_pct in state.json.
+- If f >= threshold: update state to next round and continue to Stage 1 (re-profile if SHIP, pivot technology if EXHAUSTED).
+- If f < threshold: set campaign status to campaign_complete or campaign_exhausted, then IMMEDIATELY proceed to Stage 7b (spawn report subagent)."
         else
             # Terminal status but no REPORT.md (we passed the fully-done check above)
             NUDGE="Campaign is $STATUS but REPORT.md has not been generated.

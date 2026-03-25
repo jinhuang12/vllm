@@ -29,7 +29,7 @@ You are the **lead orchestrator**. You scaffold, delegate, and gate — you neve
 
 User provides: model_id, hardware, dtype, tp.
 
-Lead (you) scaffolds artifact directory, orchestrates the **campaign loop** — an iterative pipeline of 7 stages that repeats until diminishing returns. Each iteration (round) discovers, debates, and implements optimizations against the current bottleneck landscape.
+Lead (you) scaffolds artifact directory, orchestrates the **campaign loop** — an iterative pipeline of 7 stages that continues until `f < min_e2e_improvement_pct` (mechanical threshold — see Campaign Stop Condition). Each iteration (round) discovers, debates, and implements optimizations against the current bottleneck landscape.
 
 Before calling `new_target.py`, determine target batch sizes. If the user specified batch sizes, pass them via `--batch-sizes`. If not, use the default `[1, 8, 32]`. Batch sizes define the decode buckets for all profiling and validation throughout the campaign.
 
@@ -53,9 +53,9 @@ Stage 7: Campaign Evaluation        [main session direct]                       
 Stage 7b: Report Generation          [general-purpose subagent, background]       → REPORT.md (on campaign_complete or campaign_exhausted)
 ```
 
-Stages 1-6 form the **inner loop** of a round. Stage 7 decides whether to iterate. A single round-scoped team persists from Stage 3 through Stage 5; it is created at debate start and deleted after all implementation tracks complete. During Stages 4-5 (round 2+), the orchestrator may launch the next round's debate concurrently -- debate champions are spawned into the same round team alongside implementation agents (see Overlapped Debate below).
+Stages 1-6 form the **inner loop** of a round. Stage 7 executes the mechanical threshold check (`f` vs `min_e2e_improvement_pct`) → continue or stop. A single round-scoped team persists from Stage 3 through Stage 5; it is created at debate start and deleted after all implementation tracks complete. During Stages 4-5 (round 2+), the orchestrator may launch the next round's debate concurrently -- debate champions are spawned into the same round team alongside implementation agents (see Overlapped Debate below).
 
-The campaign continues until no remaining optimization candidate's projected E2E exceeds `min_e2e_improvement_pct` (see Campaign Loop below).
+The campaign continues until the top bottleneck's share of decode latency (`f`) falls below `min_e2e_improvement_pct` — at that point, Amdahl's Law guarantees no single-component optimization can yield the minimum improvement (see Campaign Stop Condition below).
 
 ## Campaign Loop
 
@@ -71,39 +71,44 @@ Round N:
   5. Campaign Evaluation (Stage 7) — E2E threshold check → next round or stop
 ```
 
-### Campaign Stop Condition
+### Campaign Stop Condition (MECHANICAL — NO DISCRETION)
 
 After each round's integration:
 
 1. Read the top bottleneck's share of total decode latency (`f`) from profiling data.
 2. If `f < min_e2e_improvement_pct` (default: 1.0%): even complete elimination of that component cannot yield the minimum E2E improvement (Amdahl's Law) → **stop**.
-3. No deflation applied — Amdahl's ceiling is a physical bound, not an estimate. See `references/validation-defaults.md` § Minimum E2E Improvement Threshold.
+3. If `f >= min_e2e_improvement_pct`: **continue unconditionally**. Start a new round.
+4. No deflation applied — Amdahl's ceiling is a physical bound, not an estimate. See `references/validation-defaults.md` § Minimum E2E Improvement Threshold.
 
-**After SHIP**: Re-profile first (bottleneck landscape shifted), then check the NEW top bottleneck.
-**After EXHAUSTED**: Check threshold against EXISTING profiling data (no re-profile needed).
+**The orchestrator has ZERO discretion here.** The following are NOT valid reasons to stop or ask the user:
+- "All Triton approaches have been exhausted" → pivot to CUDA C++/CUTLASS/DeepGEMM
+- "The remaining bottleneck is near its physical ceiling" → the ceiling is captured by `f`; if `f >= threshold`, the math says there's room
+- "A new round is unlikely to find better candidates" → the orchestrator cannot predict debate outcomes
+- "The campaign has been running for many rounds" → round count is not a stop criterion
+- "Implementation complexity is increasing" → complexity is scored in debate, not a campaign-level gate
 
-**After SHIP with overlapped debate winners**:
-1. Re-profile (as today).
-2. For each winner in `debate.next_round_overlap.selected_winners`:
-   - Read the winner's `f_values_at_proposal[op_id]` (the f-value when proposed).
-   - Read the new f-value from the re-profiling data.
-   - If `f_old < 0.05`: skip invalidation for this candidate (kernel too small for reliable f-shift measurement).
-   - If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`: discard the candidate (f-value shifted too much).
-   - Otherwise: retain the candidate for implementation.
-3. If any candidates survive: skip Stage 3 debate for the next round. Move surviving candidates directly to `debate.selected_winners` and proceed to Stages 4-5. **Clear `debate.next_round_overlap` to initial state** (`active: false, phase: null, selected_winners: [], profiling_basis: null, f_values_at_proposal: {}`).
-4. If all candidates are invalidated: **clear `debate.next_round_overlap` to initial state**. Run a fresh Stage 3 debate using the new profiling data.
+**Technology pivot guidance**: When a round exhausts one technology class (e.g., Triton), the next round's debate prompt MUST explicitly direct champions to explore alternative technology classes. This is automatic, not a user decision. The pivot order is:
 
-**IMPORTANT**: Always clear `debate.next_round_overlap` after consuming or discarding winners. Failure to clear will cause the stop guard, resume protocol, and precompact hook to see stale overlap state from a previous round.
+1. Triton (default, lowest complexity)
+2. CUDA C++ with manual SMEM/register management
+3. CUTLASS/DeepGEMM integration (if hardware supports)
+4. PTX-level optimization (last resort)
+
+**After SHIP**: Re-profile first (bottleneck landscape shifted), then check the NEW top bottleneck. If `f >= threshold`, start next round immediately.
+**After EXHAUSTED**: Check threshold against EXISTING profiling data (no re-profile needed). If `f >= threshold`, start next round immediately with debate directed to unexplored approaches.
 
 ### Campaign State Transitions
 
 ```
-active → (threshold not met) → active (next round)
-active → (threshold met after ship) → campaign_complete
-active → (threshold met after exhaust) → campaign_exhausted
-active → (user requests pause) → paused
-paused → (user requests resume) → active
+active → (f >= threshold after ship) → active (re-profile → new round)
+active → (f >= threshold after exhaust) → active (new round, pivot technology)
+active → (f < threshold after ship) → campaign_complete
+active → (f < threshold after exhaust) → campaign_exhausted
+active → (user explicitly requests pause) → paused
+paused → (user explicitly requests resume) → active
 ```
+
+Note: there is NO transition from `active` to `campaign_complete` or `campaign_exhausted` based on orchestrator judgment. Only the mechanical `f < threshold` condition triggers termination.
 
 ### In-Flight Tracks During Re-profiling
 
@@ -137,7 +142,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 
 **Lazy invalidation**: After re-profiling in the next round, the orchestrator checks each overlapped-debate winner's f-value against the new profiling data. If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`, the candidate is discarded (the target kernel's share shifted too much). If `f_old < 0.05`, skip invalidation for that candidate (the kernel is too small to measure f-shift reliably). Otherwise, the candidate proceeds to implementation. This replaces the old eager re-scoring protocol.
 
-**GPU allocation**: Debate champions may run brief GPU micro-benchmarks using the pool (`--num-gpus 1`). Debate delegates are restricted to static analysis only (`ncu --query-metrics`, roofline calcs, ISA inspection) — no kernel benchmarks.
+**GPU allocation**: Debate champions & delegates may run brief GPU micro-benchmarks using the pool (`--num-gpus 1`).
 
 **If round N is round 1**: Do NOT launch overlapped debate. Round 1 has no prior profiling data for the next round's debate to use.
 
@@ -216,10 +221,15 @@ See `orchestration/parallel-tracks.md` for the full team structure, phase-transi
 - If none pass: round EXHAUSTED (not campaign-level — campaign evaluates in Stage 7).
 - See `orchestration/integration-logic.md`.
 
-### Stage 7: Campaign Evaluation
+### Stage 7: Campaign Evaluation (AUTONOMOUS)
 
-- After integration: record round results, check diminishing returns, decide next action.
-- See Campaign Loop section above for the full evaluation protocol.
+This stage is fully autonomous — no user interaction. The orchestrator executes the mechanical threshold check and proceeds immediately.
+
+- After integration: record round results, read `f` from profiling data, compare to `min_e2e_improvement_pct`.
+- `f >= threshold` → continue unconditionally (re-profile if SHIP, pivot technology if EXHAUSTED — see Campaign Stop Condition above).
+- `f < threshold` → set `campaign_complete` or `campaign_exhausted`, spawn report (T20).
+- After an EXHAUSTED round where `f >= threshold`: the next round's debate prompt MUST direct champions to unexplored technology classes per the pivot order in Campaign Stop Condition.
+- See Campaign Stop Condition and Campaign State Transitions above for the full mechanical protocol.
 - **Hook-enforced**: Stop hook blocks session end while campaign is active.
 
 ### Stage 7b: Report Generation
@@ -278,12 +288,12 @@ T15: Campaign evaluation                                  [main]               <
   IF SHIP:
     T16: Re-profile (baseline capture on patched code)    [ammo-researcher]    <- T15
     T17: Bottleneck mining on new baseline                [ammo-researcher]    <- T16
-    T18: Diminishing returns check                        [main]               <- T17
-      IF below threshold: CAMPAIGN COMPLETE
+    T18: Mechanical threshold check (f vs min_e2e_improvement_pct) [main]      <- T17
+      IF f < threshold: CAMPAIGN COMPLETE
       ELSE: new Round (T6 debate → ...)
   IF round-EXHAUSTED:
-    T16b: Diminishing returns check (on existing profile) [main]               <- T15
-      IF below threshold: CAMPAIGN EXHAUSTED
+    T16b: Mechanical threshold check (existing profile, no re-profile) [main]  <- T15
+      IF f < threshold: CAMPAIGN EXHAUSTED
       ELSE: new debate round from existing data (→ T6)
 T19: GATE: campaign evaluation                            [main]               <- T15..T18
 T20: Generate optimization report                         [general-purpose subagent, background] <- T19 (campaign_complete or campaign_exhausted)
@@ -305,6 +315,7 @@ These are NOT advisory. Violation blocks stage progression.
 6. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
 6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug. For BS-dependent optimizations, compute per-BS `f(BS) × kernel_speedup(BS)` — different batch sizes may have different `f` values. A partial regression at some batch sizes does not negate the optimization if it is gatable — see tiered verdict system in `references/validation-defaults.md`.
 7. **Custom kernel mandate**: Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected outright in the Phase 0 eligibility gate.
+8. **Autonomous campaign loop**: The orchestrator MUST NOT ask the user whether to continue, pause, or stop the campaign. The stop condition is purely mechanical: `f_top_bottleneck < min_e2e_improvement_pct` → stop, otherwise → continue. No qualitative judgment ("we've exhausted approaches", "diminishing returns feel likely") overrides this. Technology pivots (e.g., Triton → CUDA C++/CUTLASS) are expected between rounds and do NOT require user confirmation. The only user interaction during a campaign is: (a) the initial invocation, (b) blocker escalation if a gate fails with no recovery path, (c) the final report. If the orchestrator believes the threshold should change, it must propose the change and wait for approval — it cannot unilaterally decide the campaign is done.
 
 ## Hook Enforcement
 
@@ -478,9 +489,11 @@ When a subagent returns an error or a gate fails:
 
 | Severity | Action |
 |----------|--------|
-| **critical** | STOP. Broadcast halt if debate team active. |
+| **critical** | HALT current stage and escalate to user. Broadcast halt if debate team active. |
 | **major** | Investigate, adjust constraints, re-run subagent. |
 | **minor** | Document and continue. |
+
+**Note**: "HALT" means pause the current stage and escalate — NOT terminate the campaign. Campaign termination is governed exclusively by the mechanical `f < threshold` check (see Campaign Stop Condition). Gate failures trigger escalation, not campaign termination — the campaign remains `active`. This is the blocker escalation permitted by Non-Negotiable #8(b).
 
 Save blocker details to `{artifact_dir}/blockers/{stage}_{date}.md`.
 
@@ -502,7 +515,7 @@ After interruption or compaction:
 6. Resume from last completed gate.
 7. Read `campaign.current_round` to determine which round is active.
 8. If `campaign` key is missing (legacy state.json): treat as round 1 — initialize the campaign object.
-9. The Stop hook will block session end while campaign is active — either complete the current stage or set `campaign.status` to `"paused"`.
+9. The Stop hook will block session end while campaign is active — complete the current stage. Do NOT set `campaign.status` to `"paused"` autonomously to satisfy the Stop hook; setting `paused` requires explicit user request (see Campaign State Transitions). If you cannot complete the stage, escalate the blocker through the Escalation Protocol.
 10. If `campaign.status` is `campaign_complete` or `campaign_exhausted` but no `REPORT.md` exists, spawn the report generation subagent (T20).
 
 ## Quick Start Examples
@@ -515,8 +528,9 @@ After interruption or compaction:
 4. Select winners, create parallel worktree tracks.
 5. Implement + validate in parallel.
 6. Integration if multiple pass → SHIP or round-EXHAUSTED.
-7. Campaign evaluation: record round, check diminishing returns.
-8. If above threshold: re-profile → new round. Repeat until threshold met.
+7. Campaign evaluation: record round, read `f`, compare to `min_e2e_improvement_pct` (mechanical — no user interaction).
+8. If `f >= threshold`: re-profile (if SHIP) or pivot technology (if EXHAUSTED) → new round immediately. Repeat until `f < threshold`.
+9. When `f < threshold`: declare `campaign_complete` or `campaign_exhausted`, spawn report.
 
 **Example 2**: Resume -> Read `state.json`, check `campaign.current_round` and active stage, resume from last gate.
 

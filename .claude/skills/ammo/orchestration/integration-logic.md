@@ -150,7 +150,7 @@ The integration section of `state.json` records all decisions and results:
 
 ## Campaign Loop Transition (Stage 7)
 
-After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orchestrator evaluates whether to continue the campaign. See the Campaign Loop section in `SKILL.md` for the full protocol.
+After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orchestrator runs the mechanical threshold check (`f` vs `min_e2e_improvement_pct`) per SKILL.md Campaign Stop Condition. See the Campaign Loop section in `SKILL.md` for the full protocol.
 
 ### If SHIP (one or more candidates passed)
 
@@ -181,13 +181,13 @@ For GATED_PASS tracks, use the **minimum post-gating speedup across all batch si
 ### If EXHAUSTED (no candidates passed this round)
 
 1. Record the failed round in `campaign.rounds`.
-2. Check diminishing returns against the CURRENT profiling data (no re-profile since nothing changed).
+2. Mechanical threshold check against the CURRENT profiling data (no re-profile since nothing changed).
    - If `top_bottleneck_share < threshold`: set `campaign.status = "campaign_exhausted"`. Done.
    - Else: start a new debate round from existing bottleneck data (skip re-profiling, skip Stage 2).
 
 ### Hook Enforcement
 
-The Stop hook (`ammo-stop-guard.sh`) blocks the session from ending while the campaign is active. The orchestrator must either complete the current stage or set `campaign.status` to `"paused"` before the session can end.
+The Stop hook (`ammo-stop-guard.sh`) blocks the session from ending while the campaign is active. The orchestrator must complete the current stage to allow the session to end. Setting `campaign.status` to `"paused"` is only permitted on explicit user request (see SKILL.md § Campaign State Transitions).
 
 ## Overlapped Debate and Implementation Interaction
 
@@ -217,7 +217,7 @@ If all implementation tracks for round N fail (round EXHAUSTED), but the overlap
 - Move overlapped debate winners directly to `debate.selected_winners` for round N+1 implementation.
 - Clear `debate.next_round_overlap` to initial state after moving winners.
 
-**However**: If round EXHAUSTED AND the diminishing returns threshold is met (campaign_exhausted), discard the overlapped debate winners and shut down debate champions. See "Campaign Terminates During Overlapped Debate" below.
+**However**: If round EXHAUSTED AND the mechanical threshold is met (`f < min_e2e_improvement_pct` → campaign_exhausted), discard the overlapped debate winners and shut down debate champions. See "Campaign Terminates During Overlapped Debate" below.
 
 ### Campaign Terminates During Overlapped Debate
 
@@ -228,8 +228,8 @@ If the campaign transitions to `campaign_complete` or `campaign_exhausted` while
 4. Proceed with TeamDelete and campaign termination as normal.
 
 This can occur in two scenarios:
-- **SHIP + diminishing returns met**: A track shipped, re-profiling shows top bottleneck below threshold. The overlapped debate was running in parallel but its results are now irrelevant.
-- **All tracks EXHAUSTED + diminishing returns met**: No tracks shipped, existing profiling shows top bottleneck below threshold. The debate winners are technically valid but the campaign is ending.
+- **SHIP + mechanical threshold met**: A track shipped, re-profiling shows top bottleneck `f` below threshold. The overlapped debate was running in parallel but its results are now irrelevant.
+- **All tracks EXHAUSTED + mechanical threshold met**: No tracks shipped, existing profiling shows top bottleneck `f` below threshold. The debate winners are technically valid but the campaign is ending.
 
 ## Resolver Agent for Merge Conflicts
 

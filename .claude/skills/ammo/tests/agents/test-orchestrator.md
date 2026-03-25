@@ -357,7 +357,7 @@ State:
 ```
 Context: Resuming. A candidate shipped in round 1 but re-profiling hasn't happened yet. No overlapped debate was launched (round 1 does not have overlapped debate).
 
-Expected behavior: Trigger re-profiling on patched codebase, then bottleneck mining, then diminishing returns check. Do NOT use stale data.
+Expected behavior: Trigger re-profiling on patched codebase, then bottleneck mining, then mechanical threshold check. Do NOT use stale data.
 
 <details>
 <summary>Reference output</summary>
@@ -367,13 +367,13 @@ Expected behavior: Trigger re-profiling on patched codebase, then bottleneck min
 2. Confirm ship decision is recorded in `campaign.rounds` and `campaign.shipped_optimizations`.
 3. Execute T16: trigger re-profiling — invoke `ammo-researcher` subagent for baseline capture on the patched codebase.
 4. After re-profile: execute T17 — bottleneck mining on the new baseline (updated `bottleneck_analysis.md`).
-5. Execute T18 (diminishing returns check):
+5. Execute T18 (mechanical threshold check):
    - If below threshold: set `campaign.status = "campaign_complete"`, spawn report subagent, done.
    - If above threshold: increment round, enter Stage 3 for round 2.
 
 **Must NOT do:**
 - Skip re-profiling — SKILL.md explicitly requires it after SHIP.
-- Check diminishing returns against old `bottleneck_analysis.md`.
+- Check mechanical threshold against old `bottleneck_analysis.md`.
 - Spawn the report subagent before confirming `campaign_complete` or `campaign_exhausted`.
 
 **Skill reference:**
@@ -414,7 +414,7 @@ Expected behavior: Set `campaign.status = "campaign_complete"`. Spawn report sub
 - Wait for the report subagent to finish.
 
 **Skill reference:**
-- SKILL.md § Diminishing Returns: "If below threshold... stop."
+- SKILL.md § Campaign Stop Condition: "If f < threshold... stop."
 - Campaign State Transitions: `active → (threshold met after ship) → campaign_complete`
 </details>
 
@@ -438,7 +438,7 @@ Expected behavior: No re-profile (nothing shipped). 8.5% > 3% → campaign conti
 
 **Next actions (in order):**
 1. Record the failed round 2 in `campaign.rounds`.
-2. Check diminishing returns against EXISTING profiling data: 8.5% > 3% → campaign continues.
+2. Mechanical threshold check against EXISTING profiling data: 8.5% > 3% → campaign continues.
 3. Run gate T19.
 4. Increment `campaign.current_round` to 3.
 5. Start new debate from existing bottleneck data (skip re-profiling, skip Stage 2).
@@ -449,7 +449,7 @@ Expected behavior: No re-profile (nothing shipped). 8.5% > 3% → campaign conti
 - Skip debate for the new round.
 
 **Skill reference:**
-- SKILL.md § Diminishing Returns: "After EXHAUSTED: Check threshold against EXISTING profiling data (no re-profile needed)."
+- SKILL.md § Campaign Stop Condition: "After EXHAUSTED: Check threshold against EXISTING profiling data (no re-profile needed)."
 </details>
 
 ---
@@ -495,9 +495,9 @@ Expected behavior: Run lazy invalidation. Discard op003 (|0.008 - 0.12| / 0.12 =
 - Leave `debate.next_round_overlap` in its old state — must always clear after consuming or discarding winners.
 
 **Skill reference:**
-- SKILL.md § Diminishing Returns, "After SHIP with overlapped debate winners": "If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`: discard the candidate."
-- SKILL.md § Diminishing Returns: "If any candidates survive: skip Stage 3 debate for the next round. Move surviving candidates directly to `debate.selected_winners`."
-- SKILL.md § Diminishing Returns: "IMPORTANT: Always clear `debate.next_round_overlap` after consuming or discarding winners."
+- SKILL.md § Campaign Stop Condition, "After SHIP with overlapped debate winners": "If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`: discard the candidate."
+- SKILL.md § Campaign Stop Condition: "If any candidates survive: skip Stage 3 debate for the next round. Move surviving candidates directly to `debate.selected_winners`."
+- SKILL.md § Campaign Stop Condition: "IMPORTANT: Always clear `debate.next_round_overlap` after consuming or discarding winners."
 </details>
 
 ---
@@ -598,7 +598,7 @@ Expected behavior: Round EXHAUSTED (not campaign-level). Move to Stage 7 for thr
 1. Update state.json: `integration.status = "exhausted"`.
 2. Record the failed round in `campaign.rounds`.
 3. Transition to Stage 7 (EXHAUSTED path).
-4. In Stage 7: check diminishing returns on EXISTING profiling data.
+4. In Stage 7: mechanical threshold check on EXISTING profiling data.
 
 **Must NOT do:**
 - Trigger re-profiling (nothing shipped).
