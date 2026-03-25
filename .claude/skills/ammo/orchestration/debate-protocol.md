@@ -141,7 +141,7 @@ After the eligibility gate, the lead reviews proposal diversity:
 
 1. **f-value source check**: For each proposal, check whether the champion used `f_decode` (from the per-decode-step breakdown) or `f_total` (from the full trace). If the target kernel isn't in the decode breakdown, note this — the champion may be targeting prefill latency intentionally, or may have used a misleading f-value.
 
-2. **Component diversity**: If all proposals target the same component, the lead should consider whether the debate will produce useful differentiation. If not, the lead may ask one champion to explore the next-highest-`f_decode` component as an alternative. The goal is at least 3 distinct target components among the eventual winners to reduce portfolio risk.
+2. **Dominant Component Coverage (MANDATORY)**: At least one proposal MUST target the component with the highest `f_decode` from bottleneck_analysis.md. If the top component exceeds 50% of decode time, at least two proposals must target it with distinct techniques. A component may only be excluded from all proposals if two independent micro-experiments (from different champions) demonstrate it is within 10% of its physical ceiling (BW or compute utilization). If no proposal targets the dominant component after Phase 0, the lead MUST reject the lowest-scoring proposal and require a revision targeting it.
 
 ## Round Structure
 

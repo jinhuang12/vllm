@@ -112,6 +112,14 @@ ncu profiling is encouraged broadly and **required** when any of these triggers 
 
 **Governance**: No new mandatory trigger without a documented failure mode from 2+ campaigns.
 
+## Component Dismissal Standard
+
+A component with `f_decode` > 30% cannot be dismissed as "near-optimal" or "not viable" based on a single experiment. To exclude a >30% f_decode component from all proposals:
+
+1. **Two independent negative results required**: Two different champions (or the same champion with two fundamentally different approaches) must independently demonstrate the component is within 10% of its physical ceiling.
+2. **No single-experiment dismissal**: If only one champion tested the component and found a negative result, at least one other champion must verify before the component can be excluded.
+3. **Framing constraint**: The bottleneck analysis and debate artifacts must not label any component with measured utilization below 85% as "near-optimal." Present the gap as headroom: e.g., "73% BW utilization = 27% headroom."
+
 ## Phase Scope for Delegates
 
 | Phase | Delegate Role |

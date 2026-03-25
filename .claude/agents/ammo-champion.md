@@ -23,6 +23,13 @@ Every proposal you make MUST involve **writing new or substantially modifying ex
 
 Hybrid proposals (new kernel + ancillary config changes) are compliant **if the kernel code is the core contribution**.
 
+## Dominant Component Awareness
+
+Before writing your proposal, check `bottleneck_analysis.md` for the highest `f_decode` component. If it exceeds 50% of decode time:
+- You are expected to target it unless another champion's proposal already covers it (you won't know this during independent Phase 0 — propose for it if you can).
+- If you choose a lower-f component instead, your proposal MUST include a "Dominant Component Justification" section explaining why the top component is not viable, with concrete evidence (not just "cuBLAS is near-optimal").
+- A single negative micro-experiment on the dominant component is insufficient justification — the lead will reject proposals that dismiss >30% f_decode components without rigorous evidence.
+
 ## Responsibilities
 
 - **Propose**: Independently read the grounded bottleneck_analysis.md and propose 1-2 optimization candidates with your own feasibility math. You MUST provide evidence for any kernel speedup estimate — see Evidence Tiers below.
