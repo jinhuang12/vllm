@@ -107,6 +107,37 @@ Set `confidence` lower when the gap between prediction and outcome is large, bec
 
 ---
 
+## Cross-Session Causal Patterns
+
+In addition to the per-anomaly-type analysis above, proactively check for these patterns identified from cross-session analysis of 8+ campaigns. These are the highest-impact failure modes — if any are present, they likely dominate the campaign outcome.
+
+### DOMINANT_COMPONENT_MISSED
+
+Check whether the highest f_decode component (from `bottleneck_analysis.md`) had any optimization track. If the component contributing the most decode time was never targeted by any champion:
+- Trace WHY: was it due to framing bias in the bottleneck analysis? A single negative experiment? All champions independently choosing a lower-f component?
+- This pattern was the #1 predictor of poor E2E outcomes across 8 sessions. Sessions where all champions avoided the dominant component averaged +0.96% E2E vs +5.23% when at least one champion targeted it.
+
+### FRAMING_BIAS
+
+Check whether `bottleneck_analysis.md` framed a component with <85% BW or compute utilization as "near-optimal", "well-optimized", or "no red flags." Below 85% utilization, there is meaningful headroom — the top-performing session extracted +6.14% E2E from a component at 73% BW utilization that was initially described as having "no red flags."
+- If this framing appears, trace whether champions cited it as justification for avoiding the component.
+
+### SINGLE_NEGATIVE_DISMISSAL
+
+Check whether any component contributing >30% of f_decode was dismissed based on a single micro-experiment. A valid dismissal requires two independent negative results with different approaches. Look for:
+- One champion tests Triton kernel at a single batch size, shows cuBLAS wins → entire debate accepts this as definitive
+- No one challenges the methodology or tests alternative approaches
+
+### COLD_PRODUCTION_GAP
+
+Check whether micro-benchmark speedups overpredicted E2E improvement by >2x. The empirical translation factor from isolated cold-cache kernel benchmarks to production E2E is 0.33-0.5x across all observed sessions. If a campaign's proposals predicted large E2E gains but the sweep showed much smaller improvements:
+- Flag the gap and estimate the translation factor
+- This is an expected physical effect (CUDA graphs, memory subsystem warming, kernel overlap), not necessarily an error — but proposals that don't account for it indicate overconfident projections
+
+When any of these patterns are detected, include them in your analysis even if they weren't flagged as anomalies by `score_nodes.py`. Create an entry with `anomaly_type: "QUALITY_DROP"` and reference the specific pattern name in the `root_cause` field.
+
+---
+
 ## Output Schema Example
 
 ```json

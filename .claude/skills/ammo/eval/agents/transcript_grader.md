@@ -102,6 +102,37 @@ Deduct for:
 - Delegate provided correct data AND champion used a different (incorrect) value in their work
 - Champion never assigned tasks to their delegate (delegate idle throughout)
 
+### Category 8: Known Anti-Patterns (-0.5 to -2.0 each)
+
+These patterns were identified from cross-session analysis of 8+ campaigns. Each is both **flagged** in the report and **scored** as a deduction. Check for all of them in every campaign.
+
+| Anti-Pattern | What to Check | Deduction |
+|---|---|---|
+| **Dominant component avoidance** | All champions avoided the highest f_decode component without two independent negative micro-experiments justifying the exclusion | -2.0 |
+| **Near-optimal framing trap** | `bottleneck_analysis.md` used "near-optimal", "no red flags", or similar language for a component with <85% BW/compute utilization, and champions treated it as not worth optimizing | -1.0 |
+| **Single-experiment dismissal** | A component contributing >30% of f_decode was dismissed based on a single micro-experiment (no replication, no alternative approach tested) | -1.5 |
+| **Cold-to-production overestimation** | Transcript claims E2E improvement that is >2x what the sweep actually measured. The empirical cold-to-production translation factor is 0.33-0.5x — claims above this range indicate hallucinated or inflated projections | -1.0 |
+
+For each anti-pattern found, include in the output:
+- Which pattern was triggered
+- Specific evidence (quote the artifact line or transcript claim)
+- The deduction applied
+
+### Verified E2E Extraction
+
+In addition to grading, extract **verified E2E numbers** from the campaign's sweep artifacts. This cross-references transcript claims against actual measured data.
+
+For each batch size with sweep results:
+1. Read `tracks/op*/e2e_latency/e2e_latency_results.json` for optimized E2E times
+2. Read `constraints.md` or baseline sweep data for baseline E2E times
+3. Compute delta % = (baseline - opt) / baseline * 100
+4. Record the technique name from the track's proposal or `state.json`
+5. **Filter by target dtype**: if the campaign target is BF16, exclude FP8/quantization results — these are outside the allowed optimization space
+
+Cross-reference extracted numbers against claims in debate transcripts and validation reports. Flag any discrepancy where the transcript claims a different speedup than what the sweep data shows.
+
+Output as `verified_e2e` field in the JSON (see schema below).
+
 ## Process
 
 1. Read `state.json` for campaign overview (rounds, shipped optimizations, track statuses)
@@ -144,13 +175,31 @@ Write `transcript_grading.json` to the current working directory.
     "Champion-3 proposal claims 'attention kernel takes 1800 µs' but bottleneck_analysis.md shows 1245 µs"
   ],
   "off_track_reasoning": [
-    "Champion-4 proposed optimizing token embedding (3.4% of decode) despite it being below the diminishing returns threshold"
+    "Champion-4 proposed optimizing token embedding (3.4% of decode) despite it being below the mechanical stop threshold"
+  ],
+  "anti_patterns": [
+    {
+      "pattern": "dominant_component_avoidance",
+      "evidence": "All 3 champions targeted GDN (13.8% f_decode) while GEMM (79.6% f_decode) had no optimization track. No independent negative experiments justified the exclusion.",
+      "deduction": -2.0
+    }
+  ],
+  "verified_e2e": [
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 7.473,
+      "optimized_e2e_s": 7.329,
+      "delta_pct": 1.94,
+      "technique": "GDN BV=8 + inter-GEMM fusion",
+      "dtype": "bf16",
+      "discrepancies": []
+    }
   ],
   "notes": "Campaign executed cleanly overall. One build retry in Stage 4 was unavoidable (genuine compilation error in custom CUDA kernel). The hallucinated timing in Champion-3's proposal likely led to an inflated feasibility score but did not affect the final selection since Champion-3 was rejected."
 }
 ```
 
-**When delegation is enabled**, use the enriched schema:
+**When delegation is enabled**, use the enriched schema (includes `anti_patterns` and `verified_e2e` same as above, plus delegation fields):
 
 ```json
 {
@@ -159,6 +208,8 @@ Write `transcript_grading.json` to the current working directory.
   "wasted_retries": ["..."],
   "hallucinated_data": ["..."],
   "off_track_reasoning": ["..."],
+  "anti_patterns": [],
+  "verified_e2e": [],
   "delegation_causality_bonus": {
     "chains": [
       {

@@ -85,6 +85,18 @@ python .claude/skills/ammo/eval/scripts/score_campaign.py \
   --report /tmp/ammo_eval_report.md
 ```
 
+### Step 3a: Create Eval Team
+
+Before spawning LLM agents, create a team that will persist for follow-up questions:
+
+```
+TeamCreate:
+  team_name: ammo-eval-{SESSION_ID_SHORT}
+  description: "AMMO eval agents for session {SESSION_ID}"
+```
+
+This team hosts the causal analyzer and transcript grader. Do NOT shut down the team after the eval completes — it remains alive so the user can ask follow-up questions to either agent.
+
 ### Step 3b: Extract Events + Build Causal DAG
 
 ```bash
@@ -112,10 +124,12 @@ python .claude/skills/ammo/eval/causal/score_nodes.py \
 
 ### Step 3d: LLM Deep Dive (Optional)
 
-If `--skip-deep-analysis` is NOT set, spawn an LLM grader subagent:
+If `--skip-deep-analysis` is NOT set, spawn as a team member:
 
 ```
-Spawn a subagent (general-purpose type) with:
+Spawn Agent (general-purpose type) with:
+  team_name: ammo-eval-{SESSION_ID_SHORT}
+  name: causal-analyzer
   prompt: Read the causal analyzer rubric at .claude/skills/ammo/eval/causal/agents/causal_analyzer.md,
           then analyze anomalies at /tmp/ammo_eval_anomalies.json
           with events at /tmp/ammo_eval_events.json
@@ -147,14 +161,18 @@ python .claude/skills/ammo/eval/causal/diff_versions.py \
 
 ### Step 4: Transcript Grading (Optional)
 
-If `--skip-transcript-grading` is NOT set, spawn an LLM grader subagent:
+If `--skip-transcript-grading` is NOT set, spawn as a team member:
 
 ```
-Spawn a subagent (general-purpose type, NOT a team member) with:
+Spawn Agent (general-purpose type) with:
+  team_name: ammo-eval-{SESSION_ID_SHORT}
+  name: transcript-grader
   prompt: Read the grader rubric at .claude/skills/ammo/eval/agents/transcript_grader.md,
           then evaluate the campaign artifacts at <ARTIFACT_DIR>.
           Write transcript_grading.json to /tmp/ammo_eval_transcript_grading.json.
 ```
+
+Steps 3d and 4 can run in parallel since they are independent.
 
 Then re-score with transcript quality:
 ```bash
@@ -196,6 +214,13 @@ python .claude/skills/ammo/eval/scripts/generate_dashboard.py \
 1. Read and display `/tmp/ammo_eval_report.md` to the user
 2. Tell the user: "Dashboard generated at `~/.claude/ammo-eval/dashboard.html`"
 3. If there are previous versions in the repository, highlight the delta vs the most recent previous version
+4. **Auto-rank against prior runs**: Query the eval repository (`index.json`) for all prior runs with the same target slug. If any exist, display a comparative ranking:
+   ```
+   This run's +X% E2E improvement ranks Nth of M runs for {target_slug}.
+   Best: +Y% ({version_id}) | Median: +Z% | Worst: +W% ({version_id})
+   ```
+   Include the full ranked table if 3+ prior runs exist.
+5. **Auto-offer deeper comparison**: After presenting results, tell the user: "There are N prior runs for this target. Want me to dig deeper into what drove the differences?" This is an open-ended offer — the orchestrator uses judgment on what to investigate based on user questions. The eval team (causal-analyzer, transcript-grader) remains alive to assist.
 
 ### Step 8: Cleanup
 
@@ -207,8 +232,11 @@ After presenting results, ask the user whether to clean up campaign artifacts. U
 1. **Campaign worktrees** — Remove all worktrees listed in the changes snapshot manifest via `git worktree remove <path> --force` and delete their tracking branches
 2. **Artifact directory** — Remove the `kernel_opt_artifacts/<campaign_dir>/` directory
 3. **Temp files** — Remove `/tmp/ammo_eval_*.json`, `/tmp/ammo_eval_*.md`, and `/tmp/ammo_eval_changes_snapshot/`
+4. **Eval team** — Shut down the eval team (causal-analyzer and transcript-grader)
 
 If the user selects nothing (or cancels), skip cleanup entirely. For each selected category, execute the cleanup and report what was removed.
+
+**Team persistence**: Do NOT shut down the eval team unless the user explicitly selects option 4. The team remains alive for follow-up questions — the user can ask the `causal-analyzer` or `transcript-grader` directly via SendMessage.
 
 Cleanup commands:
 ```bash
@@ -228,6 +256,9 @@ rm -rf /tmp/ammo_eval_snapshot.json /tmp/ammo_eval_scorecard.json \
        /tmp/ammo_eval_deep_analysis.json /tmp/ammo_eval_causal_dag_final.json \
        /tmp/ammo_eval_postmortem.md /tmp/ammo_eval_causal_viz.html \
        /tmp/ammo_eval_version_diff.json /tmp/ammo_eval_regression_report.md
+
+# Eval team (only if user selected option 4):
+# SendMessage to each team member with {type: "shutdown_request"}
 ```
 
 ## Scoring Dimensions
