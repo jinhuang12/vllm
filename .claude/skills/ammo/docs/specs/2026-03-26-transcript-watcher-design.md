@@ -115,24 +115,29 @@ python3 transcript_filter.py <path> \
 When `--include-subagents` is set, after processing the champion transcript:
 
 ```python
-def discover_subagents(champion_path, projects_dir, processed_records):
+def discover_subagents(champion_path, projects_dir, raw_records, pending_names=None):
     """Find subagent transcripts by matching Agent tool_use names.
 
-    Scans the champion's processed records for Agent tool_use blocks,
-    extracts spawned agent names, then globs projects_dir for matching
-    .jsonl transcripts.
+    Scans the champion's raw records for Agent tool_use blocks,
+    extracts spawned agent names, merges with pending_names from
+    the state file, then globs projects_dir for matching .jsonl
+    transcripts.
 
     Args:
         champion_path: Path to champion's .jsonl (to skip in glob)
         projects_dir: Directory containing .jsonl transcript files
-        processed_records: List of raw JSON record dicts from champion processing
+        raw_records: List of raw JSON record dicts from champion processing
+        pending_names: Set of agent names from state file that haven't been
+                       found yet (R3-C1 fix: prevents spawn window gap)
 
     Returns:
-        dict: {agent_name: transcript_path} for discovered subagents
+        (discovered, still_pending):
+            discovered: dict {agent_name: transcript_path}
+            still_pending: set of names not yet found (write back to state)
     """
     # Step 1: Extract spawned agent names from raw records
-    spawned_names = set()
-    for record in processed_records:
+    spawned_names = set(pending_names or [])
+    for record in raw_records:
         if record.get('type') != 'assistant':
             continue
         msg = record.get('message', {})
@@ -148,16 +153,17 @@ def discover_subagents(champion_path, projects_dir, processed_records):
                     spawned_names.add(agent_name)
 
     if not spawned_names:
-        return {}
+        return {}, set()
 
     # Step 2: Glob .jsonl files, match agentName in first 20 lines
     discovered = {}
+    champion_real = os.path.realpath(champion_path)  # R3-I2: normalize for comparison
     files = sorted(
         glob.glob(os.path.join(projects_dir, '*.jsonl')),
         key=os.path.getmtime, reverse=True)[:50]
 
     for f in files:
-        if f == champion_path:
+        if os.path.realpath(f) == champion_real:  # R3-I2: realpath comparison
             continue
         if len(discovered) == len(spawned_names):
             break  # All found
@@ -173,7 +179,8 @@ def discover_subagents(champion_path, projects_dir, processed_records):
                 except Exception:
                     continue
 
-    return discovered
+    still_pending = spawned_names - set(discovered.keys())  # R3-C1: names not yet found
+    return discovered, still_pending
 ```
 
 ### 3.4 Subagent State Tracking
@@ -185,10 +192,10 @@ The state file (already used for `LAST_LINE_PROCESSED`) is extended to track per
 1234
 ```
 
-**After** (`/tmp/monitor_state_{basename}.txt`):
+**After** (`/tmp/monitor_state_{monitor_name}.txt`) **(R3-M2: keyed by monitor name, not transcript basename)**:
 ```json
 {
-    "champion_line": 1234,
+    "pending_subagents": ["micro-exp-1"],
     "subagents": {
         "validator-1": {"path": "/home/.../.jsonl", "last_line": 567},
         "researcher-1": {"path": "/home/.../.jsonl", "last_line": 89}
@@ -196,7 +203,11 @@ The state file (already used for `LAST_LINE_PROCESSED`) is extended to track per
 }
 ```
 
-The state file format changes from a bare integer to JSON. For backwards compatibility, `main()` checks if the state file content is a bare integer (old format) and treats it as `{"champion_line": N, "subagents": {}}`.
+Note: `champion_line` is NOT stored in the state file **(R3-I1 fix)**. The monitor agent is the sole authority for the champion offset — it reads `LAST_LINE_PROCESSED` from stdout and passes it as `--start-line` on the next poll. The state file only tracks subagent state.
+
+The state file format changes from a bare integer to JSON. For backwards compatibility, `main()` checks if the state file content is a bare integer (old format) and ignores it (the old format only stored the champion line, which is now tracked via `--start-line`).
+
+**`pending_subagents`** (R3-C1 fix): Tracks agent names whose spawn was detected but whose transcript hasn't been found yet. On each poll, the filter merges `pending_subagents` from the state file with any new Agent spawn names from the current `raw_records`, then attempts discovery for all pending names. On successful discovery, the name moves from `pending_subagents` to `subagents`. This prevents the spawn window gap where a subagent is permanently lost if its transcript doesn't exist on the poll that first sees the spawn record.
 
 ### 3.5 Combined Output Format
 
@@ -224,6 +235,7 @@ NOISE_SKIPPED: 12
 PARSE_ERRORS: 0
 LAST_LINE_PROCESSED: 467
 SUBAGENTS_DISCOVERED: 2 (validator-1, researcher-1)
+SUBAGENTS_PENDING: 1 (micro-exp-1)
 SUBAGENT_LINES: validator-1=15, researcher-1=0
 ```
 
@@ -237,7 +249,11 @@ def main():
 
     # Read state file (handles both old integer and new JSON format)
     state = read_state(args.state_file)
-    start_line = state.get('champion_line', args.start_line)
+
+    # R3-I1: --start-line always wins for champion offset. The monitor agent
+    # is the source of truth (it reads LAST_LINE_PROCESSED from stdout).
+    # State file only stores subagent offsets and pending_subagents.
+    start_line = args.start_line
 
     # Process champion transcript (existing logic, unchanged)
     champion_records, raw_records, last_line = process_transcript(
@@ -249,8 +265,14 @@ def main():
 
     # Subagent processing (new)
     subagent_state = state.get('subagents', {})
+    pending_subagents = set(state.get('pending_subagents', []))
+    still_pending = set()
+
     if args.include_subagents and args.projects_dir:
-        discovered = discover_subagents(args.path, args.projects_dir, raw_records)
+        # R3-C1: Merge pending names from state + new names from raw_records
+        discovered, still_pending = discover_subagents(
+            args.path, args.projects_dir, raw_records,
+            pending_names=pending_subagents)
 
         # Also include subagents from previous state (already discovered)
         for name, info in subagent_state.items():
@@ -271,11 +293,13 @@ def main():
         subagent_state = new_subagent_state
 
     # Print summary
-    print_summary(last_line, subagent_state)
+    print_summary(last_line, subagent_state, still_pending)
 
     # Write state file (JSON format)
+    # R3-C1: pending_subagents persisted so next poll retries discovery
+    # R3-I1: champion_line NOT stored — monitor tracks via --start-line
     write_state(args.state_file, {
-        'champion_line': last_line,
+        'pending_subagents': sorted(still_pending),
         'subagents': subagent_state
     })
 ```
@@ -308,7 +332,7 @@ This is a straightforward extract-method refactor. The existing line-by-line pro
 | Edge Case | Handling |
 |-----------|----------|
 | Truncated final line (concurrent write) | Existing C1 logic: `json.JSONDecodeError` → `break`. File re-opened from `start_line` next poll — naturally retries. No file handle corruption risk (stateless). |
-| Subagent transcript not yet created | `discover_subagents()` won't find it. Next poll re-discovers (champion transcript re-read includes the Agent spawn record). No "pending discovery" state needed. |
+| Subagent transcript not yet created | `discover_subagents()` won't find it. Agent name persisted to `pending_subagents` in state file. Next poll merges pending names + new names, retries discovery. Name moves to `subagents` on success. **(R3-C1 fix)** |
 | Subagent transcript from wrong champion | Matched by `agentName` in first 20 lines + mtime ordering (newest first). Ambiguity risk low — AMMO agent names include champion identity (e.g., `validator-champion-1`). |
 | --include-subagents without --projects-dir | Subagent discovery skipped (no error). |
 | Old state file format (bare integer) | Detected and converted to `{"champion_line": N, "subagents": {}}`. |
@@ -421,7 +445,7 @@ Run it each poll with:
 |----------|------|
 | Filter script (checked in) | `.claude/skills/ammo/scripts/transcript_filter.py` |
 | Agent definition | `.claude/agents/ammo-transcript-monitor.md` |
-| State file (runtime) | `/tmp/monitor_state_{transcript_basename}.txt` |
+| State file (runtime) | `/tmp/monitor_state_{monitor_name}.txt` **(R3-M2: keyed by monitor name)** |
 | Observation log (runtime) | `{artifact_dir}/monitor_log_{champion_name}.md` |
 
 ### 5.3 Migration Path
