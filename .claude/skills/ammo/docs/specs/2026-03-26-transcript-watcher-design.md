@@ -1,7 +1,7 @@
 # Design Spec: Background Transcript Watcher for AMMO Monitor
 
 **Date**: 2026-03-26
-**Status**: Draft — Rev 2 (addresses adversarial review round 1)
+**Status**: Draft — Rev 3 (addresses adversarial review rounds 1 + 2)
 **Replaces**: The inline `transcript_filter.py` + poll-sleep-poll architecture in `2026-03-25-transcript-monitor-design.md`
 
 ---
@@ -74,14 +74,14 @@ The background watcher approach is confirmed as the best practical solution give
 │  Watcher Process       │  │  Digest File              │
 │  (background, single   │  │  /tmp/monitor_digest_X.md │
 │   Python process)      │──▶                            │
-│                        │  │  --- BATCH T1 (L450-467) │
+│                        │  │  --- BATCH T1 (champ 450) │
 │  • tail-f champion     │  │  [T] ASSISTANT (line 450) │
 │  • detect Agent spawns │  │    THINKING: ...           │
 │  • glob-match subagent │  │    BASH: ncu --set full   │
-│    transcripts         │  │  --- BATCH T2 (L467-489) │
+│    transcripts         │  │  --- BATCH T2 (champ 467) │
 │  • filter noise        │  │  [sub:val-1] [T] ASST ... │
-│  • batch & flush       │  │  --- BATCH T3 (L489-489) │
-│    every 10s           │  │  (no new content)          │
+│  • batch & flush       │  │                            │
+│    every 10s           │  │  (empty: nothing written)  │
 │  • write status file   │  └───────────────────────────┘
 └────────────────────────┘
            │ discovers & tails
@@ -134,13 +134,25 @@ class TranscriptTailer:
         self._seek_to_line(start_line)
 
     def poll(self) -> list[str]:
-        """Read any new complete lines, filter, return formatted strings."""
+        """Read any new complete lines, filter, return formatted strings.
+
+        R2-C1 fix: Save file position before each readline(). On JSONDecodeError
+        (truncated line from concurrent write), seek back to the saved position
+        so the next poll() retries the line from its start. Without this, readline()
+        advances past the partial bytes, and the next poll reads only the tail
+        fragment — permanently losing sync.
+        """
         new_lines = []
         self.last_raw_records = []  # Raw JSON dicts for caller inspection (I1 fix)
         while True:
+            pos = self.fh.tell()  # R2-C1: save position before read
             line = self.fh.readline()
             if not line:
                 break  # No more data — file frontier reached
+            if not line.endswith('\n'):
+                # Incomplete line — writer is mid-append. Rewind and retry next poll.
+                self.fh.seek(pos)  # R2-C1: rewind to start of partial line
+                break
             line = line.strip()
             self.line_num += 1
             if not line:
@@ -149,7 +161,10 @@ class TranscriptTailer:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
-                break  # Truncated line — active write frontier (C1 logic)
+                # Complete line but invalid JSON — genuine corruption.
+                # Skip it (don't rewind — line was complete, just malformed).
+                self.last_successful = self.line_num
+                continue
             self.last_raw_records.append(record)
             # Filter noise
             if record.get('type') in NOISE_TYPES:
@@ -166,16 +181,29 @@ class TranscriptTailer:
 class TranscriptWatcher:
     """Manages champion tailer + discovered subagent tailers."""
     def __init__(self, args):
-        self.champion_tailer = TranscriptTailer(args.transcript, label="")
+        # R2-I1: Resume from last known position if status file exists
+        start_line = 0
+        if args.status_file and os.path.exists(args.status_file):
+            try:
+                with open(args.status_file) as sf:
+                    status = json.load(sf)
+                    start_line = status.get('champion_line', 0)
+            except (json.JSONDecodeError, KeyError):
+                pass  # Start from 0 on corrupt status file
+
+        self.champion_tailer = TranscriptTailer(args.transcript, label="", start_line=start_line)
         self.subagent_tailers = {}   # name -> TranscriptTailer
         self.pending_discoveries = {} # name -> first_seen_time
         self._discovery_last_attempt = {}  # name -> last_attempt_time (C2/I2 throttle)
-        self.digest_file = open(args.digest_file, 'w')
+        self.digest_file = open(args.digest_file, 'a')  # R2-C3: append mode survives restart
         self.batch_buffer = []
         self.last_flush = time.time()
         self.batch_interval = args.batch_interval
         self.projects_dir = args.projects_dir
         self.champion_name = args.champion_name
+        self.status_file = args.status_file
+        self.max_idle_seconds = args.max_idle_seconds
+        self.max_runtime_seconds = args.max_runtime_seconds
         self.stats = {'polls': 0, 'batches': 0, 'records': 0,
                       'subagents_discovered': 0}
 
@@ -290,7 +318,12 @@ class TranscriptWatcher:
         return None
 
     def _flush_batch(self):
-        """Write accumulated records to digest file."""
+        """Write accumulated records to digest file.
+
+        R2-M4: Only write batches when there's actual content. Empty intervals
+        are tracked via the status file's last_flush timestamp for liveness,
+        not via empty batch markers in the digest.
+        """
         now = datetime.now().isoformat(timespec='seconds')
         champion_line = self.champion_tailer.last_successful
         if self.batch_buffer:
@@ -298,20 +331,39 @@ class TranscriptWatcher:
                 f"--- BATCH {now} (champion line {champion_line}) ---\n")
             for line in self.batch_buffer:
                 self.digest_file.write(line + '\n')
+            self.digest_file.flush()
             self.stats['records'] += len(self.batch_buffer)
-        else:
-            self.digest_file.write(
-                f"--- BATCH {now} (champion line {champion_line}) [empty] ---\n")
-        self.digest_file.flush()
+            self.stats['batches'] += 1
         self.batch_buffer = []
         self.last_flush = time.time()
-        self.stats['batches'] += 1
         self._write_status()
 
     def _write_status(self):
-        """Write liveness/stats to status file."""
-        # JSON with: timestamp, polls, batches, records, subagents tracked, etc.
-        ...
+        """Write liveness/stats to status file (JSON). Updated every batch interval."""
+        if not self.status_file:
+            return
+        status = {
+            'last_flush': datetime.now().isoformat(timespec='seconds'),
+            'champion_line': self.champion_tailer.last_successful,
+            'polls': self.stats['polls'],
+            'batches': self.stats['batches'],
+            'records': self.stats['records'],
+            'subagents': list(self.subagent_tailers.keys()),
+            'pending_discoveries': list(self.pending_discoveries.keys()),
+            'uptime_seconds': int(time.time() - self.start_time),
+        }
+        try:
+            with open(self.status_file, 'w') as sf:
+                json.dump(status, sf)
+        except Exception:
+            pass  # Best-effort
+
+    def _write_termination(self, reason, value):
+        """Write termination reason to digest file and status file before exit."""
+        now = datetime.now().isoformat(timespec='seconds')
+        self.digest_file.write(f"--- TERMINATED {now}: {reason} ({value:.0f}s) ---\n")
+        self.digest_file.flush()
+        self._write_status()
 ```
 
 ### 3.4 Record Formatting
@@ -333,14 +385,17 @@ These functions are extracted as-is from the existing filter script. The only ad
 
 | Edge Case | Handling |
 |-----------|----------|
-| Truncated final line (concurrent write) | `JSONDecodeError` → `break` (same C1 logic as existing filter). Next `poll()` retries from the same position since `fh` stays seeked there. |
+| Truncated final line (concurrent write) | Detected by `not line.endswith('\n')`. File handle rewound via `fh.seek(pos)` to before the partial read. Next `poll()` retries the line from its start. **(R2-C1 fix)** |
 | Champion file deleted/rotated | `readline()` returns `""` indefinitely. Watcher self-terminates after `--max-idle-seconds` (default 300s) with no new content. **(C1 fix)** |
 | Subagent transcript not yet created | Queued in `pending_discoveries`, retried every 2s indefinitely until found or watcher terminates. No expiry — subagent startup can take 10-30s. **(C2 fix)** |
 | Subagent transcript from different champion | `_find_transcript_by_agent_name()` skips files already tracked and the champion's own file. However, if two champions spawn agents with the same name, there's an ambiguity. Mitigated by checking mtime (newest first) and expecting the subagent to start after the spawn was detected. |
 | Watcher process dies | Monitor agent detects stale status file (no update for >30s) and can restart the watcher. |
 | Digest file grows very large | The monitor reads with `offset=last_line`, only processing new batches. The file itself grows unboundedly but is in `/tmp/` and is small (filtered content only, ~1-5MB over 3 hours). |
 | `fh.readline()` after file truncation | If the `.jsonl` file is truncated (shouldn't happen in normal Claude Code operation), `readline()` returns `""`. The tailer treats this as "no new data" and continues polling. |
-| Multiple batch flushes with no new content | Empty batches written as `--- BATCH ... [empty] ---`. Monitor agent can skip these cheaply. |
+| Multiple batch flushes with no new content | No batch written to digest — empty intervals tracked via status file `last_flush` timestamp only. **(R2-M4 fix)** |
+| Watcher crash mid-write to digest | Killed via SIGTERM during `digest_file.write()` may leave a truncated final line. Monitor should ignore digest lines that don't match expected format (batch header or content). **(R2-I4)** |
+| Watcher restart after crash | Resumes from `champion_line` in status file; digest opened in append mode preserves existing content. May re-process a few lines near the crash point (acceptable — small overlap vs data loss). **(R2-I1 + R2-C3)** |
+| Subagent file handles after completion | File handles for completed subagents remain open but idle (`readline()` returns `""`). With 1-3 subagents this is negligible. Documented as known limitation. **(R2-I3)** |
 
 ### 3.6 Subagent Spawn Detection
 
@@ -409,7 +464,7 @@ Key differences:
 - `Read` instead of `Bash` — cheaper, no process fork
 - 10s interval instead of 5s — the watcher batches at 10s, so polling faster than the batch interval is wasteful
 - No `--start-line` tracking — the monitor just tracks its last-read line in the digest file
-- State management is simpler — no separate state file needed
+- **State file retained for crash recovery** **(R2-I2 fix)**: The monitor writes `last_digest_line` to its observation log after each poll. On context compression, the monitor re-reads its observation log to recover the offset. This is cheap (one line in an existing file) and provides the same crash resilience as the old `/tmp/monitor_state_*.txt` file.
 
 ### 4.3 Liveness Monitoring
 
@@ -530,7 +585,9 @@ The primary cost savings come from:
 
 **Note (I5)**: Read with high line offsets performs an O(n) scan from the start of the file, not O(1) seek. However, the digest file is small (~5,000-6,000 lines over 3 hours of filtered content), making this negligible compared to scanning a 50,000+ line raw transcript.
 
-Estimated cost with caching + compression: **$20-40/session** (vs $30-50 previously). The savings are moderate because the dominant cost is still the accumulated context in the monitor agent, not the tool call overhead.
+Estimated cost with caching + compression: **$20-40/session** (vs $30-50 previously).
+
+**Honest attribution (R2-I3)**: The cost reduction is primarily explained by halving the poll frequency (5s → 10s = half the turns). If the old design had polled every 10s, it would cost roughly the same. The watcher's real value is **simplicity** (no /tmp script writing, smaller spawn prompt, auto subagent discovery), not cost reduction. The cost improvement is a side effect of the longer batch interval, not the architecture change.
 
 ---
 
@@ -572,7 +629,35 @@ Remove entirely:
 
 ---
 
-## 8. Resolved Questions
+## 8. Simpler Alternative Considered
+
+One reviewer proposed: instead of the background watcher, simply add `--include-subagents --projects-dir` flags to the existing filter script and keep the poll-per-Bash approach. Each Bash poll runs the filter, which also discovers and reads subagent transcripts.
+
+| Property | Background Watcher | Extended Filter Script |
+|----------|-------------------|----------------------|
+| Complexity | High (background process, status files, PID files, liveness, restart logic, file handle management) | Low (stateless per-poll, self-healing by design) |
+| Truncated line handling | Requires `fh.tell()`/`fh.seek()` (R2-C1) — subtle | File re-opened each poll — naturally retries |
+| Crash recovery | Needs resume logic (R2-I1), append mode (R2-C3) | Stateless — just pass `--start-line N` |
+| Subagent coverage | Auto-discovers, keeps file handles open | Discovers + reads per poll (slightly more I/O) |
+| Python startup overhead | 1 startup total | ~1,080 startups (10s intervals) |
+| Spawn prompt size | ~1,500 tokens (no embedded script) | ~1,500 tokens (script lives in repo either way) |
+| /tmp script writing | None (script in repo) | None (script in repo) |
+
+**Assessment**: The extended filter script captures most of the value (subagent coverage, no /tmp script writing, smaller spawn prompt) with dramatically less complexity. The watcher's main advantage — eliminating Python startup overhead — saves ~1,080 × 70ms = ~76 seconds over 3 hours, which is negligible.
+
+**Recommendation**: The extended filter approach is the better path. The background watcher is over-engineered for the actual gains. If the user still wants the watcher for future streaming capabilities, the R2 fixes make it viable, but the simpler approach should be the default.
+
+---
+
+## 9. Platform Assumptions
+
+**R2-I5: Background Bash timeout.** The design assumes `run_in_background=True` Bash commands run indefinitely (no 600s timeout). This is the expected behavior per Claude Code documentation (background tasks are designed for long-running work), but if background commands do timeout, the watcher dies after 10 minutes. The monitor's liveness check (30s staleness on status file) would detect this and trigger a restart.
+
+**R2-I4: Signal handling.** The watcher has no SIGTERM handler. When killed, it may die mid-write to the digest file. The monitor should ignore digest lines that don't parse as expected batch headers or content lines. The status file (written atomically via `open/write/close`) survives graceful kills.
+
+---
+
+## 10. Resolved Questions
 
 1. **Digest file cleanup**: Don't rotate — let it grow. Rotation risks the monitor missing content between reads. The watcher also maintains a **metadata sidecar file** (`/tmp/monitor_digest_{name}.meta`) with the current batch count and last-written line number, allowing the monitor to detect "no new content" without reading the digest at all. **(M3 fix: adopted)**
 2. **Watcher error reporting**: The watcher writes errors to BOTH the digest file (as `--- ERROR {timestamp}: {message} ---` batch markers) AND the status file (`"error": "..."` field). The digest approach ensures the monitor sees errors even if it doesn't check the status file. Fatal errors (e.g., transcript deleted) are followed by self-termination.
@@ -580,7 +665,9 @@ Remove entirely:
 
 ---
 
-## 9. Review Findings Addressed
+## 11. Review Findings Addressed
+
+### Round 1
 
 | ID | Severity | Issue | Fix |
 |----|----------|-------|-----|
@@ -595,3 +682,19 @@ Remove entirely:
 | M2 | Minor | PID file path collision risk | Low risk; unique naming via `--digest-file` flag covers this |
 | M3 | Minor | Digest rotation has clear answer + optimization | Adopted: no rotation, added metadata sidecar file for cheap "new content?" check |
 | M4 | Minor | `--projects-dir` hardcoded in spawn prompt | Derived dynamically from `os.getcwd()` in orchestrator |
+
+### Round 2
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| R2-C1 | Critical | File position corruption on truncated lines — readline() advances past partial bytes, permanently losing sync | Check `line.endswith('\n')` before parsing; `fh.seek(pos)` to rewind on incomplete line |
+| R2-C2 | Critical | "1 Bash call" headline claim misleading | Already fixed in Rev 2 (Key Properties section). Verified no remaining instances. |
+| R2-C3 | Critical | Digest file opened with `'w'` (truncate) — restart loses data | Changed to `'a'` (append) mode |
+| R2-I1 | Important | No resume logic on watcher restart — re-processes entire transcript | Read `champion_line` from status file on startup; pass as `start_line` to `TranscriptTailer` |
+| R2-I2 | Important | No digest offset recovery after context compression | Monitor writes `last_digest_line` to observation log; recovers on re-read |
+| R2-I3 | Important | Cost savings attributed to architecture, but actually from halved poll frequency | Honest attribution added to cost analysis |
+| R2-I4 | Important | No signal handling — crash mid-write corrupts digest | Documented in Section 9; monitor ignores malformed digest lines |
+| R2-I5 | Important | Background Bash timeout assumption unverified | Documented in Section 9; liveness check is the recovery path |
+| R2-M1 | Minor | Architecture diagram batch format doesn't match code | Diagram updated |
+| R2-M4 | Minor | Empty batch markers are write amplification | Skip empty batches; use status file `last_flush` for liveness |
+| — | Design | Simpler alternative: extend existing filter script instead of background watcher | Section 8 evaluates both approaches; recommends simpler path as default |
