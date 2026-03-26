@@ -21,9 +21,9 @@ You are the **lead orchestrator**. You scaffold, delegate, and gate — you neve
 - Do not write kernel code (CUDA or Triton) yourself
 - Do not skip team creation "for efficiency"
 - Do not implement directly — always delegate to subagents
-- Do not override state.json configuration (delegation, thresholds, etc.) without user approval
+- Do not override state.json configuration (thresholds, etc.) without user approval
 
-**Configuration Fidelity**: The orchestrator MUST respect all `state.json` configuration flags as written. If the orchestrator believes a configuration should change (e.g., disabling delegation for a round), it MUST propose the change to the user and wait for approval before acting. The orchestrator does NOT have discretion to override configuration settings — it scaffolds, delegates, and gates, not makes policy.
+**Configuration Fidelity**: The orchestrator MUST respect all `state.json` configuration flags as written. If the orchestrator believes a configuration should change (e.g., adjusting thresholds for a round), it MUST propose the change to the user and wait for approval before acting. The orchestrator does NOT have discretion to override configuration settings — it scaffolds, delegates, and gates, not makes policy.
 
 ## Invocation
 
@@ -127,7 +127,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 **When to launch**: Immediately after spawning all implementation agents for round N. The debate uses the EXISTING bottleneck_analysis.md (from the most recent profiling) -- it does NOT wait for re-profiling.
 
 **How it works**:
-1. Spawn 2-4 ammo-champion agents (+ delegates — REQUIRED when delegation.enabled is true) into the existing round team.
+1. Spawn 2-4 ammo-champion agents into the existing round team.
 2. Moderate debate using the standard protocol (Phase 0 -> rounds -> selection).
 3. Interleave debate moderation with implementation monitoring: broadcast debate phase starts, then check for impl track completions, then wait for debate phase completions.
 4. When debate finishes: score winners, shut down debate champions via `shutdown_request`. Record winners in `debate.next_round_overlap.selected_winners`.
@@ -135,14 +135,14 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 6. After integration: winners from the overlapped debate become the implementation candidates for round N+1 (subject to lazy invalidation -- see Campaign Loop Transition above).
 
 **Communication boundaries** (ENFORCED):
-- Debate champions communicate with: each other (via file artifacts), orchestrator (via SendMessage), their delegates (via SendMessage).
+- Debate champions communicate with: each other (via file artifacts), orchestrator (via SendMessage).
 - Implementation agents communicate with: their paired validator (via SendMessage), orchestrator (via SendMessage).
 - Debate champions MUST NOT message implementation agents. Implementation agents MUST NOT message debate champions.
 - The orchestrator enforces this by not providing cross-workstream agent names in spawn prompts.
 
 **Lazy invalidation**: After re-profiling in the next round, the orchestrator checks each overlapped-debate winner's f-value against the new profiling data. If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`, the candidate is discarded (the target kernel's share shifted too much). If `f_old < 0.05`, skip invalidation for that candidate (the kernel is too small to measure f-shift reliably). Otherwise, the candidate proceeds to implementation. This replaces the old eager re-scoring protocol.
 
-**GPU allocation**: Debate champions & delegates may run brief GPU micro-benchmarks using the pool (`--num-gpus 1`).
+**GPU allocation**: Debate champions may run brief GPU micro-benchmarks using the pool (`--num-gpus 1`).
 
 **If round N is round 1**: Do NOT launch overlapped debate. Round 1 has no prior profiling data for the next round's debate to use.
 
@@ -190,11 +190,11 @@ If a red flag fires, the researcher must investigate before the lead proceeds to
 
 - **TeamCreate**: `ammo-round-{round_id}-{model_short}-{hardware}` — this is the **round team**, created once and reused through Stages 4-5.
 - Spawn 2-4 ammo-champion agents into the round team. Each reads the grounded bottleneck_analysis.md independently.
-- **Delegation**: If `state.json` has `debate.delegation.enabled: true`, the orchestrator MUST spawn Sonnet delegate agents alongside champions (1-N per champion, per `delegates_per_champion`). Skipping delegates when the flag is `true` is a protocol violation. To disable delegation for a specific round, the orchestrator MUST update `delegation.enabled` to `false` in state.json WITH user approval first. Champions direct delegates via SendMessage for research and micro-experiments. See `orchestration/debate-protocol.md` § Delegation.
-- **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists. With delegation, champions may direct delegates to extract profiling data and run roofline calculations.
+- After spawning each champion, spawn an `ammo-transcript-monitor` (Sonnet) in background — one per champion. The monitor periodically reads the champion's debate artifacts (proposals, arguments) and runs DA audits via transcript reading, without requiring SendMessage from the champion. See `orchestration/debate-protocol.md` for monitor details.
+- **Phase 0 (Proposals)**: Each champion independently proposes 1-2 optimization candidates with micro-experiment-backed feasibility math. Champions derive candidates from the profiling data — NOT from pre-scored candidate lists.
 - **Debate rounds**: Champions argue for their proposals, critique others, rebut. See `orchestration/debate-protocol.md`.
 - Main session selects 2-3 winners using scoring rubric (`references/debate-scoring-rubric.md`).
-- **After selection**: Shut down debate champions and delegates via `shutdown_request` (they are no longer needed). The **round team persists** — implementation agents will be spawned into it in Stages 4-5. Do NOT call TeamDelete here.
+- **After selection**: Shut down debate champions via `shutdown_request` (they are no longer needed). The **round team persists** — implementation agents will be spawned into it in Stages 4-5. Do NOT call TeamDelete here.
 - **Debate is always mandatory.** Minimum 2 debate rounds required — no convergence shortcut (see `orchestration/debate-protocol.md` § No Convergence Shortcut).
 
 ### Stages 4-5: Parallel Worktree Tracks (Adversarial Validation)
@@ -203,9 +203,9 @@ Each track uses a **champion + independent validator** pair to prevent reward ha
 
 Execute these steps **in order**:
 
-1. **Spawn implementation agents into the round team**: Per winning candidate, spawn an `ammo-impl-champion` (Opus, `isolation: worktree`) and an `ammo-impl-validator` (Sonnet) into the existing round team (the same team used for debate). The champion implements; the validator independently writes its own correctness tests, benchmark scripts, and runs E2E sweeps. The DA TeammateIdle hook fires on the champion, who aggregates the validator's raw results into `validation_results.md`. GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock.
+1. **Spawn implementation agents into the round team**: Per winning candidate, spawn an `ammo-impl-champion` (Opus, `isolation: worktree`) and an `ammo-impl-validator` (Sonnet) into the existing round team (the same team used for debate). The champion implements; the validator independently writes its own correctness tests, benchmark scripts, and runs E2E sweeps. The DA TeammateIdle hook fires on the champion, who aggregates the validator's raw results into `validation_results.md`. GPU assignment: kernel benchmarks parallel on separate GPUs, E2E sequential via lock. **Validation spawn**: When the impl-champion reaches a validation gate, it writes a `VALIDATION_REQUEST` file to its track directory. The orchestrator detects this and spawns the `ammo-impl-validator` to run independent validation — the champion does not spawn or message the validator directly.
 
-2. **Launch overlapped debate (round 2+ only)**: If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents (+ delegates — REQUIRED when delegation.enabled is true) into the same round team. Follow the standard debate protocol (Phase 0 -> rounds -> selection) while also monitoring implementation tracks. See "Overlapped Debate" section above. For round 1, skip this step.
+2. **Launch overlapped debate (round 2+ only)**: If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents into the same round team. After spawning each champion, spawn an `ammo-transcript-monitor` (Sonnet) in background for periodic DA review. Follow the standard debate protocol (Phase 0 -> rounds -> selection) while also monitoring implementation tracks. See "Overlapped Debate" section above. For round 1, skip this step.
 
 3. **Monitor and gate**: While implementation agents run, actively monitor progress. Interleave debate moderation (if active) with implementation gating. As each champion completes (DA Stop hook passed), run its compilation gate (T9) and update state.json. Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed.
 
@@ -249,7 +249,7 @@ T3:  GATE: verify_phase1_baseline.py                      [main]                
 T4:  Bottleneck mining (grounded data only)                [ammo-researcher subagent]    <- T3
 T5:  GATE: Stage 2 review (no ungrounded estimates)       [main]                        <- T4
 T5b: Baseline ncu sanity check (top-3 kernels by f_decode) [ammo-researcher subagent]   <- T5
-T6:  TeamCreate round team + champion proposals + debate (Phase 0 [+delegates if enabled] -> rounds -> selection -> shutdown champions) [main + round team] <- T5b
+T6:  TeamCreate round team + champion proposals + debate (Phase 0 -> rounds -> selection -> shutdown champions) [main + round team] <- T5b
 T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]                <- T6
 
   +- Per winning candidate (parallel, all in existing round team) ----------------------+
@@ -332,7 +332,7 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 | **WorktreeRemove** | `worktree-remove-cleanup.sh` | Cleans up worktree resources |
 
 Inline DA verification (integrated into helper agents — replaces non-functional Stop hook DAs for team members):
-- **ammo-delegate** → After Phase 0 proposal and each round's argument: 7-point DA audit (custom kernel mandate, evidence tier verification with claim-evidence matching, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target, BS-gated sanity). Writes audit files to `debate/delegate_work/` for orchestrator visibility.
+- **ammo-transcript-monitor** → Periodic transcript-based DA review of champion debate arguments: 7-point DA audit (custom kernel mandate, evidence tier verification with claim-evidence matching, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target, BS-gated sanity). Writes audit files to `debate/monitor_audits/` for orchestrator visibility.
 - **ammo-impl-validator** → After Gates 5.1/5.2/5.3: 5+ point DA section in validation report (Amdahl sanity, cross-track awareness, kernel-to-E2E coherence, scope adherence, Gate 5.2 cross-check; plus conditional GATED_PASS checks).
 - **ammo-researcher** Stop → DA checks for ungrounded claims (subagent — Stop hooks work correctly).
 
@@ -357,12 +357,6 @@ Inline DA verification (integrated into helper agents — replaces non-functiona
     "max_rounds": 4,
     "selected_winners": [],
     "selection_rationale": null,
-    "delegation": {
-      "enabled": false,
-      "delegates_per_champion": 1,
-      "champion_delegate_mapping": {},
-      "delegate_results": {}
-    },
     "next_round_overlap": {
       "active": false,       /* whether an overlapped debate is running during Stages 4-5 */
       "phase": null,         /* "phase_0" | "debating" | "selecting" | "selection_complete" | null */

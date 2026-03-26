@@ -222,7 +222,7 @@ If all implementation tracks for round N fail (round EXHAUSTED), but the overlap
 ### Campaign Terminates During Overlapped Debate
 
 If the campaign transitions to `campaign_complete` or `campaign_exhausted` while `debate.next_round_overlap.active` is `true`:
-1. Shut down all overlapped debate champions (and delegates) via `shutdown_request`.
+1. Shut down all overlapped debate champions via `shutdown_request`.
 2. Discard overlapped debate results -- they will never be used.
 3. Clear `debate.next_round_overlap` to initial state.
 4. Proceed with TeamDelete and campaign termination as normal.

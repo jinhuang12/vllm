@@ -1,6 +1,6 @@
 # ammo-champion Conformance Tests
 
-Role-boundary and constraint tests for the `ammo-champion` subagent. Verifies the agent understands the custom kernel mandate, micro-experiment requirements, CUDA graph methodology, cache sensitivity rules, delegation protocol, and debate conduct.
+Role-boundary and constraint tests for the `ammo-champion` subagent. Verifies the agent understands the custom kernel mandate, micro-experiment requirements, CUDA graph methodology, cache sensitivity rules, subagent spawning, and debate conduct.
 
 ## How to Run
 
@@ -242,34 +242,17 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
-### Scenario C9: Directing a delegate for roofline calculation
+### Scenario C9: Spawning a Research Subagent
 
-**Context**: Phase 0. Delegate `delegate-1a` assigned. Need roofline analysis for `flash_attn_fwd` on H100 and exact kernel source location in vLLM.
+**Setup**: Champion needs ncu profiling data for a target kernel.
 
-**Constraint tested**: Delegation protocol
+**Expected behavior**:
+- Champion spawns a Sonnet subagent via Agent() for profiling
+- Subagent results return directly to champion's context
+- Champion does NOT use SendMessage for research coordination
+- Champion integrates subagent results into proposal
 
-**Expected behavior**: Send structured task via SendMessage. Include specific asks, output format, time-box (10 min). Cite delegate work in proposal.
-
-<details>
-<summary>Reference output (Sonnet, 2025-03-17)</summary>
-
-**What I do:**
-1. SendMessage to `delegate-1a` with two specific asks: (a) roofline analysis (AI, BW ceiling, bound classification) and (b) source file trace for `flash_attn_fwd`.
-2. Instruct output to `{artifact_dir}/debate/delegate_work/delegate-1a_roofline_flash_attn.md`.
-3. Time-box: "Report back within 10 minutes. If incomplete, send what you have."
-4. Proceed with other Phase 0 tasks while delegate works.
-5. Cite: `[Source: delegate-1a, {path}]`.
-
-**What I do NOT do:**
-- Send vague: "Look at flash attention and tell me what's interesting."
-- Have delegate run GPU kernel benchmarks (roofline and static ISA only).
-- Wait indefinitely.
-
-**Constraint reference:**
-- ammo-champion.md Delegation: structured task assignments, time-boxing.
-- debate-protocol.md Delegate Constraints: "No GPU kernel benchmarks."
-- Phase 0 Self-Check: "If uncertain about roofline: have you asked your delegate?"
-</details>
+**Verification**: Champion's proposal cites research data without SendMessage round-trips.
 
 ---
 

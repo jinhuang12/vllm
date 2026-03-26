@@ -50,10 +50,10 @@ When the validator reports a gate failure:
 1. Validator reports failure details to champion (SendMessage with full error context)
 2. Champion diagnoses root cause
 3. Champion fixes implementation, recompiles if needed, commits
-4. Champion re-delegates validation with new commit SHA
+4. Champion messages validator directly for re-validation with new commit SHA
 5. Validator re-runs ALL gates from scratch with fresh independent tests
 
-The validator writes new tests each re-delegation cycle — the champion cannot "fix" by influencing the test methodology.
+The validator writes new tests each re-validation cycle — the champion cannot "fix" by influencing the test methodology.
 
 ## GATING_REQUIRED Workflow
 

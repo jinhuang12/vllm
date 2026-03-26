@@ -128,59 +128,11 @@ You may be running in an overlapped context where implementation agents are also
   block if GPUs are busy. Keep micro-experiments brief to minimize contention.
 - Debate phase starts may be delayed while the orchestrator handles implementation events. This is normal -- wait for the orchestrator's broadcast.
 
-## Delegation
+## Subagents
 
-You may be assigned Sonnet-model "delegate" agents to assist with any task you'd like to delegate, keeping your context focused on strategy and synthesis.
-
-### Discovering Your Delegates
-
-On first activation, check `state.json` for `debate.delegation`:
-- If `delegation.enabled` is `false` or `champion_delegate_mapping` has no entry for your ID: **run solo** — all research is your responsibility (same as before).
-- If mapping exists (e.g., `"champion-1": ["delegate-1a"]`): you have delegate(s) to direct.
-
-### Directing Delegates
-
-Use SendMessage to assign tasks. Think of the delegate as a capable junior engineer on your team:
-- **Use them for anything helpful**: codebase research, ncu profiling, tracing dispatch paths, running scripts, looking up code patterns, pre-scaffolding tests
-- **They'll proactively flag issues**: dispatch conditions you might miss, tensor shape problems, prior failed attempts at similar optimizations
-
-### Structured Output
-
-Request delegates use the structured report format (kernel name, f-values, methodology, results with units). This lets you validate numbers without re-reading raw data.
-
-### Time-Boxing
-
-Tell delegates: "Report back within 10 minutes. If incomplete, send what you have." Do NOT wait indefinitely — proceed with partial data or your own analysis if a delegate is slow.
-
-### Citing Delegate Work
-
-In proposals and arguments, cite delegate findings with path references:
-```
-[Source: delegate-1a analysis, {artifact_dir}/debate/delegate_work/delegate-1a_bottleneck_top3.md]
-```
-
-### Phase Scope
-
-- **Phase 0 (Proposals)**: Direct delegates for profiling data extraction, codebase research, roofline calculations
-- **Phase C (Rebuttal)**: Optionally direct delegates to gather counter-evidence for critiques received
-- **Phase A/B**: Delegates are idle unless you assign specific research. Write arguments and critiques yourself.
-
-### Delegate Limitations
-
-- Delegates CANNOT spawn sub-agents
-- Delegates CANNOT modify vLLM source code
-- Delegates write results to `{artifact_dir}/debate/delegate_work/`
-
-### Delegate DA Verification
-
-Your delegate performs orchestrator-mandated adversarial verification on your proposals and arguments at specific checkpoints (after Phase 0 proposal, after each round's argument). When you receive a `DA-AUDIT:` message:
-
-1. Read the findings — each item is PASS or FAIL with evidence
-2. For FAIL items: fix the issue or provide specific counter-evidence (assertions are not sufficient)
-3. If you believe the delegate's finding is incorrect, explain why with data. If correct, fix it.
-4. Do NOT ask the delegate to skip or ignore DA checks — they will refuse and escalate.
-
-The DA checklist covers: custom kernel mandate, micro-experiment evidence existence, CUDA graph methodology, Amdahl's consistency, E2E estimate grounding, and steady-state target check.
+You can spawn Sonnet subagents via Agent() for parallel research tasks
+(dispatch tracing, ncu profiling, shape computation). Subagent results
+return directly to your context — no SendMessage coordination needed.
 
 ## References
 

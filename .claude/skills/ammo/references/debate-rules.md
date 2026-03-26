@@ -1,6 +1,6 @@
 # Debate Rules
 
-Agent-facing rules for the Stage 3 adversarial debate. Champions and delegates must follow these rules during proposal generation, micro-experiments, and debate rounds.
+Agent-facing rules for the Stage 3 adversarial debate. Champions must follow these rules during proposal generation, micro-experiments, and debate rounds.
 
 ## Evidence Tiers
 
@@ -57,8 +57,6 @@ For proposals that fuse multiple kernels into one, the above cache requirements 
 1. **Pipeline working set check**: Estimate total per-iteration working set (num_layers x per_layer_state). If this exceeds 2x the GPU's L2 cache, isolated benchmarks on small tensors overstate the fused kernel's benefit.
 2. **L2-busting methodology**: Test the fused kernel with chained distinct data totaling > 2.5x L2 cache size, forcing DRAM streaming. This simulates production L2 competition.
 3. **Report both**: Report speedup under (a) isolated warm-cache and (b) L2-busted cold conditions. If (a)/(b) > 1.5x, the E2E estimate MUST use the cold-cache speedup.
-
-Note: If uncertain about roofline or L2 sizing, direct your delegate to calculate and verify.
 
 ## Pipeline-Level Simulation
 
@@ -119,23 +117,6 @@ A component with `f_decode` > 30% cannot be dismissed as "near-optimal" or "not 
 1. **Two independent negative results required**: Two different champions (or the same champion with two fundamentally different approaches) must independently demonstrate the component is within 10% of its physical ceiling.
 2. **No single-experiment dismissal**: If only one champion tested the component and found a negative result, at least one other champion must verify before the component can be excluded.
 3. **Framing constraint**: The bottleneck analysis and debate artifacts must not label any component with measured utilization below 85% as "near-optimal." Present the gap as headroom: e.g., "73% BW utilization = 27% headroom."
-
-## Phase Scope for Delegates
-
-| Phase | Delegate Role |
-|-------|--------------|
-| **Phase 0 (Proposals)** | Active — profiling data extraction, codebase research, roofline calcs, ISA inspection |
-| **Phase A (Evidence)** | Idle unless champion assigns specific research |
-| **Phase B (Critique)** | Idle unless champion assigns specific research |
-| **Phase C (Rebuttal)** | Optionally active — gather counter-evidence for critiques received |
-
-During idle phases, delegates wait for champion instructions — do not act independently.
-
-## Delegate Constraints
-
-- **Research and analysis only.** Do not modify any files in `vllm/`, `csrc/`, or production code.
-- **15-minute task timeout.** Champions should time-box delegate tasks. If a delegate exceeds the timeout, the champion proceeds with partial data.
-- **No sub-agents.** Delegates cannot spawn sub-agents. If a task needs decomposition, tell the champion and await guidance.
 
 ## References
 

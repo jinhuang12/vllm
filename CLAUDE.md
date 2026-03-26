@@ -256,3 +256,12 @@ VLLM_CPU_ONLY=1# CPU-only mode
 - `ParallelConfig`: Parallelism configuration
 - `SchedulerConfig`: Scheduling parameters
 - `CacheConfig`: KV cache configuration
+
+## AMMO Optimization Subagent Constraints
+
+The following apply when spawned as a subagent by an AMMO agent (ammo-champion, ammo-impl-champion):
+- GPU commands require pool reservation:
+  `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>`
+- Do NOT use `--enforce-eager`, `TORCH_COMPILE_DISABLE=1`, or `VLLM_TORCH_COMPILE_LEVEL=0` for profiling
+- Do NOT modify files in `vllm/`, `csrc/`, or production code when doing research
+- Write research outputs to the artifact directory, not the source tree

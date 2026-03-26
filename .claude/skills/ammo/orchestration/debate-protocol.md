@@ -11,100 +11,26 @@ Champions independently propose optimization candidates from grounded Stage 2 da
   - `name="champion-{N}"` (e.g., `champion-1`, `champion-2`)
   - `team_name` set to the round team name above
 
-## Delegation
+## Transcript Monitoring
 
-When `state.json` has `debate.delegation.enabled: true`, each champion is assigned 1-N Sonnet-model delegate agents for research and micro-experiments. Delegates are pre-spawned as teammates in the same team — champions direct them via SendMessage.
+After spawning each champion, the orchestrator spawns a transcript monitor in background:
 
-### Team Composition with Delegates
-
-```
-Round Team: ammo-round-{round_id}-{model_short}-{hardware}
-|
-| ... debate champions for round N (Stage 3) ...
-| +-- champion-1 (Opus)          [Stage 3 debate -- shut down after selection]
-| |   +-- delegate-1a (Sonnet)   [Stage 3 debate -- shut down after selection]
-| +-- champion-2 (Opus)          [Stage 3 debate -- shut down after selection]
-| |   +-- delegate-2a (Sonnet)   [Stage 3 debate -- shut down after selection]
-| +-- champion-3 (Opus)          [Stage 3 debate -- shut down after selection]
-|     +-- delegate-3a (Sonnet)   [Stage 3 debate -- shut down after selection]
-|
-| ... after debate: shutdown round N champions ...
-|
-| ... implementation agents for round N (Stages 4-5) ...
-| +-- impl-champion-{op_id_1} (Opus)     [Stages 4-5]
-| +-- impl-validator-{op_id_1} (Sonnet)  [Stages 4-5]
-| +-- impl-champion-{op_id_2} (Opus)     [Stages 4-5]
-| +-- impl-validator-{op_id_2} (Sonnet)  [Stages 4-5]
-|
-| ... OVERLAPPED: debate champions for round N+1 (if round 2+) ...
-| +-- champion-r{N+1}-1 (Opus)    [next-round debate -- shut down after selection]
-| +-- champion-r{N+1}-2 (Opus)    [next-round debate -- shut down after selection]
+```python
+monitor_name = f"monitor-{champion_name}"
+Agent(
+    name=monitor_name,
+    subagent_type="ammo-transcript-monitor",
+    model="sonnet",
+    team_name=round_team_name,
+    run_in_background=True,
+    prompt=f"""Monitor {champion_name} via session transcript.
+    Agent name: {champion_name}, Team: {round_team_name}
+    Stage: debate, Artifact dir: {artifact_dir}
+    <filter_script>{TRANSCRIPT_FILTER_SCRIPT_CONTENT}</filter_script>"""
+)
 ```
 
-Naming convention: `delegate-{champion_number}{letter}` (e.g., `delegate-1a`, `delegate-1b` for champion-1's first and second delegates).
-
-The mapping is stored in `state.json` at `debate.delegation.champion_delegate_mapping`:
-```json
-{
-  "champion-1": ["delegate-1a"],
-  "champion-2": ["delegate-2a"],
-  "champion-3": ["delegate-3a"]
-}
-```
-
-### Communication Flow
-
-1. **Lead broadcasts phase-start to champions only**: Include routing clarity — "Champions: advance to Phase 0. Delegates: await champion instructions."
-2. **Champion → Delegate via SendMessage**: Champion assigns specific research tasks with structured output requirements.
-3. **Delegate → Champion via SendMessage**: Delegate reports results with structured data (kernel name, f-values, methodology, measurements).
-4. **Champion writes debate artifacts**: Only champions write to `debate/proposals/` and `debate/round_{N}/`. Delegates write to `debate/delegate_work/` only.
-
-### Phase Scope for Delegates
-
-| Phase | Delegate Role |
-|-------|--------------|
-| **Phase 0 (Proposals)** | Active — profiling data extraction, codebase research, roofline calcs, ISA inspection |
-| **Phase A (Evidence)** | Idle unless champion assigns specific research |
-| **Phase B (Critique)** | Idle unless champion assigns specific research |
-| **Phase C (Rebuttal)** | Optionally active — gather counter-evidence for critiques received |
-
-### Delegate Constraints
-
-- **No vLLM source modifications**: Research and analysis only.
-- **15-minute task timeout**: Champions should time-box delegate tasks. If a delegate exceeds the timeout, the champion proceeds with partial data.
-
-### Delegate Artifacts
-
-Delegates write results to:
-```
-{artifact_dir}/debate/delegate_work/
-  delegate-1a_bottleneck_top3.md
-  delegate-1a_roofline_attention.py
-  delegate-2a_kernel_source_trace.md
-  ...
-```
-
-Champions cite these in proposals: `[Source: delegate-1a, {path}]`
-
-### Timeout Handling
-
-If a delegate does not respond within the phase deadline:
-1. Champion proceeds with its own analysis or partial delegate data
-2. Champion notes in proposal: "Delegate research incomplete; used own analysis for [section]"
-3. This is NOT a debate failure — champions must be self-sufficient
-
-### Teardown After Debate Selection
-
-After winner selection, shut down debate champions and delegates via `shutdown_request`. Do NOT call TeamDelete — the round team persists for Stages 4-5 implementation agents.
-
-- Send `shutdown_request` to each champion agent (they are no longer needed).
-- Delegates are shut down alongside their champions (or via explicit `shutdown_request`).
-- The team itself (`ammo-round-{round_id}-{model_short}-{hardware}`) remains alive.
-- TeamDelete happens later, after all implementation tracks complete (see `parallel-tracks.md`).
-
-### Without Delegation
-
-If `debate.delegation.enabled` is `false` (default), the debate runs with champions only — identical to the current protocol. No delegates are spawned, no `delegate_work/` directory is created.
+Monitors are purely additive — if not spawned, nothing breaks. See `2026-03-25-transcript-monitor-design.md` for full design.
 
 ## Debate is Always Mandatory
 
@@ -157,7 +83,7 @@ Each champion writes:
 {artifact_dir}/debate/round_{N}/{op_id}_argument.md
 ```
 
-Champions write arguments per `references/debate-rules.md` (see Evidence Tiers for required evidence levels). Champions (or delegates) **must** run micro-experiments during this phase (see `references/debate-rules.md` § Micro-Experiment Rules).
+Champions write arguments per `references/debate-rules.md` (see Evidence Tiers for required evidence levels). Champions **must** run micro-experiments during this phase (see `references/debate-rules.md` § Micro-Experiment Rules).
 
 ### Phase B: Critique
 
@@ -236,13 +162,13 @@ This gate addresses the structural gap where Champion-1 in c08b370fc identified 
 
 ## Debate Rules Reference
 
-Micro-experiment guidelines, artifact requirements, baseline provenance rules, and NCU triggers are defined in `references/debate-rules.md`. Champions and delegates must read this reference. The lead uses NCU Trigger 4 (Baseline BW Discrepancy) during the eligibility gate.
+Micro-experiment guidelines, artifact requirements, baseline provenance rules, and NCU triggers are defined in `references/debate-rules.md`. Champions must read this reference. The lead uses NCU Trigger 4 (Baseline BW Discrepancy) during the eligibility gate.
 
 ## Teardown (Post-Debate)
 
 After winner selection:
 
-1. Send `shutdown_request` to all champion agents (and delegates, if delegation was enabled).
+1. Send `shutdown_request` to all champion agents.
 2. Do NOT call TeamDelete. The round team persists for Stages 4-5 implementation.
 3. TeamDelete is called only after all implementation tracks complete (see `parallel-tracks.md` and `SKILL.md` Stage 4-5 section).
 
@@ -303,7 +229,7 @@ When running as an overlapped debate during Stages 4-5:
 
 2. **Artifact paths MUST use campaign-round scoping**: `debate/campaign_round_{N+1}/`. This is already enforced by the debate gate hook for round 2+, and remains enforced for overlapped debates.
 
-3. **GPU access during overlap**: Debate champions may run GPU micro-benchmarks via the pool (`--num-gpus 1`). If the pool is exhausted, the reserve call blocks — keep experiments brief to minimize contention with implementation tracks. Debate delegates remain restricted to static analysis (no GPU kernel benchmarks). See `references/gpu-pool.md` for the reservation pattern.
+3. **GPU access during overlap**: Debate champions may run GPU micro-benchmarks via the pool (`--num-gpus 1`). If the pool is exhausted, the reserve call blocks — keep experiments brief to minimize contention with implementation tracks. See `references/gpu-pool.md` for the reservation pattern.
 
 4. **Phase timing may be longer**: The orchestrator interleaves debate moderation with implementation monitoring. Debate phases may take longer to start because the orchestrator is busy gating implementation results. Champions should NOT assume a phase will start within any specific time window.
 

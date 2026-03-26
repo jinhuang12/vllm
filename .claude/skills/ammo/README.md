@@ -54,14 +54,15 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
  │  Stages 4-5: Parallel Worktree Tracks (Adversarial Validation)                  │
  │  ┌──────────────────────────────────────────────────────────────────────────┐    │
  │  │                                                                          │    │
- │  │  STEP 1: Spawn impl-champion + impl-validator pairs into round team     │    │
+ │  │  STEP 1: Spawn impl-champion per track into round team               │    │
  │  │  ┌─────────────────────────┐       ┌─────────────────────────┐          │    │
  │  │  │ Track A (worktree)      │       │ Track B (worktree)      │          │    │
  │  │  │ ammo-impl-champion      │       │ ammo-impl-champion      │          │    │
- │  │  │ + ammo-impl-validator   │       │ + ammo-impl-validator   │          │    │
  │  │  │ - Write kernel code     │       │ - Write kernel code     │          │    │
- │  │  │ - Independent validation│       │ - Independent validation│  GPU     │    │
- │  │  │ - E2E via sweep script  │       │ - E2E via sweep script  │ isolated │    │
+ │  │  │ - Request validation    │       │ - Request validation    │          │    │
+ │  │  │   (impl-validator       │       │   (impl-validator       │  GPU     │    │
+ │  │  │    spawned at val time) │       │    spawned at val time) │ isolated │    │
+ │  │  │ - E2E via sweep script  │       │ - E2E via sweep script  │          │    │
  │  │  └─────────┬───────────────┘       └─────────┬───────────────┘          │    │
  │  │            │                                  │                          │    │
  │  │  STEP 2: Launch overlapped debate (round 2+ only, same round team)     │    │
@@ -144,9 +145,9 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 .claude/agents/
 ├── ammo-researcher.md      # Profiling + bottleneck mining (grounded data only, NO estimates)
 ├── ammo-champion.md        # Debate: proposes candidates, runs micro-experiments, argues with data
-├── ammo-delegate.md        # Research assistant for champions during debate (Sonnet model)
 ├── ammo-impl-champion.md   # Implements kernel in isolated worktree, aggregates validation results
-└── ammo-impl-validator.md  # Independent validation: correctness tests, benchmarks, E2E sweeps
+├── ammo-impl-validator.md  # Independent validation: correctness tests, benchmarks, E2E sweeps
+└── ammo-transcript-monitor.md  # Monitors agent transcripts for compliance violations
 ```
 
 ## Specialized Agents
@@ -155,9 +156,9 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 |-------|------|----------------|
 | **ammo-researcher** | Profiles baseline, mines bottlenecks | Cannot make feasibility estimates or E2E projections |
 | **ammo-champion** | Proposes optimizations, argues in debate | Must back claims with micro-experiments |
-| **ammo-delegate** | Research assistant for champions (optional) | No GPU benchmarks, no source modifications, 15-min timeout |
 | **ammo-impl-champion** | Implements kernel in isolated worktree, aggregates validation results | Works in isolated worktree; frontmatter Stop hook (DA) enforces validation + Amdahl's sanity |
 | **ammo-impl-validator** | Independent validation: correctness tests, benchmarks, E2E sweeps | Paired with impl-champion; writes own tests independently to prevent reward hacking |
+| **ammo-transcript-monitor** | Monitors agent transcripts for compliance violations | Flags non-negotiable violations in real-time |
 
 The **lead** (main Claude session) orchestrates all stages, manages `state.json`, owns all gates, and never writes kernel code directly.
 
@@ -193,7 +194,7 @@ The **lead** (main Claude session) orchestrates all stages, manages `state.json`
 |-----------|-------|-----------|-------|
 | [`tests/agents/test-orchestrator.md`](tests/agents/test-orchestrator.md) | Lead orchestrator | 20 (overlapped debate, resume, campaign eval, integration, violations) | 20 |
 | [`tests/agents/test-researcher.md`](tests/agents/test-researcher.md) | ammo-researcher | 8 (grounded data, profiling strategy, production parity, steady-state) | 8 |
-| [`tests/agents/test-champion.md`](tests/agents/test-champion.md) | ammo-champion | 10 (kernel mandate, micro-experiments, CUDA graphs, cache, delegation, debate) | 10 |
+| [`tests/agents/test-champion.md`](tests/agents/test-champion.md) | ammo-champion | 10 (kernel mandate, micro-experiments, CUDA graphs, cache, subagent spawning, debate) | 10 |
 | [`tests/agents/test-implementer.md`](tests/agents/test-implementer.md) | ammo-impl-champion + ammo-impl-validator | 10 (baseline reuse, sweep script, parity, scope, Amdahl, build, contamination) | 10 |
 
 ### Run All Tests

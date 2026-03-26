@@ -11,7 +11,7 @@ Run the AMMO orchestrator conformance tests. Spawn Sonnet subagents that:
    - .claude/skills/ammo/orchestration/parallel-tracks.md
    - .claude/skills/ammo/orchestration/integration-logic.md
    - .claude/skills/ammo/orchestration/debate-protocol.md
-2. Role-play AS the lead orchestrator (scaffolds, delegates, gates — never implements)
+2. Role-play AS the lead orchestrator (scaffolds, gates — never implements)
 3. For each scenario, receive a state.json snapshot and context, then answer:
    - "Next actions (in order):"
    - "Must NOT do:"
@@ -56,7 +56,7 @@ Expected behavior: Launch overlapped debate IMMEDIATELY. Spawn debate champions 
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Immediately launch the overlapped round 3 debate by spawning 2-4 ammo-champion agents (+ delegates if enabled) into the existing round team (`ammo-round-2-llama70b-h100`). Use the existing `bottleneck_analysis.md` from round 1. Set `debate.next_round_overlap.active: true` and `debate.next_round_overlap.phase: "phase_0"` in `state.json`.
+1. Immediately launch the overlapped round 3 debate by spawning 2-4 ammo-champion agents into the existing round team (`ammo-round-2-llama70b-h100`). Use the existing `bottleneck_analysis.md` from round 1. Set `debate.next_round_overlap.active: true` and `debate.next_round_overlap.phase: "phase_0"` in `state.json`.
 2. While the overlapped debate runs, actively monitor the two impl tracks (op001 and op002).
 3. Interleave debate moderation with impl monitoring: broadcast debate phase starts, then check for impl track completions, then wait for debate phase completions.
 4. As each impl-champion completes (DA Stop hook passed), run its compilation gate (T9) and update `state.json` `parallel_tracks.{op_id}` (T10).
@@ -72,7 +72,7 @@ Expected behavior: Launch overlapped debate IMMEDIATELY. Spawn debate champions 
 - Re-profile to generate new bottleneck data — the overlapped debate uses the EXISTING `bottleneck_analysis.md`.
 
 **Skill reference:**
-- `SKILL.md` § Stages 4-5, step 2: "Launch overlapped debate (round 2+ only): If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents (+ delegates if enabled) into the same round team."
+- `SKILL.md` § Stages 4-5, step 2: "Launch overlapped debate (round 2+ only): If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents into the same round team."
 - `SKILL.md` § Overlapped Debate: "When to launch: Immediately after spawning all implementation agents for round N."
 - `SKILL.md` § Stages 4-5, step 3: "Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed."
 </details>
@@ -682,7 +682,7 @@ Expected behavior: Full debate mandatory. May shorten to 1 round if convergence,
 
 **Skill reference:**
 - debate-protocol.md § "Debate is Always Mandatory": "There is no fast-track exception."
-- SKILL.md § Stage 3: "After selection: Shut down debate champions and delegates via `shutdown_request`... The round team persists."
+- SKILL.md § Stage 3: "After selection: Shut down debate champions via `shutdown_request`... The round team persists."
 </details>
 
 ---

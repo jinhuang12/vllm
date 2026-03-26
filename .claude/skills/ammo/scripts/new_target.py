@@ -99,7 +99,6 @@ def _constraints_md(fields: TargetFields) -> str:
 """
 
 def _state_json(fields: TargetFields, artifact_dir: Path, min_e2e_improvement_pct: float = 1.0,
-                enable_delegation: bool = True, delegates_per_champion: int = 1,
                 noise_tolerance_pct: float = 0.5,
                 catastrophic_regression_pct: float = 5.0) -> Dict[str, Any]:
     return {
@@ -126,12 +125,6 @@ def _state_json(fields: TargetFields, artifact_dir: Path, min_e2e_improvement_pc
             "max_rounds": 4,
             "selected_winners": [],
             "selection_rationale": None,
-            "delegation": {
-                "enabled": enable_delegation,
-                "delegates_per_champion": delegates_per_champion,
-                "champion_delegate_mapping": {},
-                "delegate_results": {},
-            },
             "next_round_overlap": {
                 "active": False,
                 "phase": None,
@@ -244,12 +237,6 @@ def main() -> None:
     p.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 8, 32])
     p.add_argument("--num-iters", type=int, default=5)
 
-    # Delegation options (Stage 3 debate)
-    p.add_argument("--enable-delegation", action="store_true", default=True,
-                   help="Enable delegate sub-agents for debate champions (default: disabled)")
-    p.add_argument("--delegates-per-champion", type=int, default=1,
-                   help="Number of Sonnet delegate agents per Opus champion (default: 1)")
-
     # Gating options (BS-dependent optimization support)
     p.add_argument("--noise-tolerance-pct", type=float, default=0.5,
                    help="Per-BS speedup within this %% of 1.0 is classified NOISE (default: 0.5)")
@@ -272,8 +259,6 @@ def main() -> None:
     _write_text(artifact_dir / "constraints.md", _constraints_md(fields), force=args.force)
     _write_json(artifact_dir / "state.json", _state_json(
         fields, artifact_dir, args.min_e2e_improvement,
-        enable_delegation=args.enable_delegation,
-        delegates_per_champion=args.delegates_per_champion,
         noise_tolerance_pct=args.noise_tolerance_pct,
         catastrophic_regression_pct=args.catastrophic_regression_pct,
     ), force=args.force)

@@ -9,19 +9,20 @@ All implementation agents join the existing round team. The team was created at 
 ```
 Round Team: ammo-round-{round_id}-{model_short}-{hardware}
 [Implementation Workstream]
-+-- impl-champion-{op_id_1} (Opus)    -- implementation, E2E threshold evaluation
-+-- impl-validator-{op_id_1} (Sonnet)  -- independent correctness tests, benchmarks, E2E sweep
-+-- impl-champion-{op_id_2} (Opus)    -- implementation, E2E threshold evaluation
-+-- impl-validator-{op_id_2} (Sonnet)  -- independent correctness tests, benchmarks, E2E sweep
++-- impl-champion-{op_id_1} (Opus)           -- implementation, E2E threshold evaluation
++-- monitor-impl-champion-{op_id_1} (Sonnet) -- transcript monitor (background)
++-- impl-champion-{op_id_2} (Opus)           -- implementation, E2E threshold evaluation
++-- monitor-impl-champion-{op_id_2} (Sonnet) -- transcript monitor (background)
++-- impl-validator-{op_id} (Sonnet)           -- spawned by orchestrator AT VALIDATION TIME ONLY
 [Overlapped Debate Workstream -- round 2+ only]
-+-- champion-r{N+1}-1 (Opus)          -- next-round debate champion [shut down after selection]
-+-- champion-r{N+1}-2 (Opus)          -- next-round debate champion [shut down after selection]
-+-- delegate-r{N+1}-1a (Sonnet)       -- debate delegate [shut down after selection]
++-- champion-r{N+1}-1 (Opus)                 -- next-round debate champion
++-- champion-r{N+1}-2 (Opus)                 -- next-round debate champion
++-- monitor-champion-r{N+1}-1 (Sonnet)       -- transcript monitor (background)
 ```
 
-Each track uses an **adversarial validation model**: the champion implements, an independent validator validates. This separation prevents reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation).
+Each track uses an **adversarial validation model**: the champion implements, and when ready, the orchestrator spawns an independent validator at validation time (not at track start). This lazy-spawn approach avoids wasting resources on a validator that may never be needed (e.g., if the champion abandons early). The separation prevents reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation).
 
-**Why adversarial validation**: The AMMO pipeline has observed four types of reward hacking when the same agent both implements and validates. Separating implementation from validation into independent agents with differing goals catches issues in real-time. The existing DA Stop hook remains as a third verification layer.
+**Why adversarial validation**: The AMMO pipeline has observed four types of reward hacking when the same agent both implements and validates. Separating implementation from validation into independent agents with differing goals catches issues in real-time. The validator is spawned by the orchestrator at validation time, ensuring independence from the champion. The existing DA Stop hook remains as a third verification layer.
 
 **Why a single team**: The orchestrator can only lead ONE team at a time. Creating per-track teams (`ammo-impl-{op_id}`) is architecturally impossible — the orchestrator would lose contact with all but the last-created team. A single round-scoped team keeps all agents under one roof.
 
@@ -29,7 +30,31 @@ Each track uses an **adversarial validation model**: the champion implements, an
 
 Worktrees are created automatically by the Agent tool when spawning `ammo-impl-champion` subagents (which have `isolation: worktree` in their definition). The `WorktreeCreate` hook (`worktree-create-with-build.sh`) pre-configures Python isolation, copies `.so` files, and creates a per-worktree `.venv`.
 
-The validator agent shares the champion's worktree (same track team). Both agents may be active simultaneously — GPU access is coordinated via SendMessage, with the champion having priority.
+The validator agent shares the champion's worktree. Both agents may be active simultaneously — GPU access is coordinated via SendMessage, with the champion having priority.
+
+## Validation Spawn Protocol
+
+When a champion sends VALIDATION_REQUEST to the orchestrator:
+
+1. **Orchestrator extracts fields** from the message (op_id, commit_sha, worktree_path, artifact_dir, expect_kernel, batch_sizes)
+2. **Orchestrator spawns validator**:
+```python
+Agent(
+    name=f"impl-validator-{op_id}",
+    subagent_type="ammo-impl-validator",
+    model="sonnet",
+    team_name=existing_team_name,
+    prompt=f"""You are the independent validator for optimization {op_id}.
+    Champion: impl-champion-{op_id}. Orchestrator: team-lead.
+    Artifact dir: {artifact_dir}. Worktree: {worktree_path}
+    Expected kernel: {kernel_name}. Batch sizes: {batch_sizes}
+    E2E threshold: {min_e2e_improvement_pct}
+    DUAL-REPORT to BOTH impl-champion-{op_id} AND team-lead."""
+)
+```
+3. **Orchestrator notifies champion**: `SendMessage("impl-champion-{op_id}", "Validator spawned as impl-validator-{op_id}. Await results.")`
+
+The validator dual-reports raw results to BOTH champion AND orchestrator.
 
 ### GPU Pool
 
@@ -56,7 +81,7 @@ Agent(
     team_name=existing_team_name,    # Reuse round team, NOT a per-track team
     prompt="""
     You are implementing optimization {op_id} for the AMMO pipeline.
-    Your validator is impl-validator-{op_id}.
+    Orchestrator: team-lead. Validator will be spawned at validation time.
 
     Artifact dir: {artifact_dir}
     Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
@@ -82,38 +107,16 @@ Agent(
     - See references/validation-defaults.md and references/crossover-probing.md
 
     Workflow:
-    1. Delegate research to your validator while you read debate artifacts
-    2. Implement the kernel optimization (use validator for codebase lookups as needed)
-    3. Commit implementation, then delegate validation (all 3 gates) to your validator
+    1. Read debate artifacts and plan your implementation approach
+    2. Implement the kernel optimization
+    3. Commit implementation, then send VALIDATION_REQUEST to the orchestrator (team-lead)
     4. Evaluate E2E results against min_e2e_improvement_pct threshold, write validation_results.md
     """
 )
 
-# Validator in the same round team (shared worktree via champion)
-Agent(
-    name=f"impl-validator-{op_id}",
-    subagent_type="ammo-impl-validator",
-    model="sonnet",
-    team_name=existing_team_name,    # Same round team as champion
-    prompt="""
-    You are the independent validator for optimization {op_id}.
-    Your champion is impl-champion-{op_id}.
-
-    Artifact dir: {artifact_dir}
-    GPU pool: {gpu_count} GPUs available (TP={tp}). Acquire at runtime:
-      CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>
-      Kernel work: --num-gpus 1  |  E2E sweep: --num-gpus {tp}
-
-    Wait for initial tasks from your champion via SendMessage.
-    You support the champion throughout: research, profiling, codebase lookups, proactive advisories.
-    When the champion requests validation, write your OWN independent tests and benchmarks (Gates 5.1, 5.2, 5.3).
-
-    Key references:
-    - Benchmark template: .claude/skills/ammo/references/kernel-benchmark-template.py
-    - Validation defaults: .claude/skills/ammo/references/validation-defaults.md
-    - CUDA graph safety: .claude/skills/ammo/references/cudagraph-safety.md
-    """
-)
+# Validator is NOT spawned here — it is lazy-spawned at validation time.
+# See "Validation Spawn Protocol" section below for the spawn sequence.
+# The champion sends VALIDATION_REQUEST to the orchestrator when ready.
 ```
 
 ### Collaboration Timeline and Key Rules
@@ -245,7 +248,6 @@ The orchestrator MUST NOT advance to Stage 6 integration until:
 | Implementation champions | Pool access — kernel work (--num-gpus 1) + E2E sweep (--num-gpus {tp}) |
 | Implementation validators | Pool access — kernel work (--num-gpus 1) + E2E sweep (--num-gpus {tp}) |
 | Debate champions | Pool access — micro-benchmarks OK (--num-gpus 1) |
-| Debate delegates | Static analysis only (ncu --query-metrics). No kernel benchmarks. |
 
 ### Debate Results Handling
 
@@ -254,5 +256,5 @@ When the overlapped debate completes:
 2. Orchestrator writes `debate/campaign_round_{N+1}/summary.md`.
 3. Orchestrator records winners in `state.json` at `debate.next_round_overlap.selected_winners`.
 4. Orchestrator records each winner's f-value at proposal time in `debate.next_round_overlap.f_values_at_proposal`.
-5. Orchestrator sends `shutdown_request` to all debate champions and delegates.
+5. Orchestrator sends `shutdown_request` to all debate champions.
 6. Winners are used in round N+1 after lazy invalidation (see SKILL.md, Campaign Loop Transition).
