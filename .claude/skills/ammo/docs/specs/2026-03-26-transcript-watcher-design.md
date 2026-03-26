@@ -281,7 +281,13 @@ def main():
 
         new_subagent_state = {}
         for name, path in discovered.items():
-            sub_start = subagent_state.get(name, {}).get('last_line', 0)
+            # R3-I1: If discovered path differs from stored path, this is a
+            # new transcript (agent name reused). Reset last_line to 0.
+            prev_info = subagent_state.get(name, {})
+            if prev_info.get('path') != path:
+                sub_start = 0  # New transcript — start from beginning
+            else:
+                sub_start = prev_info.get('last_line', 0)
             sub_records, _, sub_last_line = process_transcript(
                 path, sub_start, args.max_content_len, label=f"sub:{name}")
 
@@ -295,16 +301,62 @@ def main():
     # Print summary
     print_summary(last_line, subagent_state, still_pending)
 
-    # Write state file (JSON format)
+    # Write state file (JSON format, atomic via rename)
     # R3-C1: pending_subagents persisted so next poll retries discovery
     # R3-I1: champion_line NOT stored — monitor tracks via --start-line
-    write_state(args.state_file, {
+    # R3-I2: atomic write prevents corruption on kill
+    write_state_atomic(args.state_file, {
         'pending_subagents': sorted(still_pending),
         'subagents': subagent_state
     })
 ```
 
-### 3.7 `process_transcript()` Refactor
+### 3.7 State File I/O
+
+```python
+def read_state(state_file):
+    """Read state file, handling old format and corruption gracefully.
+
+    Returns {} on any error — the filter falls back to --start-line for
+    champion offset and empty subagent state. No crash, no data loss.
+    """
+    if not state_file or not os.path.exists(state_file):
+        return {}
+    try:
+        with open(state_file) as f:
+            content = f.read().strip()
+        if not content:
+            return {}
+        # Old format: bare integer (champion line only)
+        try:
+            int(content)
+            return {}  # Old format has no subagent state; ignore it
+        except ValueError:
+            pass
+        return json.loads(content)
+    except (json.JSONDecodeError, OSError):
+        return {}  # Corrupt or unreadable — safe fallback
+
+
+def write_state_atomic(state_file, state):
+    """Write state file atomically via temp-file + rename.
+
+    R3-I2 fix: If the process is killed mid-write, the temp file is
+    left behind but the original state file is untouched. os.rename()
+    is atomic on the same filesystem (guaranteed on Linux/ext4/tmpfs).
+    """
+    if not state_file:
+        return
+    tmp = state_file + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(state, f)
+        os.rename(tmp, state_file)
+    except OSError:
+        pass  # Best-effort
+```
+
+### 3.8 `process_transcript()` Refactor
 
 The existing `main()` function's transcript processing logic is extracted into a reusable `process_transcript()` function:
 
@@ -338,6 +390,8 @@ This is a straightforward extract-method refactor. The existing line-by-line pro
 | Old state file format (bare integer) | Detected and converted to `{"champion_line": N, "subagents": {}}`. |
 | Subagent previously discovered but transcript deleted | `os.path.exists()` check before processing. Silently skipped. |
 | Many subagents (>3) | Depth-1 only: champions spawn 1-3 subagents typically. Even 5+ is fine — each is a sequential file read, not a persistent resource. |
+| Reused agent name (new transcript) | Discovered path compared to stored path. On mismatch, `last_line` reset to 0 — new transcript read from start. **(R3-I1 fix)** |
+| State file corrupted (kill mid-write) | Atomic write via temp file + `os.rename()`. Kill during write leaves `.tmp` file; original state untouched. `read_state()` returns `{}` on corrupt JSON — safe fallback to `--start-line`. **(R3-I2 fix)** |
 | Discovery I/O with concurrent watchers | During overlapped debate rounds (4-8 monitors), each filter invocation globs up to 50 files × 20 lines. At 5s intervals, this is bursty but brief (~50ms per invocation). No persistent contention. |
 
 ---
