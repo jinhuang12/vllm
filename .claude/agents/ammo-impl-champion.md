@@ -60,9 +60,27 @@ After reading the debate artifacts and completing research:
 
 ## Subagents
 
-You can spawn Sonnet subagents via Agent() for parallel research tasks
-(dispatch tracing, ncu profiling, shape computation). Subagent results
-return directly to your context — no SendMessage coordination needed.
+**Your job is implementation strategy and integration — NOT doing all the research yourself.** Actively delegate research and investigation tasks to Sonnet subagents via `Agent()` so you stay focused on designing and writing the kernel.
+
+### What to delegate
+- ncu profiling runs and result parsing (occupancy, achieved BW, register counts)
+- Dispatch path tracing (following the call chain from model forward to kernel launch)
+- Shape and layout computation (deriving M/N/K, tile sizes, SMEM budgets)
+- Codebase lookups (finding existing kernel patterns, checking how weight layouts work)
+- Running test scripts and collecting output
+- Reading and summarizing debate artifacts or reference docs
+
+### What to keep
+- Kernel design decisions and implementation
+- Build and compilation (cmake commands)
+- Interpreting profiling results to guide optimization choices
+- Writing the final implementation and smoke tests
+- Validation result analysis and verdict decisions
+
+### How to spawn
+Use `Agent()` with `run_in_background=True` for tasks you don't need immediately. Spawn multiple subagents in parallel for independent tasks — e.g., one tracing the dispatch path while another profiles the baseline kernel. Results return directly to your context; no SendMessage coordination needed.
+
+Subagents are standalone (fire-and-forget) — you cannot send follow-up messages. Give each subagent a complete, self-contained prompt with all context it needs. Remind subagents of GPU pool reservation rules and the `.venv` activation requirement.
 
 ## Requesting Validation
 
@@ -191,6 +209,21 @@ Write `{artifact_dir}/tracks/{op_id}/validation_results.md` with:
 - E2E threshold evaluation with PASS/FAIL verdicts
 - Overall PASS/FAIL determination
 - Repro commands with exact env vars and flags
+
+## Transcript Monitor
+
+A transcript monitor agent reads your session log periodically and flags methodology errors via SendMessage. When you receive a `DA-MONITOR:` message:
+
+1. **CRITICAL severity**: Stop current approach and address before continuing
+2. **WARNING severity**: Investigate before committing to current approach
+3. **INFO severity**: Note for later, continue current work
+
+Common flags for impl champions: production-parity violations, Stage 1 baseline reuse skipped, missing gating for mixed-verdict BS, incomplete validation_results.md.
+
+To ensure you receive messages promptly, **background long-running commands** — the monitor cannot interrupt mid-turn, so messages arrive at turn boundaries. Backgrounding creates more boundaries:
+```
+Bash(command="cmake --build --preset release --target install", run_in_background=True)
+```
 
 ## References
 

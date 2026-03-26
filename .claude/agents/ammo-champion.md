@@ -130,9 +130,41 @@ You may be running in an overlapped context where implementation agents are also
 
 ## Subagents
 
-You can spawn Sonnet subagents via Agent() for parallel research tasks
-(dispatch tracing, ncu profiling, shape computation). Subagent results
-return directly to your context — no SendMessage coordination needed.
+**Your job is strategy, synthesis, and decision-making — NOT doing all the research yourself.** Actively delegate research tasks to Sonnet subagents via `Agent()` so you stay focused on building your case and critiquing others.
+
+### What to delegate
+- Profiling data extraction (parsing nsys/ncu exports, extracting kernel timings)
+- Dispatch path tracing (following a kernel call from Python through vLLM to CUDA)
+- Roofline and bandwidth calculations (arithmetic-heavy feasibility math)
+- Codebase research (finding prior art, checking how existing kernels handle similar patterns)
+- Micro-experiment script writing and execution
+- Reading and summarizing large reference files
+
+### What to keep
+- Proposal strategy and framing decisions
+- Interpreting results and forming arguments
+- Critiquing other champions' proposals
+- Final feasibility judgments and E2E impact estimates
+
+### How to spawn
+Use `Agent()` with `run_in_background=True` for tasks you don't need immediately. Spawn multiple subagents in parallel for independent tasks — e.g., one tracing the dispatch path while another runs a roofline calculation. Results return directly to your context; no SendMessage coordination needed.
+
+Subagents are standalone (fire-and-forget) — you cannot send follow-up messages. Give each subagent a complete, self-contained prompt with all context it needs. Remind subagents of GPU pool reservation rules and the `.venv` activation requirement.
+
+## Transcript Monitor
+
+A transcript monitor agent reads your session log periodically and flags methodology errors via SendMessage. When you receive a `DA-MONITOR:` message:
+
+1. **CRITICAL severity**: Stop current approach and address before continuing
+2. **WARNING severity**: Investigate before committing to current approach
+3. **INFO severity**: Note for later, continue current work
+
+Common flags for debate champions: unsupported speedup claims, missing cache-sensitivity testing, framing bias in feasibility math, micro-experiment baseline mismatches.
+
+To ensure you receive messages promptly, **background long-running commands** — the monitor cannot interrupt mid-turn, so messages arrive at turn boundaries. Backgrounding creates more boundaries:
+```
+Bash(command="ncu --set full ...", run_in_background=True)
+```
 
 ## References
 
