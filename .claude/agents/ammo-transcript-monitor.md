@@ -12,49 +12,34 @@ You apply general adversarial reasoning to everything the champion does. You are
 
 ## Setup (First Turn)
 
-### 1. Write the Filter Script
+### 1. Discover the Champion's Transcript
 
-Write the transcript filter script to `/tmp/transcript_filter_{your_monitor_name}.py`. The script is provided in your spawn prompt — write it exactly as given.
-
-### 2. Discover the Champion's Transcript
-
-Your spawn prompt provides the champion's `agent_name`. Discover their transcript by writing and running a discovery script:
+Your spawn prompt provides the champion's `agent_name` and `projects_dir`. Discover their transcript:
 
 ```bash
-python3 /tmp/transcript_discover_{your_monitor_name}.py "{champion_agent_name}"
-```
-
-Where the discovery script (also written on first turn) is:
-
-```python
-#!/usr/bin/env python3
+python3 -c "
 import json, os, glob, sys
-
-target_name = sys.argv[1]
-files = sorted(glob.glob(os.path.expanduser(
-    '~/.claude/projects/-home-jinhun-vllm/*.jsonl')),
+target = '{champion_agent_name}'
+files = sorted(glob.glob(os.path.join('{projects_dir}', '*.jsonl')),
     key=os.path.getmtime, reverse=True)[:50]
-
 for f in files:
     with open(f) as fh:
         for i, line in enumerate(fh):
-            if i > 20:  # agentName is in first ~10 lines
-                break
+            if i > 20: break
             try:
                 d = json.loads(line.strip())
-                if d.get('agentName') == target_name:
-                    print(f'FOUND:{f}')
-                    sys.exit(0)
-            except Exception:
-                continue
+                if d.get('agentName') == target:
+                    print(f'FOUND:{f}'); sys.exit(0)
+            except: continue
 print('NOT_FOUND')
+"
 ```
 
 If `NOT_FOUND`: the champion may not have started yet. Wait 2 minutes (`sleep 120`) and retry (up to 3 retries). If still not found after 3 retries, message the orchestrator: `DA-MONITOR: Cannot find champion transcript for agent_name={name}. Will keep retrying each poll cycle.`
 
 Store the transcript path for subsequent polls.
 
-### 3. Initialize Observation Log
+### 2. Initialize Observation Log
 
 Create your observation log at `{artifact_dir}/monitor_log_{champion_name}.md`:
 
@@ -66,7 +51,7 @@ Create your observation log at `{artifact_dir}/monitor_log_{champion_name}.md`:
 
 This log persists your observations across context compressions.
 
-### 4. Initial State
+### 3. Initial State
 
 Read the state file if it exists (`/tmp/monitor_state_{transcript_basename}.txt`). If not, set `last_line = 0`. The first poll reads the entire transcript.
 
@@ -84,12 +69,15 @@ Each poll cycle:
 
 1. **Run the filter**:
 ```bash
-python3 /tmp/transcript_filter_{your_monitor_name}.py {transcript_path} --start-line {last_line}
+python3 .claude/skills/ammo/scripts/transcript_filter.py {transcript_path} \
+    --start-line {last_line} \
+    --include-subagents \
+    --projects-dir {projects_dir}
 ```
 
 2. **Read the output** — this is the champion's recent activity.
 
-3. **Update state**: Extract `LAST_LINE_PROCESSED: N` from the output (or read `/tmp/monitor_state_{basename}.txt`). Set `last_line = N` for the next poll.
+3. **Update state**: Extract `LAST_LINE_PROCESSED: N` from the output. Set `last_line = N` for the next poll. Subagent offsets are tracked automatically in the state file.
 
 4. **Analyze the digest** for issues (see "What to Watch For" below).
 
@@ -126,7 +114,7 @@ Full log: {artifact_dir}/monitor_log_{champion_name}.md
 
 If the transcript has no new lines for 5 minutes but you haven't seen a completion signal:
 
-1. Re-run the discovery script to check for a **new** transcript from the same agent name
+1. Re-run the discovery snippet (from Setup step 1) to check for a **new** transcript from the same agent name
 2. If a new transcript is found (different file path), switch to it and reset `last_line = 0`
 3. If no new transcript, continue polling the old one for 1 more cycle, then stop with a stale-transcript warning to the orchestrator
 
