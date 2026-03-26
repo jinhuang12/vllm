@@ -145,8 +145,10 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 .claude/agents/
 ├── ammo-researcher.md      # Profiling + bottleneck mining (grounded data only, NO estimates)
 ├── ammo-champion.md        # Debate: proposes candidates, runs micro-experiments, argues with data
+├── ammo-delegate.md        # Research/profiling/benchmarking subagent spawned by champions
 ├── ammo-impl-champion.md   # Implements kernel in isolated worktree, aggregates validation results
 ├── ammo-impl-validator.md  # Independent validation: correctness tests, benchmarks, E2E sweeps
+├── ammo-resolver.md        # Resolve merge conflicts when cherry-picking GATED_PASS tracks
 └── ammo-transcript-monitor.md  # Monitors agent transcripts for compliance violations
 ```
 
@@ -156,8 +158,10 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 |-------|------|----------------|
 | **ammo-researcher** | Profiles baseline, mines bottlenecks | Cannot make feasibility estimates or E2E projections |
 | **ammo-champion** | Proposes optimizations, argues in debate | Must back claims with micro-experiments |
+| **ammo-delegate** | Research, profiling, benchmarking subagent for champions | Fire-and-forget; returns data, not recommendations |
 | **ammo-impl-champion** | Implements kernel in isolated worktree, aggregates validation results | Works in isolated worktree; frontmatter Stop hook (DA) enforces validation + Amdahl's sanity |
 | **ammo-impl-validator** | Independent validation: correctness tests, benchmarks, E2E sweeps | Paired with impl-champion; writes own tests independently to prevent reward hacking |
+| **ammo-resolver** | Resolves merge conflicts during Stage 6 cherry-pick | Spawned on conflict; DA reviewer verifies resolution |
 | **ammo-transcript-monitor** | Monitors agent transcripts for compliance violations | Flags non-negotiable violations in real-time |
 
 The **lead** (main Claude session) orchestrates all stages, manages `state.json`, owns all gates, and never writes kernel code directly.

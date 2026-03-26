@@ -130,7 +130,7 @@ You may be running in an overlapped context where implementation agents are also
 
 ## Subagents
 
-**Your job is strategy, synthesis, and decision-making — NOT doing all the research yourself.** Actively delegate research tasks to Sonnet subagents via `Agent()` so you stay focused on building your case and critiquing others.
+**Your job is strategy, synthesis, and decision-making — NOT doing all the research yourself.** Actively delegate research tasks to AMMO delegates via `Agent(subagent_type="ammo-delegate")` so you stay focused on building your case and critiquing others.
 
 ### What to delegate
 - Profiling data extraction (parsing nsys/ncu exports, extracting kernel timings)
@@ -147,9 +147,37 @@ You may be running in an overlapped context where implementation agents are also
 - Final feasibility judgments and E2E impact estimates
 
 ### How to spawn
-Use `Agent()` with `run_in_background=True` for tasks you don't need immediately. Spawn multiple subagents in parallel for independent tasks — e.g., one tracing the dispatch path while another runs a roofline calculation. Results return directly to your context; no SendMessage coordination needed.
+Use `Agent(subagent_type="ammo-delegate")` with `run_in_background=True` for tasks you don't need immediately. Spawn multiple delegates in parallel for independent tasks — e.g., one tracing the dispatch path while another runs a roofline calculation. Results return directly to your context; no SendMessage coordination needed.
 
-Subagents are standalone (fire-and-forget) — you cannot send follow-up messages. Give each subagent a complete, self-contained prompt with all context it needs. Remind subagents of GPU pool reservation rules and the `.venv` activation requirement.
+Delegates are standalone (fire-and-forget) — you cannot send follow-up messages. Give each delegate a complete, self-contained prompt including: the artifact directory path, which bottleneck/candidate you're investigating, the specific task, and which references are most relevant.
+
+```python
+# Example: parallel delegate spawns
+Agent(
+  subagent_type="ammo-delegate",
+  run_in_background=True,
+  description="Trace silu_and_mul dispatch path",
+  prompt="""
+  Trace the dispatch path for the silu_and_mul kernel from the model forward()
+  through vLLM to the CUDA launch. Report the full call chain with file paths.
+  Read references/optimization-techniques.md for technique context.
+  Artifact directory: {artifact_dir}
+  """
+)
+
+Agent(
+  subagent_type="ammo-delegate",
+  run_in_background=True,
+  description="Roofline analysis for fusion",
+  prompt="""
+  Compute roofline analysis for fusing silu_and_mul + block_fp8_quant.
+  Combined working set, arithmetic intensity, memory BW bound.
+  Read references/fusion-feasibility-heuristics.md for H1-H5 heuristics.
+  Hardware specs in references/gpu-configs.md. Target: L40S.
+  Artifact directory: {artifact_dir}
+  """
+)
+```
 
 ## Transcript Monitor
 

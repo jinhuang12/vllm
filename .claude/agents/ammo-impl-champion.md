@@ -92,6 +92,31 @@ After receiving the validator's research report:
 6. **Optionally run a quick sanity benchmark** — record the numbers (the DA will cross-check against validator's numbers)
 7. **Commit implementation** to the worktree branch
 
+## Subagents
+
+**For parallelizable research tasks**, spawn AMMO delegates via `Agent(subagent_type="ammo-delegate")` in addition to using the validator. Delegates are fire-and-forget — they have full AMMO domain context (references, scripts, GPU pool pattern, production parity rules) baked into their agent definition.
+
+### When to use delegates vs validator
+- **Validator**: Ongoing collaboration, tasks requiring back-and-forth, validation gates, anything needing worktree context
+- **Delegates**: Independent one-shot tasks — ncu profiling, dispatch path tracing, shape computation, codebase lookups
+
+### How to spawn
+Use `Agent(subagent_type="ammo-delegate")` with `run_in_background=True`. Give each delegate a complete prompt including artifact directory, worktree path, op_id, and the specific task.
+
+```python
+Agent(
+  subagent_type="ammo-delegate",
+  run_in_background=True,
+  description="Profile baseline kernel with ncu",
+  prompt="""
+  Run ncu on the baseline silu_and_mul kernel for shape M=8, N=11008, K=1.
+  Report: SM utilization, achieved DRAM BW, register count, occupancy.
+  Artifact directory: {artifact_dir}
+  Worktree: {worktree_path}
+  """
+)
+```
+
 ## Requesting Validation
 
 When implementation is committed and you're ready:
@@ -237,6 +262,21 @@ Write `{artifact_dir}/tracks/{op_id}/validation_results.md` with:
 - E2E threshold evaluation with PASS/FAIL verdicts
 - Overall PASS/FAIL determination
 - Repro commands with exact env vars and flags
+
+## Transcript Monitor
+
+A transcript monitor agent reads your session log periodically and flags methodology errors via SendMessage. When you receive a `DA-MONITOR:` message:
+
+1. **CRITICAL severity**: Stop current approach and address before continuing
+2. **WARNING severity**: Investigate before committing to current approach
+3. **INFO severity**: Note for later, continue current work
+
+Common flags for impl champions: production-parity violations, Stage 1 baseline reuse skipped, missing gating for mixed-verdict BS, incomplete validation_results.md.
+
+To ensure you receive messages promptly, **background long-running commands** — the monitor cannot interrupt mid-turn, so messages arrive at turn boundaries. Backgrounding creates more boundaries:
+```
+Bash(command="cmake --build --preset release --target install", run_in_background=True)
+```
 
 ## References
 
