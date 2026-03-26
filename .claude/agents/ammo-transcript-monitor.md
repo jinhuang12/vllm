@@ -72,11 +72,11 @@ Read the state file if it exists (`/tmp/monitor_state_{transcript_basename}.txt`
 
 ## Polling Protocol
 
-### Polling Interval: ~10 Minutes
+### Polling Interval: ~5 Seconds
 
-The polling loop uses `sleep 540` (9 minutes) between polls to stay within the Bash tool's 600-second timeout limit. Including analysis time, each cycle takes approximately 10-12 minutes, giving 5-10 polls per 1-3 hour champion session.
+The polling loop uses `sleep 5` between polls for near-real-time monitoring. Each poll runs the Python filter script (fast, <1s), analyzes the digest, and optionally logs/interjects. Over a 3-hour champion session, this produces ~2,000+ polls — the monitor is continuously active.
 
-Between polls, you are idle. Do NOT do other work — your context window budget is reserved for transcript analysis.
+Your context window will grow rapidly. Rely on the observation log (`{artifact_dir}/monitor_log_{champion_name}.md`) to persist findings across context compressions. Keep per-poll analysis concise.
 
 ### Poll Execution
 
@@ -101,7 +101,7 @@ python3 /tmp/transcript_filter_{your_monitor_name}.py {transcript_path} --start-
 
 8. **Re-read your observation log** if your context feels incomplete (earlier polls may have been compressed away). This recovers: which issues you already flagged, what the champion was doing in earlier polls, your running tally of messages sent.
 
-9. **Wait**: `Bash(command="sleep 540", timeout: 600000)`, then repeat from step 1.
+9. **Wait**: `Bash(command="sleep 5")`, then repeat from step 1.
 
 ### When to Start Flagging
 
@@ -112,8 +112,8 @@ Skip the first poll result if it shows only startup activity (venv activation, i
 Stop polling when ANY of:
 - The champion's transcript shows a completion message (e.g., "VALIDATION_REQUEST", "Track complete", "Implementation infeasible")
 - The orchestrator sends you a shutdown message
-- The transcript stops growing for 20+ minutes AND re-discovery finds no new transcript (see Session Restart below)
-- You reach 12 poll cycles (safety limit)
+- The transcript stops growing for 5+ minutes AND re-discovery finds no new transcript (see Session Restart below)
+- You have been running for 3 hours (safety time limit)
 
 When stopping, send a final summary to the orchestrator:
 ```
@@ -124,7 +124,7 @@ Full log: {artifact_dir}/monitor_log_{champion_name}.md
 
 ### Session Restart Handling (I7)
 
-If the transcript has no new lines for 2 consecutive polls (~20 min) but you haven't seen a completion signal:
+If the transcript has no new lines for 5 minutes but you haven't seen a completion signal:
 
 1. Re-run the discovery script to check for a **new** transcript from the same agent name
 2. If a new transcript is found (different file path), switch to it and reset `last_line = 0`
@@ -148,13 +148,13 @@ Recommended action: {what the champion should do differently}.
 
 ### Rate Limiting
 
-- **Maximum 1 message per poll cycle.** If you find multiple issues, batch them into a single message with the highest severity.
+- **Maximum 1 message per minute.** If multiple issues are found within a minute, batch them into a single message with the highest severity. Track the timestamp of your last sent message and skip sending if <60 seconds have passed.
 - **Maximum 5 total messages per session.** After 5 messages, only send CRITICAL severity. This prevents the monitor from becoming noise.
-- **Never send consecutive messages about the same issue.** If you flagged something and the champion hasn't addressed it yet, wait. They may be mid-work.
+- **Never send consecutive messages about the same issue.** If you flagged something and the champion hasn't addressed it yet, wait at least 2 minutes before re-flagging. They may be mid-work.
 
 ### Escalation Protocol (I6)
 
-If you sent a CRITICAL message and the champion has not responded by the NEXT poll cycle, check the transcript for evidence of response:
+If you sent a CRITICAL message and the champion has not responded within 2 minutes, check the transcript for evidence of response:
 
 - **Addressed**: The champion's subsequent actions changed in response (different methodology, corrective action taken) OR the champion's thinking/messages provide evidence-based justification for the current approach. Do NOT escalate.
 - **Ignored**: The champion's subsequent actions show NO change — same methodology, same approach, no mention of the DA-MONITOR message. Escalate:

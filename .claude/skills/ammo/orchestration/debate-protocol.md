@@ -30,7 +30,12 @@ Agent(
 )
 ```
 
-Monitors are purely additive — if not spawned, nothing breaks.
+Monitors are purely additive — if not spawned, nothing breaks. They passively read the champion's `.jsonl` session transcript (polling every ~5 seconds) and interject via SendMessage only when they detect methodology errors, framing biases, or procedural violations. Key properties:
+- **Zero champion overhead**: Champions don't need to report status or interact with monitors
+- **Unmediated observation**: Monitors read raw transcripts (tool calls, thinking blocks, results) — champions cannot filter what monitors see
+- **Rate-limited interjections**: Max 1 message/minute, max 5 messages/session, CRITICAL-only after 5
+- **Graceful degradation**: If a monitor errors out, the champion continues unmonitored. DA stop hooks and the validator remain as independent backstops
+- **Escalation**: If a CRITICAL finding is ignored for 2+ minutes, the monitor escalates to the orchestrator
 
 ## Debate is Always Mandatory
 
