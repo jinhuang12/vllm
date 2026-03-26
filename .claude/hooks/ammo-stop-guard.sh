@@ -13,7 +13,8 @@
 #   - Stages 4-5 with missing overlapped debate (round 2+)
 #   - Any stage with active overlapped debate
 #
-# Teammates are excluded by checking if the session is the team lead.
+# Teammates are excluded via the agent_type JSON field (present for subagents,
+# absent for the lead) with a fallback to session_id / team-config check.
 #
 # Uses file-based one-shot circuit breaker (keyed by session_id):
 #   1st stop attempt: create marker file, nudge with stage-specific prompt
@@ -23,14 +24,18 @@ if ! command -v jq &>/dev/null; then exit 0; fi
 
 INPUT=$(cat)
 
-# ── Skip for teammates ──
-# Teammates have --agent-name set, which means they won't be the lead.
-# Check: if any team config lists our session_id as leadSessionId, we're the lead.
-# Simpler: teammates run inside a team context but are NOT the lead session.
-# The lead session created the team — its session_id matches leadSessionId.
+# ── Skip for subagents/teammates ──
+# agent_type is ONLY present in the JSON for subagents (spawned via Agent tool).
+# The lead orchestrator's Stop hook JSON does NOT contain this field.
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null)
+if [ -n "$AGENT_TYPE" ]; then
+    exit 0  # Subagent — campaign-level nudges are irrelevant
+fi
+
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 
+# Secondary: check team config as fallback (works when session_ids differ).
 IS_LEAD=false
 for team_cfg in "$HOME/.claude/teams"/*/config.json; do
     [ -f "$team_cfg" ] || continue
@@ -84,6 +89,17 @@ fi
 STAGE=$(jq -r '.stage // "unknown"' "$STATE_FILE" 2>/dev/null)
 ROUND=$(jq -r '.campaign.current_round // 1' "$STATE_FILE" 2>/dev/null)
 OVERLAP_ACTIVE=$(jq -r '.debate.next_round_overlap.active // false' "$STATE_FILE" 2>/dev/null)
+OVERLAP_PHASE=$(jq -r '.debate.next_round_overlap.phase // empty' "$STATE_FILE" 2>/dev/null)
+OVERLAP_WINNERS_COUNT=$(jq -r '.debate.next_round_overlap.selected_winners | length // 0' "$STATE_FILE" 2>/dev/null)
+
+# ── Overlap completion check (Bug 2 fix) ──
+# active=false could mean "not started" OR "completed". Distinguish via:
+#   - phase == "selection_complete" → debate finished normally
+#   - selected_winners non-empty → winners were recorded (debate completed)
+OVERLAP_COMPLETED=false
+if [ "$OVERLAP_PHASE" = "selection_complete" ] || [ "$OVERLAP_WINNERS_COUNT" -gt 0 ] 2>/dev/null; then
+    OVERLAP_COMPLETED=true
+fi
 
 # ── Stage-specific nudge ──
 # Only nudge at stages where the orchestrator should keep going.
@@ -110,7 +126,10 @@ Do NOT stop without spawning the report subagent."
     4_5*|*parallel_tracks*|*implementation*)
         # During implementation: check if overlapped debate should be launched
         if [ "$ROUND" -ge 2 ] && [ "$OVERLAP_ACTIVE" != "true" ]; then
-            # Round 2+ and overlapped debate not yet launched
+            if [ "$OVERLAP_COMPLETED" = "true" ]; then
+                exit 0  # Overlap already completed — nothing to nudge about
+            fi
+            # Round 2+ and overlapped debate genuinely not yet launched
             HAS_TRACKS=$(jq -r '.parallel_tracks | length // 0' "$STATE_FILE" 2>/dev/null)
             if [ "$HAS_TRACKS" -gt 0 ]; then
                 NUDGE="You spawned implementation agents but have NOT launched the overlapped debate.

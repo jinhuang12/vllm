@@ -1,4 +1,12 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(python .claude/skills/ammo/scripts/new_target.py --artifact-dir /tmp/test-restructuring --model-id test --hardware test --dtype bf16 --force)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -7,6 +15,16 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-pretool-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-env-default-guard.sh",
+            "timeout": 5000
           }
         ]
       },

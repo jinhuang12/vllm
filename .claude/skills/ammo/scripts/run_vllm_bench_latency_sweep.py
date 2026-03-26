@@ -119,6 +119,22 @@ def _is_placeholder(v: Any) -> bool:
     return isinstance(v, str) and (v.strip() == PLACEHOLDER or v.strip().startswith("<") and v.strip().endswith(">"))
 
 
+def _sanitize_vllm_op_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Strip all VLLM_OP* env vars from *env* to prevent cross-track contamination.
+
+    Prior-round gating flags (e.g. VLLM_OP001=1) may be present in the inherited
+    process environment because ``vllm/envs.py`` was edited on the worktree branch.
+    If left in place they silently activate stale optimizations during baseline and
+    opt sweeps, producing false negatives (as observed in the op003/op004 audit).
+
+    Non-optimization VLLM vars (VLLM_ATTENTION_BACKEND, VLLM_USE_V1, etc.) are
+    preserved — only keys matching ``VLLM_OP\\d+`` are removed.
+    """
+    import re as _re
+    _vllm_op_re = _re.compile(r"^VLLM_OP\d+$")
+    return {k: v for k, v in env.items() if not _vllm_op_re.match(k)}
+
+
 def _require(obj: Dict[str, Any], key: str, ctx: str) -> Any:
     if key not in obj:
         raise SystemExit(f"Missing required field: {ctx}.{key}")
@@ -661,7 +677,15 @@ def _run_inproc_latency_sweep_child(
 
     engine_args = EngineArgs.from_cli_args(args)
     _update_status("loading_model")
-    llm = LLM(**_dataclasses.asdict(engine_args))
+    # Work around pydantic validation: _dataclasses.asdict may produce None
+    # values inside nested config dicts (e.g. compilation_config.cudagraph_capture_sizes)
+    # which CompilationConfig rejects. Filter them out.
+    ea_dict = _dataclasses.asdict(engine_args)
+    for _cfg_key in ("compilation_config", "profiler_config", "attention_config",
+                      "structured_outputs_config"):
+        if isinstance(ea_dict.get(_cfg_key), dict):
+            ea_dict[_cfg_key] = {k: v for k, v in ea_dict[_cfg_key].items() if v is not None}
+    llm = LLM(**ea_dict)
     _update_status("model_loaded")
 
     for bucket in buckets:
@@ -981,6 +1005,17 @@ def main() -> None:
             "--nsys-output-len is set. Requires --nsys-profile."
         ),
     )
+    p.add_argument(
+        "--baseline-from",
+        type=str,
+        default=None,
+        help=(
+            "Path to a Stage 1 baseline output directory (e.g., {artifact_dir}/e2e_baseline/) "
+            "containing json/{baseline_label}_{tag}.json files.  Used with '--labels opt' to "
+            "import existing baseline data so gate results include speedup calculations. "
+            "When omitted with '--labels opt', results are flagged with a warning."
+        ),
+    )
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
@@ -1028,6 +1063,15 @@ def main() -> None:
         )
     if not selected_labels:
         raise SystemExit("--labels must specify at least one label.")
+
+    # Validate --baseline-from early.
+    baseline_from: Optional[Path] = None
+    if args.baseline_from:
+        baseline_from = Path(args.baseline_from).expanduser().resolve()
+        if not baseline_from.is_dir():
+            raise SystemExit(
+                f"--baseline-from path does not exist or is not a directory: {baseline_from}"
+            )
 
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
     target_path = Path(args.target_json).expanduser().resolve() if args.target_json else (artifact_dir / "target.json")
@@ -1158,8 +1202,12 @@ def main() -> None:
     out_json_path = out_root / "e2e_latency_results.json"
     out_md_path = out_root / "e2e_latency_results.md"
 
-    # Prepare envs: start from current env, then apply overrides.
-    base_env = dict(os.environ)
+    # Prepare envs: start from current env, then strip stale VLLM_OP* vars.
+    # Cross-track contamination fix: prior-round gating flags (VLLM_OP001, etc.)
+    # may be set in the inherited environment. Stripping them ensures each sweep
+    # measures only the target track's optimization.  The target track's env var
+    # is re-added explicitly via baseline_env / opt_env from target.json.
+    base_env = _sanitize_vllm_op_env(dict(os.environ))
 
     baseline_run = RunSpec(
         label=baseline_label,
@@ -1256,6 +1304,24 @@ def main() -> None:
         },
         "results": [],
     }
+
+    # Track baseline source and warnings for gate runs (--labels opt).
+    run_warnings: List[str] = []
+    if "opt" in selected_labels and "baseline" not in selected_labels:
+        if baseline_from:
+            all_runs["baseline_source"] = str(baseline_from)
+        else:
+            all_runs["baseline_source"] = "none"
+            run_warnings.append(
+                "No baseline reference provided (--baseline-from not set); "
+                "speedup calculations unavailable."
+            )
+            print(
+                "WARNING: --labels opt without --baseline-from; baseline data "
+                "will be null in results. Pass --baseline-from <stage1_dir> for "
+                "gate results with speedup calculations.",
+                file=sys.stderr,
+            )
 
     # GPU reservation is now managed by PreToolUse/PostToolUse hooks.
     # The hooks auto-reserve when CUDA_VISIBLE_DEVICES=X is in the command
@@ -1552,6 +1618,39 @@ def main() -> None:
                     f"expected profile files for {run.label}"
                 )
 
+    # Import Stage 1 baseline artifacts when --baseline-from is set.
+    # This copies baseline JSON + runner JSON into the gate run's json/ dir
+    # so the results collection below picks them up transparently.
+    if baseline_from and "opt" in selected_labels and "baseline" not in selected_labels:
+        baseline_from_json = baseline_from / "json"
+        if not baseline_from_json.is_dir():
+            raise SystemExit(
+                f"--baseline-from has no json/ subdirectory: {baseline_from}. "
+                "Expected a Stage 1 output directory with json/{baseline_label}_*.json files."
+            )
+        imported = 0
+        missing_tags: List[str] = []
+        for p in planned:
+            tag = p["tag"]
+            for suffix in (".json", ".runner.json"):
+                src = baseline_from_json / f"{baseline_label}_{tag}{suffix}"
+                dst = json_dir / f"{baseline_label}_{tag}{suffix}"
+                if src.exists():
+                    import shutil as _shutil_copy
+                    _shutil_copy.copy2(str(src), str(dst))
+                    if suffix == ".json":
+                        imported += 1
+                else:
+                    if suffix == ".json":
+                        missing_tags.append(tag)
+        if missing_tags:
+            raise SystemExit(
+                f"--baseline-from is missing baseline data for {len(missing_tags)} "
+                f"bucket(s): {missing_tags}. "
+                f"Looked in {baseline_from_json} for {baseline_label}_<tag>.json files."
+            )
+        print(f"Imported {imported} baseline artifact(s) from {baseline_from}")
+
     # Populate per-bucket entries from artifacts written by children.
     new_rows: List[Dict[str, Any]] = []
     for p in planned:
@@ -1653,6 +1752,10 @@ def main() -> None:
             )
 
     all_runs["results"] = new_rows
+
+    # Append warnings accumulated during the run.
+    if run_warnings:
+        all_runs["warnings"] = run_warnings
 
     # Write outputs.
     _write_json(out_json_path, all_runs)

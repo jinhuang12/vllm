@@ -83,6 +83,19 @@ When combining a GATED_PASS track with other tracks:
 - Verify no interaction effects between the gated dispatch and other optimizations
 - If cherry-pick produces merge conflict on a GATED_PASS track: spawn resolver agent (see below)
 
+## Per-Track Environment Variable Isolation
+
+**Convention: all `VLLM_OP*` flags default to off (`0`/`False`).**
+
+Each track's gating env var (e.g., `VLLM_OP003`) is registered in `vllm/envs.py` with default value `0` (disabled). The E2E sweep harness (`run_vllm_bench_latency_sweep.py`) sanitizes the inherited environment by stripping all `VLLM_OP*` vars before building run specs, then re-adds only the target track's vars via `baseline_env`/`opt_env` from `target.json`. This prevents cross-track contamination where a prior round's gating flag silently activates stale optimizations during subsequent sweeps.
+
+**Why this matters**: In a multi-round campaign, worktree branches accumulate `envs.py` edits from all prior tracks. Without sanitization, a Round 1 `VLLM_OP001=True` default persists into Round 2 sweeps, contaminating both baseline and opt measurements. This was observed in production: op003's Triton dispatch was silently blocked by op001's CUTLASS flag, and op004's first sweep showed a 0.83x false-negative regression.
+
+**Requirements**:
+1. `ammo-impl-champion.md` mandates `VLLM_{OP_NAME}=0` in `vllm/envs.py` (never `=1`)
+2. `run_vllm_bench_latency_sweep.py` calls `_sanitize_vllm_op_env()` to unset all `VLLM_OP*` except the target before running
+3. Integration E2E sweeps must explicitly set all shipped gating flags via `opt_env` — never rely on envs.py defaults
+
 ## State Tracking
 
 The integration section of `state.json` records all decisions and results:
@@ -222,7 +235,7 @@ If all implementation tracks for round N fail (round EXHAUSTED), but the overlap
 ### Campaign Terminates During Overlapped Debate
 
 If the campaign transitions to `campaign_complete` or `campaign_exhausted` while `debate.next_round_overlap.active` is `true`:
-1. Shut down all overlapped debate champions via `shutdown_request`.
+1. Shut down all overlapped debate champions (and delegates) via `shutdown_request`.
 2. Discard overlapped debate results -- they will never be used.
 3. Clear `debate.next_round_overlap` to initial state.
 4. Proceed with TeamDelete and campaign termination as normal.

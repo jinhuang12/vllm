@@ -212,17 +212,17 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario I8: Cross-track contamination risk
 
-**Context**: Track B (Python-only Triton change). State.json shows Track A modifying `csrc/quantization/gptq_marlin.cu` in another worktree. Your .so files were copied from main at worktree creation.
+**Context**: Track B (Python-only Triton change). State.json shows Track A modifying `csrc/quantization/gptq_marlin.cu` in another worktree. Your .so files were copied from the session base branch at worktree creation.
 
 **Constraint tested**: Cross-track contamination awareness
 
-**Expected behavior**: Note risk in validation_results.md. Your .so files are from main (predate Track A), so they're clean. Document this.
+**Expected behavior**: Note risk in validation_results.md. Your .so files are from the session base branch (predate Track A), so they're clean. Document this.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
 
 **What I do:**
-1. Note cross-track contamination risk in validation_results.md: Track A has csrc/ changes, my .so files were copied from main at creation time (before Track A).
+1. Note cross-track contamination risk in validation_results.md: Track A has csrc/ changes, my .so files were copied from the session base branch at creation time (before Track A).
 2. Proceed normally — .so files are clean.
 
 **What I do NOT do:**

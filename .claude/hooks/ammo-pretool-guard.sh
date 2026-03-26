@@ -44,6 +44,17 @@ if [ "$_CAMPAIGN_ACTIVE" = "true" ]; then
         echo "  python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py --artifact-dir <dir>" >&2
         echo "If this is a false positive (e.g., documentation or search), ignore this warning." >&2
     fi
+
+    # N5: VLLM_OP* env contamination warning (warn-only, not blocking)
+    # Catches ad-hoc commands like `VLLM_OP001=1 python benchmark.py`.
+    # The sweep script's _sanitize_vllm_op_env() is the hard gate.
+    if echo "$COMMAND" | grep -qP 'VLLM_OP\d+=\s*(1|True|true)\b' && \
+       ! echo "$COMMAND" | grep -q 'run_vllm_bench_latency_sweep'; then
+        echo "AMMO REMINDER: VLLM_OP* env var set to True/1 detected in command." >&2
+        echo "  Cross-track contamination prevention: VLLM_OP* flags must default to off." >&2
+        echo "  The sweep script sanitizes VLLM_OP* from inherited env automatically." >&2
+        echo "  If setting for a specific benchmark, use opt_env in target.json instead." >&2
+    fi
 fi
 
 # ── GPU Pool Pattern Guard ──
@@ -55,7 +66,7 @@ IS_GPU_CMD=false
 if echo "$COMMAND" | grep -qP '\b(nsys|ncu)\b' || \
    echo "$COMMAND" | grep -qP 'nvidia-smi\s+--query-compute'; then
     IS_GPU_CMD=true
-elif echo "$COMMAND" | grep -qP '^\s*(vllm|torchrun)\b'; then
+elif echo "$COMMAND" | grep -qP '\b(vllm|torchrun)\b'; then
     IS_GPU_CMD=true
 elif echo "$COMMAND" | grep -qP '\b(python3?|pytest)\b' && \
      echo "$COMMAND" | grep -qiP '(torch|cuda|triton|vllm|benchmark|kernel|gpu)'; then
@@ -76,11 +87,8 @@ if echo "$COMMAND" | grep -q 'gpu_reservation.py reserve'; then
     exit 0
 fi
 
-# If command has explicit CUDA_VISIBLE_DEVICES=<digits>, allow through
-# (backward compat for scripts that set CVD themselves)
-if echo "$COMMAND" | grep -qP 'CUDA_VISIBLE_DEVICES=[0-9]'; then
-    exit 0
-fi
+# Explicit CUDA_VISIBLE_DEVICES=<digits> WITHOUT reservation is a bypass —
+# fall through to the one-shot warning so agents learn to use the reservation pattern.
 
 # If command has CUDA_VISIBLE_DEVICES="" (explicit no-GPU), allow through
 if echo "$COMMAND" | grep -qP "CUDA_VISIBLE_DEVICES=(\"\"|\x27\x27)"; then

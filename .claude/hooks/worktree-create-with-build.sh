@@ -24,6 +24,13 @@ fi
 
 WORKTREE_DIR="$MAIN_REPO/.claude/worktrees/$WORKTREE_NAME"
 
+# Resolve the true base repository for shared resources (lock, ccache).
+# In a session worktree, MAIN_REPO is the session worktree path, but
+# git worktree add operates on the shared base repo. The lock must
+# protect that shared resource, not a per-session copy.
+BASE_REPO=$(git -C "$MAIN_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||') || true
+BASE_REPO="${BASE_REPO:-$MAIN_REPO}"
+
 # Guard: already exists
 if [ -d "$WORKTREE_DIR" ]; then
     echo "WARN: Worktree already exists: $WORKTREE_DIR" >&2
@@ -41,6 +48,8 @@ else
 fi
 mkdir -p "$MAIN_REPO/.claude/worktrees"
 
+# Lock in session worktree (writable by session_user), NOT base repo (may be root-owned).
+# Cross-session concurrency is handled by git's own internal locking.
 LOCKFILE="$MAIN_REPO/.claude/worktrees/.create-lock"
 (
     flock -x 200
@@ -63,7 +72,7 @@ if [ -f "$MAIN_REPO/CMakeUserPresets.json" ]; then
     cp "$MAIN_REPO/CMakeUserPresets.json" "$WORKTREE_DIR/" 2>/dev/null
     # Inject CCACHE_PATH_MAP into the environment block
     if command -v jq &>/dev/null; then
-        jq --arg pm "$WORKTREE_DIR:$MAIN_REPO" \
+        jq --arg pm "$WORKTREE_DIR:$BASE_REPO" \
            '.configurePresets[0].environment.CCACHE_PATH_MAP = $pm' \
            "$WORKTREE_DIR/CMakeUserPresets.json" > "$WORKTREE_DIR/CMakeUserPresets.json.tmp" && \
            mv "$WORKTREE_DIR/CMakeUserPresets.json.tmp" "$WORKTREE_DIR/CMakeUserPresets.json"

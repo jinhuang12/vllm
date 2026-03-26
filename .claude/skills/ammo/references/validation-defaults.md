@@ -63,7 +63,7 @@ for e in range(E):
 
 | Data | Location | Captured by |
 |------|----------|-------------|
-| Per-BS E2E latency | `{artifact_dir}/runs/baseline_bs{N}.json` | Stage 1 profiler on clean main |
+| Per-BS E2E latency | `{artifact_dir}/runs/baseline_bs{N}.json` | Stage 1 profiler on session base branch |
 | Summary table | `{artifact_dir}/constraints.md` — "Baseline E2E latency" | Stage 1 profiler |
 | Kernel breakdown | `{artifact_dir}/constraints.md` — "Baseline Truth Snapshot" | Stage 1 profiler |
 
