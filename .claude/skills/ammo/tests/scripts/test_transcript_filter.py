@@ -280,8 +280,8 @@ class TestBasicFiltering:
         summary = parse_summary(stdout)
         assert summary["RECORDS_OUTPUT"] == "0"
 
-    def test_content_truncation(self, tmp_path):
-        """Content exceeding --max-content-len is truncated."""
+    def test_content_truncation_when_explicitly_set(self, tmp_path):
+        """Content exceeding explicit --max-content-len is truncated."""
         big_text = "x" * 200
         transcript = tmp_path / "champion.jsonl"
         write_jsonl(transcript, [
@@ -290,6 +290,18 @@ class TestBasicFiltering:
 
         stdout, _, _ = run_filter(str(transcript), max_content_len=50)
         assert "[TRUNCATED" in stdout
+
+    def test_no_truncation_by_default(self, tmp_path):
+        """Default (no --max-content-len) does not truncate."""
+        big_text = "x" * 100_000
+        transcript = tmp_path / "champion.jsonl"
+        write_jsonl(transcript, [
+            make_assistant_thinking(big_text),
+        ])
+
+        stdout, _, _ = run_filter(str(transcript))
+        assert "[TRUNCATED" not in stdout
+        assert big_text in stdout
 
 
 # ===========================================================================

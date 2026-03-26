@@ -25,8 +25,8 @@ import sys
 from datetime import datetime
 
 NOISE_TYPES = {"progress", "file-history-snapshot", "queue-operation"}
-MAX_CONTENT_LEN = 50000  # Truncate individual content blocks >50KB
-WRITE_EDIT_PREVIEW_LEN = 500  # Show first N chars of Write/Edit content
+MAX_CONTENT_LEN = 0  # 0 = no truncation. The filter strips ~97% noise; remaining content is what the monitor needs.
+WRITE_EDIT_PREVIEW_LEN = 0  # 0 = no truncation for Write/Edit previews.
 
 
 # ---------------------------------------------------------------------------
@@ -55,8 +55,8 @@ def parse_args(argv=None):
 # ---------------------------------------------------------------------------
 
 def safe_truncate(text, max_len):
-    """Truncate text with [TRUNCATED] marker."""
-    if not text or len(text) <= max_len:
+    """Truncate text with [TRUNCATED] marker. max_len=0 means no truncation."""
+    if not text or max_len <= 0 or len(text) <= max_len:
         return text
     return text[:max_len] + f"\n[TRUNCATED at {max_len} chars, total {len(text)}]"
 
@@ -381,7 +381,7 @@ def process_system_record(record, max_len):
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 text = block.get("text", "")
-                lines.append(f"  SYSTEM ({len(text)} chars): {safe_truncate(text, 300)}")
+                lines.append(f"  SYSTEM ({len(text)} chars): {safe_truncate(text, max_len)}")
     elif isinstance(content, str):
         lines.append(f"  SYSTEM ({len(content)} chars): {safe_truncate(content, 300)}")
     return lines
