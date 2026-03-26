@@ -30,7 +30,7 @@ Agent(
 )
 ```
 
-Monitors are purely additive — if not spawned, nothing breaks. See `2026-03-25-transcript-monitor-design.md` for full design.
+Monitors are purely additive — if not spawned, nothing breaks.
 
 ## Debate is Always Mandatory
 
