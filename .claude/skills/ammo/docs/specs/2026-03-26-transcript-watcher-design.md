@@ -1,7 +1,7 @@
 # Design Spec: Background Transcript Watcher for AMMO Monitor
 
 **Date**: 2026-03-26
-**Status**: Draft — pending adversarial review
+**Status**: Draft — Rev 2 (addresses adversarial review round 1)
 **Replaces**: The inline `transcript_filter.py` + poll-sleep-poll architecture in `2026-03-25-transcript-monitor-design.md`
 
 ---
@@ -21,8 +21,8 @@ The monitor agent starts the watcher once via `Bash(run_in_background=True)` and
 
 ### Key Properties
 
-- **1 Bash call** (to start watcher) vs ~2,160 Bash calls
-- **~1,080 Read calls** over 3 hours (every 10s) vs ~2,160 Bash calls
+- **1 Bash call** (to start watcher) + **~1,080 sleep Bash calls** + **~1,080 Read calls** vs ~2,160 Bash-running-Python calls (old). Total tool calls are similar; the savings come from eliminating ~2,160 Python process startups and replacing Bash-with-output calls with lightweight Read calls.
+- **~1,080 Read calls** over 3 hours (every 10s) — note: Read with high line offsets is O(n) scan, not O(1) seek, but the digest file is small (~5,000 lines max) so this is negligible
 - **Zero Python startup overhead** per poll — single persistent process
 - **Subagent coverage** — direct children auto-discovered and tailed
 - **No /tmp script writing** — watcher lives in the repo at `.claude/skills/ammo/scripts/transcript_watcher.py`
@@ -109,12 +109,15 @@ The background watcher approach is confirmed as the best practical solution give
 ```
 python3 transcript_watcher.py \
     --champion-name <name>          # For labeling in digest
-    --transcript <path>             # Path to champion's .jsonl
+    --transcript <path>             # Path to champion's .jsonl (or use --discover)
+    --discover                      # Auto-discover transcript by champion name
     --digest-file <path>            # Where to write batched digests
     --batch-interval <seconds>      # How often to flush (default: 10)
     --projects-dir <path>           # Where .jsonl files live (for subagent discovery)
     --status-file <path>            # Optional: write liveness/stats (default: /tmp/watcher_status_{name}.json)
     --max-content-len <int>         # Truncation limit per content block (default: 50000)
+    --max-idle-seconds <int>        # Self-terminate after N seconds with no new transcript lines (default: 300)
+    --max-runtime-seconds <int>     # Self-terminate after N seconds total runtime (default: 10800 = 3 hours)
 ```
 
 ### 3.3 Internal Architecture
@@ -133,6 +136,7 @@ class TranscriptTailer:
     def poll(self) -> list[str]:
         """Read any new complete lines, filter, return formatted strings."""
         new_lines = []
+        self.last_raw_records = []  # Raw JSON dicts for caller inspection (I1 fix)
         while True:
             line = self.fh.readline()
             if not line:
@@ -146,6 +150,7 @@ class TranscriptTailer:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 break  # Truncated line — active write frontier (C1 logic)
+            self.last_raw_records.append(record)
             # Filter noise
             if record.get('type') in NOISE_TYPES:
                 self.last_successful = self.line_num
@@ -163,7 +168,8 @@ class TranscriptWatcher:
     def __init__(self, args):
         self.champion_tailer = TranscriptTailer(args.transcript, label="")
         self.subagent_tailers = {}   # name -> TranscriptTailer
-        self.pending_discoveries = {} # name -> discovery_attempts
+        self.pending_discoveries = {} # name -> first_seen_time
+        self._discovery_last_attempt = {}  # name -> last_attempt_time (C2/I2 throttle)
         self.digest_file = open(args.digest_file, 'w')
         self.batch_buffer = []
         self.last_flush = time.time()
@@ -174,22 +180,39 @@ class TranscriptWatcher:
                       'subagents_discovered': 0}
 
     def run(self):
-        """Main loop — runs until killed or stale."""
+        """Main loop — runs until termination condition met."""
+        self.start_time = time.time()
+        self.last_activity = time.time()  # Last time any tailer returned new content
+
         while True:
+            # Check termination conditions (C1 fix)
+            elapsed = time.time() - self.start_time
+            idle = time.time() - self.last_activity
+            if elapsed >= self.max_runtime_seconds:
+                self._write_termination("max_runtime_exceeded", elapsed)
+                break
+            if idle >= self.max_idle_seconds:
+                self._write_termination("idle_timeout", idle)
+                break
+
             # Poll champion
             new_records = self.champion_tailer.poll()
+            if new_records:
+                self.last_activity = time.time()
             self.batch_buffer.extend(new_records)
 
-            # Detect Agent spawns in new records
-            for record_text in new_records:
-                self._check_for_agent_spawn(record_text)
+            # Detect Agent spawns from raw records (I1 fix: parse JSON, not formatted text)
+            for raw_record in self.champion_tailer.last_raw_records:
+                self._check_for_agent_spawn_from_json(raw_record)
 
-            # Attempt pending subagent discoveries
+            # Attempt pending subagent discoveries (no expiry — retries until session ends)
             self._try_discover_subagents()
 
             # Poll all active subagent tailers
             for name, tailer in list(self.subagent_tailers.items()):
                 sub_records = tailer.poll()
+                if sub_records:
+                    self.last_activity = time.time()
                 self.batch_buffer.extend(sub_records)
 
             # Flush batch if interval elapsed
@@ -199,21 +222,41 @@ class TranscriptWatcher:
             self.stats['polls'] += 1
             time.sleep(0.5)  # Sub-second file check interval
 
-    def _check_for_agent_spawn(self, record_text):
-        """Parse formatted record text for AGENT tool_use, queue discovery."""
-        # Look for "AGENT" pattern with name= in the formatted output
-        # Extract agent name, add to pending_discoveries if not already tracking
-        ...
+    def _check_for_agent_spawn_from_json(self, record):
+        """Parse raw JSON record for Agent tool_use blocks, queue discovery. (I1 fix)"""
+        if record.get('type') != 'assistant':
+            return
+        msg = record.get('message', {})
+        if not isinstance(msg, dict):
+            return
+        for block in msg.get('content', []):
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'tool_use' and block.get('name') == 'Agent':
+                inp = block.get('input', {})
+                agent_name = inp.get('name')
+                if agent_name and agent_name not in self.subagent_tailers:
+                    if agent_name not in self.pending_discoveries:
+                        self.pending_discoveries[agent_name] = time.time()  # track first-seen time
 
     def _try_discover_subagents(self):
-        """For each pending discovery, glob .jsonl files and check agentName."""
-        for name, attempts in list(self.pending_discoveries.items()):
+        """For each pending discovery, glob .jsonl files and check agentName.
+
+        C2 fix: Never give up on discovery — subagent startup can take 10-30s.
+        Pending discoveries are retried every poll (0.5s) until the subagent is
+        found or the watcher terminates. Discovery is throttled to once per 2s
+        per agent to avoid excessive glob I/O (I2 fix: stagger for multi-watcher).
+        """
+        now = time.time()
+        for name, first_seen_time in list(self.pending_discoveries.items()):
             if name in self.subagent_tailers:
                 del self.pending_discoveries[name]
                 continue
-            if attempts > 10:  # Give up after 10 attempts (5 seconds each)
-                del self.pending_discoveries[name]
+            # Throttle: only attempt discovery every 2 seconds per agent
+            last_attempt = self._discovery_last_attempt.get(name, 0)
+            if now - last_attempt < 2.0:
                 continue
+            self._discovery_last_attempt[name] = now
             # Glob and match
             path = self._find_transcript_by_agent_name(name)
             if path:
@@ -221,8 +264,7 @@ class TranscriptWatcher:
                     path, label=f"sub:{name}")
                 self.stats['subagents_discovered'] += 1
                 del self.pending_discoveries[name]
-            else:
-                self.pending_discoveries[name] = attempts + 1
+            # If not found, stays in pending_discoveries — retried next eligible poll
 
     def _find_transcript_by_agent_name(self, agent_name):
         """Glob projects_dir/*.jsonl sorted by mtime, check first 20 lines."""
@@ -292,8 +334,8 @@ These functions are extracted as-is from the existing filter script. The only ad
 | Edge Case | Handling |
 |-----------|----------|
 | Truncated final line (concurrent write) | `JSONDecodeError` → `break` (same C1 logic as existing filter). Next `poll()` retries from the same position since `fh` stays seeked there. |
-| Champion file deleted/rotated | `readline()` returns `""` indefinitely. Watcher detects staleness after configurable timeout and exits. |
-| Subagent transcript not yet created | Queued in `pending_discoveries`, retried every 0.5s up to 10 times (5s window). |
+| Champion file deleted/rotated | `readline()` returns `""` indefinitely. Watcher self-terminates after `--max-idle-seconds` (default 300s) with no new content. **(C1 fix)** |
+| Subagent transcript not yet created | Queued in `pending_discoveries`, retried every 2s indefinitely until found or watcher terminates. No expiry — subagent startup can take 10-30s. **(C2 fix)** |
 | Subagent transcript from different champion | `_find_transcript_by_agent_name()` skips files already tracked and the champion's own file. However, if two champions spawn agents with the same name, there's an ambiguity. Mitigated by checking mtime (newest first) and expecting the subagent to start after the spawn was detected. |
 | Watcher process dies | Monitor agent detects stale status file (no update for >30s) and can restart the watcher. |
 | Digest file grows very large | The monitor reads with `offset=last_line`, only processing new batches. The file itself grows unboundedly but is in `/tmp/` and is small (filtered content only, ~1-5MB over 3 hours). |
@@ -302,16 +344,22 @@ These functions are extracted as-is from the existing filter script. The only ad
 
 ### 3.6 Subagent Spawn Detection
 
-The watcher detects Agent spawns by pattern-matching the **formatted output** of `extract_tool_use()`, not by re-parsing raw JSON. When a record is formatted and contains `AGENT` with a name, the watcher extracts the agent name and queues it for discovery.
+The watcher detects Agent spawns by parsing the **raw JSON record** directly, not the formatted output. The `TranscriptTailer` exposes `last_raw_records` (the parsed JSON dicts from the most recent `poll()` call), and `_check_for_agent_spawn_from_json()` inspects `assistant` records for `tool_use` blocks where `name == "Agent"`, extracting the spawned agent name from `input.name`.
 
-Specifically, the existing `extract_tool_use()` for Agent blocks outputs:
-```
-  AGENT [BACKGROUND]: description (type=general, name=validator-1, model=sonnet)
-```
+This approach is robust against changes to `extract_tool_use()` formatting — it depends only on the Claude Code transcript schema, which is stable. **(I1 fix: no regex on formatted output)**
 
-The watcher regex-matches `name=(\S+)` from this output to extract the subagent name.
+### 3.7 Concurrent Watchers
 
-### 3.7 Depth Limit
+During overlapped debate rounds with 2-4 debate champions + 2-3 impl-champions, **4-8 simultaneous watchers is the expected case**, not an edge case. Each watcher's subagent discovery involves globbing up to 50 `.jsonl` files and reading the first 20 lines of each.
+
+Mitigations **(I2 fix)**:
+- Discovery attempts are throttled to once per 2 seconds per pending agent (not every 0.5s poll)
+- The watcher adds a randomized initial delay of 0-2 seconds on startup (`time.sleep(random.uniform(0, 2))`) to stagger discovery bursts when multiple watchers start simultaneously
+- `_find_transcript_by_agent_name()` skips already-tracked files, reducing the search space as subagents are discovered
+
+At worst case (8 watchers × 3 pending agents each × 50 files × 20 lines), this is ~24,000 line reads per discovery round — spread over 2 seconds and staggered across watchers, this is well within I/O capacity.
+
+### 3.8 Depth Limit
 
 The watcher monitors the champion + direct children only (depth 1). It does NOT recursively discover subagents spawned by subagents. This is a deliberate scope limit:
 - Champions typically spawn 1-3 subagents (validator, researcher, micro-experiment runner)
@@ -393,9 +441,12 @@ When the monitor decides to stop (completion signal, stale transcript, 3-hour li
 
 ### 5.1 Spawn Pattern Update
 
-The orchestrator's spawn prompt for the monitor no longer includes the filter script content. Instead:
+The orchestrator's spawn prompt for the monitor no longer includes the filter script content. The `projects_dir` is derived dynamically from the working directory **(M4 fix)**:
 
 ```python
+import os
+projects_dir = os.path.expanduser("~/.claude/projects/") + os.getcwd().replace("/", "-")
+
 Agent(
     name=monitor_name,
     subagent_type="ammo-transcript-monitor",
@@ -420,9 +471,11 @@ Start the background watcher on your first turn:
     python3 .claude/skills/ammo/scripts/transcript_watcher.py \
       --champion-name {champion_name} \
       --discover \
-      --projects-dir ~/.claude/projects/-home-jinhun-vllm/ \
+      --projects-dir {projects_dir} \
       --digest-file /tmp/monitor_digest_{monitor_name}.md \
-      --batch-interval 10
+      --batch-interval 10 \
+      --max-idle-seconds 300 \
+      --max-runtime-seconds 10800
 
 Then poll the digest file every 10 seconds using Read.
 
@@ -454,12 +507,14 @@ The spawn prompt is dramatically smaller — no more embedding 570 lines of Pyth
 
 ### 6.1 Comparison with Previous Design
 
-The cost model changes significantly because `Read` tool calls are much cheaper than `Bash` tool calls (no process fork, no Python startup, just file content returned).
+The total tool call count is similar between old and new designs **(M1 fix: honest framing)**. The savings come from (a) eliminating ~2,160 Python process startups, (b) replacing Bash-running-Python calls with lightweight Read calls, and (c) a dramatically smaller spawn prompt.
 
 | Metric | Previous (5s Bash polls) | New (background watcher + 10s Read) |
 |--------|------------------------|--------------------------------------|
-| Bash tool calls | ~2,160 | ~1,080 (sleep) + 1 (start watcher) |
+| Bash tool calls (Python) | ~2,160 (filter script) | 1 (start watcher) |
+| Bash tool calls (sleep) | 0 (sleep was in filter loop) | ~1,080 |
 | Read tool calls | 0 | ~1,080 (digest reads) |
+| **Total tool calls** | **~2,160** | **~2,161** |
 | Python process startups | ~2,160 | 1 |
 | Spawn prompt size | ~8,000 tokens (includes filter script) | ~1,500 tokens |
 | Per-poll input cost | High (Bash overhead + filter output in context) | Lower (Read output is just new batches) |
@@ -468,10 +523,12 @@ The cost model changes significantly because `Read` tool calls are much cheaper 
 ### 6.2 Token Cost Estimate
 
 The primary cost savings come from:
-1. **Smaller spawn prompt** — no 570-line filter script embedded
+1. **Smaller spawn prompt** — no 570-line filter script embedded (~6,500 fewer tokens on every turn)
 2. **Read vs Bash output** — Read returns just file content; Bash returns command + stdout + metadata
 3. **Batched digests** — 10s batches often contain 0 records; the monitor processes `[empty]` markers cheaply
 4. **No state management overhead** — no reading/writing separate state files
+
+**Note (I5)**: Read with high line offsets performs an O(n) scan from the start of the file, not O(1) seek. However, the digest file is small (~5,000-6,000 lines over 3 hours of filtered content), making this negligible compared to scanning a 50,000+ line raw transcript.
 
 Estimated cost with caching + compression: **$20-40/session** (vs $30-50 previously). The savings are moderate because the dominant cost is still the accumulated context in the monitor agent, not the tool call overhead.
 
@@ -479,18 +536,62 @@ Estimated cost with caching + compression: **$20-40/session** (vs $30-50 previou
 
 ## 7. Migration Path
 
-This design replaces the filter-script-per-poll approach but the monitor agent definition and design spec need coordinated updates:
+This design replaces the filter-script-per-poll approach. The following files need coordinated updates:
 
 1. **Create** `.claude/skills/ammo/scripts/transcript_watcher.py`
-2. **Update** `.claude/agents/ammo-transcript-monitor.md` — new setup, polling, and stop protocols
+2. **Update** `.claude/agents/ammo-transcript-monitor.md` — see Section 7.1 below for specific changes **(I4 fix)**
 3. **Update** `.claude/skills/ammo/docs/specs/2026-03-25-transcript-monitor-design.md` — reference the watcher script, update Section 3 (filter script) and Section 4 (agent definition)
-4. **Remove** the filter script from `/tmp/` writing instructions (it's no longer needed)
-5. The existing filter script logic is preserved inside `transcript_watcher.py`, not deleted
+4. **Update** orchestrator spawn logic in `debate-protocol.md` and `parallel-tracks.md` — remove `<filter_script>` embedding from spawn prompts, use new spawn pattern from Section 5.1 **(I3 fix)**
+5. **Remove** the filter script from `/tmp/` writing instructions (it's no longer needed)
+6. The existing filter script logic is preserved inside `transcript_watcher.py`, not deleted
+
+### 7.1 Agent Definition Changes (I4 fix)
+
+The following sections of `ammo-transcript-monitor.md` must be updated:
+
+**"Setup (First Turn)"** — replace all 4 setup steps with:
+1. Start background watcher via `Bash(run_in_background=True)` with the command from Section 4.1
+2. Initialize observation log (unchanged)
+
+Remove entirely:
+- "Write the Filter Script" section
+- "Discover the Champion's Transcript" section (watcher handles discovery via `--discover`)
+- "Initial State" section (watcher tracks state internally)
+
+**"Polling Protocol"** — replace:
+- Title: "Polling Interval: ~5 Seconds" → "Polling Interval: ~10 Seconds"
+- Remove `sleep 5` / `Bash(command="sleep 5")` instructions
+- Replace poll execution steps 1-3 (Bash filter + state tracking) with single `Read` call on digest file
+- Replace step 9 (`sleep 5`) with `sleep 10`
+- Remove "Between polls" context window note (watcher handles filtering externally)
+
+**"When to Stop Polling"** — update:
+- Remove "transcript stops growing for 5+ minutes" (watcher self-terminates on idle)
+- Add "watcher status file stale for >30 seconds — restart watcher"
+- Keep: completion signal, orchestrator shutdown, 3-hour safety limit
 
 ---
 
-## 8. Open Questions
+## 8. Resolved Questions
 
-1. **Digest file cleanup**: Should the watcher truncate/rotate the digest file periodically, or let it grow? Growing is simpler; rotation risks the monitor missing content between reads.
-2. **Watcher error reporting**: If the watcher encounters a fatal error (e.g., champion transcript deleted), how should it communicate this to the monitor? Options: write an error batch to the digest file, or write to the status file with an error field.
-3. **Multiple monitors**: If two monitors run simultaneously (unlikely but possible), they'd need unique digest file paths. The current `--digest-file` flag handles this.
+1. **Digest file cleanup**: Don't rotate — let it grow. Rotation risks the monitor missing content between reads. The watcher also maintains a **metadata sidecar file** (`/tmp/monitor_digest_{name}.meta`) with the current batch count and last-written line number, allowing the monitor to detect "no new content" without reading the digest at all. **(M3 fix: adopted)**
+2. **Watcher error reporting**: The watcher writes errors to BOTH the digest file (as `--- ERROR {timestamp}: {message} ---` batch markers) AND the status file (`"error": "..."` field). The digest approach ensures the monitor sees errors even if it doesn't check the status file. Fatal errors (e.g., transcript deleted) are followed by self-termination.
+3. **Multiple monitors**: 4-8 simultaneous watchers is the **expected case** during overlapped debate rounds (see Section 3.7). Each watcher uses unique digest/status/PID file paths via `--digest-file`, and discovery is staggered with randomized startup delay. **(I2 fix: acknowledged as normal, not edge case)**
+
+---
+
+## 9. Review Findings Addressed
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| C1 | Critical | Orphaned watcher has no termination condition | Added `--max-idle-seconds` (300) and `--max-runtime-seconds` (10800) CLI flags; watcher self-terminates |
+| C2 | Critical | Subagent discovery window too short (5s) | Removed attempt limit; pending discoveries retry every 2s indefinitely until found or watcher terminates |
+| I1 | Important | Subagent spawn detection fragile (regex on formatted output) | Parse raw JSON record for `tool_use` blocks with `name="Agent"`, extract `input.name` directly |
+| I2 | Important | Multiple simultaneous watchers cause I/O contention | Acknowledged 4-8 watchers as expected case; added discovery throttle (2s/agent) and randomized startup delay (0-2s) |
+| I3 | Important | `debate-protocol.md` spawn prompt inconsistency | Added to migration path (Section 7, step 4) |
+| I4 | Important | Agent definition changes not described in spec | Added Section 7.1 with specific section-by-section changes |
+| I5 | Important | Read tool O(n) scan at high offsets | Noted in cost analysis; digest file is small (~5K lines) so impact is negligible |
+| M1 | Minor | Cost savings overstated (tool call count similar) | Corrected comparison table; honest framing of what saves cost vs what doesn't |
+| M2 | Minor | PID file path collision risk | Low risk; unique naming via `--digest-file` flag covers this |
+| M3 | Minor | Digest rotation has clear answer + optimization | Adopted: no rotation, added metadata sidecar file for cheap "new content?" check |
+| M4 | Minor | `--projects-dir` hardcoded in spawn prompt | Derived dynamically from `os.getcwd()` in orchestrator |
