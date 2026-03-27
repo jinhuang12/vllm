@@ -204,7 +204,9 @@ Track verdicts are determined by the tiered verdict system. See `references/vali
 A track **ships** if its final status is `PASS` or `GATED_PASS` (after successful gating).
 
 Additional requirements unchanged:
-- Gate 5.1: Validator's independent correctness tests pass
+- Gate 5.1: Correctness — both sub-gates must pass:
+  - 5.1a: Validator's independent synthetic correctness tests pass
+  - 5.1b: Baseline tensor comparison passes (champion captures baseline before implementation, validator replays on optimized module)
 - Gate 5.2: Validator's independent kernel benchmark shows measurable speedup (>1% over baseline) for at least one target bucket
 - Champion's DA Stop hook passed (Amdahl's check, baseline citation, parity, independent validation exists)
 - No unresolved benchmark divergence between champion and validator

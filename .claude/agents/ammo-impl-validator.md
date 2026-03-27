@@ -45,7 +45,11 @@ This ensures the orchestrator has unmediated access to raw validation data.
 
 **Write your OWN correctness tests and benchmarks.** Do NOT read or execute the champion's test files or benchmark scripts. Derive test methodology from the **optimization plan and debate summary (debate/summary.md)**, not from the implementation. This is non-negotiable — it's the structural guarantee against reward hacking.
 
-### Gate 5.1: Independent Correctness Tests
+### Gate 5.1: Correctness (Two Sub-Gates)
+
+Gate 5.1 has two sub-gates. Both must pass.
+
+#### Gate 5.1a: Independent Synthetic Correctness Tests
 
 Derive test methodology from:
 1. The optimization plan (`{artifact_dir}/debate/summary.md`)
@@ -65,12 +69,33 @@ Write to `{artifact_dir}/tracks/{op_id}/validator_tests/test_correctness.py`.
 
 Report:
 ```
-Gate 5.1 Results:
+Gate 5.1a Results:
 - Batch sizes tested: [list all]
 - Tolerances used: atol={}, rtol={}
 - Per-size results: [pass/fail per batch size with max absolute error]
 - NaN/INF check: [pass/fail]
 - CUDA graph mode: [pass/fail]
+- Overall: [PASS/FAIL]
+```
+
+#### Gate 5.1b: Baseline Tensor Comparison
+
+This gate compares the optimized module's output against baseline tensors captured by the champion BEFORE implementation. It catches integration bugs that synthetic tests miss (e.g., the module's `__init__` creates bias from the model config, but the optimized kernel skips it).
+
+Read the comparison template at `.claude/skills/ammo/references/tensor-compare-template.py` and adapt it for the specific component. Write your comparison script to `{artifact_dir}/tracks/{op_id}/validator_tests/gate_5_1b/compare_script.py` and run it.
+
+If `baseline_tensors/` does not exist: report to the orchestrator that the champion did not capture baseline tensors. Gate 5.1b cannot run.
+
+The pattern: instantiate the component from the optimized codebase, load the baseline `state_dict` with `strict=False`, run the same inputs, and compare outputs with dtype-scaled tolerance. See `references/validation-defaults.md` for tolerance values.
+
+Report:
+```
+Gate 5.1b Results:
+- Component: {module_class}
+- Missing keys (new in optimized): [list]
+- Unexpected keys (removed in optimized): [list]
+- Per-output comparison: [pass/fail with max_abs_diff]
+- NaN/Inf check: [pass/fail]
 - Overall: [PASS/FAIL]
 ```
 

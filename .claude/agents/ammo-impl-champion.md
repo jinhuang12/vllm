@@ -49,6 +49,38 @@ When you're spawned, first enter your worktree (see above), then read the debate
 
 **After reading**: you now know the target kernel, the optimization approach, and what you need to investigate. This is your cue to **aggressively spawn delegates** for the research tasks the plan implies — dispatch path tracing for the specific kernel, ncu profiling at the target batch sizes, shape computation for the actual model config, etc. Fire them in parallel while you start designing the implementation. See "Subagents" below for the spawn pattern.
 
+### Baseline Tensor Capture (Gate 5.1b — BEFORE any code changes)
+
+**Immediately after reading debate artifacts**, spawn a delegate to capture baseline tensors from the higher-level component that wraps your target kernel. This must happen BEFORE you make any code changes — it captures the unmodified module's behavior.
+
+Identify the model-specific module one level above the kernel's parent (e.g., for `fused_moe_kernel` inside `FusedMoE`, the higher-level component is `Llama4MoE` in `vllm/model_executor/models/llama4.py`).
+
+```python
+Agent(
+    subagent_type="ammo-delegate",
+    run_in_background=True,
+    description="Capture baseline tensors for Gate 5.1b",
+    prompt=f"""
+    Capture baseline tensors for Gate 5.1b.
+
+    Read the template: .claude/skills/ammo/references/tensor-capture-template.py
+    Adapt it for this component:
+    - Component class: {module_class} (import: {import_path})
+    - Module path: {module_path}
+    - Model: {model_id}, dtype: {dtype}, max_model_len: {max_model_len}
+    - Seed: 42, BS: {smallest_bs}, input_len: {input_len}
+
+    Write a concrete capture_script.py adapted for this component's constructor
+    and forward signature. Run it. Save artifacts to:
+    {artifact_dir}/tracks/{op_id}/baseline_tensors/
+
+    Report: success/failure, parameter count, state_dict keys, output shapes.
+    """
+)
+```
+
+The validator will use these baseline tensors to compare against the optimized module during Gate 5.1b. If the capture is missing, the validator cannot run 5.1b.
+
 ## Implementation
 
 After your delegates return with research results:

@@ -182,6 +182,8 @@ If warm/cold speedup ratio exceeds 1.5x, the E2E projection in `validation_resul
 
 These are *starting points*, not universal truths.
 
+### Gate 5.1a: Synthetic kernel tests
+
 - **FP32**: `atol=1e-3`, `rtol=1e-3`
 - **BF16/FP16**: `atol=1e-2`, `rtol=1e-2`
 - **FP8 / block-quant**: **must be model-specific**.
@@ -192,6 +194,21 @@ Also require:
 - no NaNs/Infs
 - shape/stride parity
 - deterministic indexing for routing and pair ordering (when required by baseline)
+
+### Gate 5.1b: Baseline tensor comparison
+
+Component-level output comparison using `torch.allclose` semantics: `|baseline - optimized| <= atol + rtol * |baseline|`
+
+| Dtype | atol | rtol |
+|-------|------|------|
+| FP32  | 1e-5 | 1e-4 |
+| FP16  | 1e-3 | 1e-2 |
+| BF16  | 1e-2 | 1e-1 |
+| FP8 (E4M3) | 5e-1 | 5e-1 |
+
+The baseline is captured by the impl-champion’s delegate BEFORE implementation, using the higher-level model-specific component (e.g., `Llama4MoE`) instantiated with random weights. The validator loads the baseline `state_dict` into the optimized module with `strict=False` and compares outputs. This catches integration bugs like missing bias computation that synthetic kernel tests miss.
+
+Templates: `references/tensor-capture-template.py` (capture), `references/tensor-compare-template.py` (compare). The delegate and validator adapt these templates for the specific component — each writes a concrete script tailored to the module's constructor and forward signature.
 
 ## Default kernel perf gate (Stage 5.2)
 
