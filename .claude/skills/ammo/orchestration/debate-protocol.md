@@ -10,31 +10,77 @@ Champions independently propose optimization candidates from grounded Stage 2 da
 - Each champion is spawned with:
   - `name="champion-{N}"` (e.g., `champion-1`, `champion-2`)
   - `team_name` set to the round team name above
+- **Transcript Monitors**: Spawn 1 `ammo-transcript-monitor` agent per champion agent. See below
 
 ## Transcript Monitoring
 
 After spawning each champion, the orchestrator spawns a transcript monitor in background:
 
+## Team Composition with Monitors
+
+```
+Round Team: ammo-round-{round_id}-{model_short}-{hardware}
+|
+| ... debate champions for round N (Stage 3) ...
+| +-- champion-1 (Opus)         [Stage 3 debate -- shut down after selection]
+| |   +-- monitor-1 (Sonnet)    [Stage 3 debate -- shut down after selection]
+| +-- champion-2 (Opus)         [Stage 3 debate -- shut down after selection]
+| |   +-- monitor-2 (Sonnet)    [Stage 3 debate -- shut down after selection]
+| +-- champion-3 (Opus)         [Stage 3 debate -- shut down after selection]
+|     +-- monitor-3 (Sonnet)    [Stage 3 debate -- shut down after selection]
+|
+| ... after debate: shutdown round N champions ...
+|
+| ... implementation agents for round N (Stages 4-5) ...
+| +-- impl-champion-{op_id_1} (Opus)     [Stages 4-5]
+| |   +-- impl-monitor-1 (Sonnet)        [Stages 4-5]
+| +-- impl-validator-{op_id_1} (Sonnet)  [Stages 4-5]
+| +-- impl-champion-{op_id_2} (Opus)     [Stages 4-5]
+| |   +-- impl-monitor-2 (Sonnet)        [Stages 4-5]
+| +-- impl-validator-{op_id_2} (Sonnet)  [Stages 4-5]
+| ... OVERLAPPED: debate champions for round N+1 (if round 2+) ...
+| +-- champion-r{N+1}-1 (Opus)           [next-round debate -- shut down after selection]
+| |   +-- monitor-r{N+1}-1 (Sonnet)      [next-round debate -- shut down after selection]
+| +-- champion-r{N+1}-2 (Opus)           [next-round debate -- shut down after selection]
+| |   +-- monitor-r{N+1}-2 (Sonnet)      [next-round debate -- shut down after selection]
+```
+
+Naming convention: `monitor-{champion_number}` or `impl-monitor-{impl_champion_number}`
+
+### Monitor Spawn Pattern (REQUIRED — one per champion)
+
+After spawning each champion, immediately spawn its monitor as a **team member** (not a subagent):
+
 ```python
-monitor_name = f"monitor-{champion_name}"
+# projects_dir = os.path.expanduser("~/.claude/projects/") + os.getcwd().replace("/", "-")
+
+# Team member — NOT a subagent. Uses team_name for SendMessage access.
 Agent(
-    name=monitor_name,
+    name=f"monitor-{champion_name}",
     subagent_type="ammo-transcript-monitor",
     model="sonnet",
-    team_name=round_team_name,
+    team_name=round_team_name,       # Same team as champion — enables SendMessage
     run_in_background=True,
     prompt=f"""Monitor {champion_name} via session transcript.
-    Agent name: {champion_name}, Team: {round_team_name}
-    Stage: debate, Artifact dir: {artifact_dir}
-    <filter_script>{TRANSCRIPT_FILTER_SCRIPT_CONTENT}</filter_script>"""
+
+    ## Target
+    - Agent name: {champion_name}
+    - Team: {round_team_name}
+    - Stage: debate
+    - Artifact dir: {artifact_dir}
+    - Projects dir: {projects_dir}
+
+    Focus on DEBATE-STAGE concerns: proposal methodology, evidence tiers,
+    Amdahl consistency, baseline provenance, framing biases, micro-experiment methodology.
+    See your agent definition § Stage-Specific Focus for the full list."""
 )
 ```
 
-Monitors are purely additive — if not spawned, nothing breaks. They passively read the champion's `.jsonl` session transcript (polling every ~5 seconds) and interject via SendMessage only when they detect methodology errors, framing biases, or procedural violations. Key properties:
+### Communication Flow
+
+Monitors passively read the champion's `.jsonl` session transcript (polling every ~5 seconds) and interject via SendMessage only when they detect methodology errors, framing biases, or procedural violations. Key properties:
 - **Zero champion overhead**: Champions don't need to report status or interact with monitors
 - **Unmediated observation**: Monitors read raw transcripts (tool calls, thinking blocks, results) — champions cannot filter what monitors see
-- **Rate-limited interjections**: Max 1 message/minute, max 5 messages/session, CRITICAL-only after 5
-- **Graceful degradation**: If a monitor errors out, the champion continues unmonitored. DA stop hooks and the validator remain as independent backstops
 - **Escalation**: If a CRITICAL finding is ignored for 2+ minutes, the monitor escalates to the orchestrator
 
 ## Debate is Always Mandatory
