@@ -196,13 +196,87 @@ If you determine during implementation that the optimization is infeasible (e.g.
 
 Do NOT go idle without producing `validation_results.md`. The DA Stop hook will block you.
 
+## Handling Incoming Messages (Tiered Assessment)
+
+Messages from the validator and transcript monitor are NOT automatically correct. Context pressure degrades reasoning quality — both yours and theirs. Before acting on any finding, triage it.
+
+### Step 1: Read Without Acting
+
+Read the full message. Do not start editing code, debugging, or responding yet. Just read.
+
+### Step 2: Assess Correctness
+
+Ask yourself: "Could this finding be wrong?" Consider:
+- Could the validator's test methodology be flawed (wrong tolerance, bad tensor shapes, incorrect baseline)?
+- Could the monitor have misinterpreted in-progress work as a completed mistake?
+- Does this finding conflict with profiling data or the debate plan?
+
+### Step 3: Classify Assessment Complexity
+
+Based on BOTH the finding's nature AND the required response, pick a tier:
+
+| Tier | When | Action |
+|------|------|--------|
+| **Tier 1** (self-assess) | Simple finding + simple action. You can verify by reading a few lines of code or checking a single value. | Reason through it inline, document your assessment, proceed. |
+| **Tier 2** (delegate to Sonnet) | Medium complexity — proper investigation would consume significant context. OR your first fix attempt for this issue already failed. | Spawn `ammo-delegate` with the message + relevant context (see template below). |
+| **Tier 3** (delegate to Opus) | High complexity — challenges core assumptions or involves cross-system reasoning. OR you've failed 2+ fixes for the same issue. | Spawn `ammo-delegate` with `model="opus"` and the full context package. |
+
+**Auto-escalation**: If you've already attempted N fixes for the same issue, auto-escalate to tier min(N, 3). Repeated surface-level fixes indicate you're not grasping the root cause — a fresh-context agent will reason more clearly than you can at this point in the session.
+
+### Assessment Delegation Template
+
+```python
+Agent(
+    subagent_type="ammo-delegate",
+    model="opus",  # or omit for Sonnet (Tier 2)
+    run_in_background=True,
+    description="Assess validator/monitor finding",
+    prompt=f"""
+    Assess this validation/monitor finding for {op_id}:
+
+    MESSAGE: {full_message}
+
+    CONTEXT:
+    - Debate plan: {artifact_dir}/debate/summary.md
+    - Current implementation diff: see `git diff` in worktree
+    - Previous fix attempts for this issue: {count} — {brief description}
+
+    TASKS:
+    1. Is the finding CORRECT? Could the validator's test methodology or
+       the monitor's observation be wrong?
+    2. If correct: what is the ROOT CAUSE (not just the surface symptom)?
+    3. What fix would address the root cause?
+    4. What verification confirms the fix works?
+
+    Report your assessment. The champion will decide whether to act on it.
+    Worktree: {worktree_path}
+    Artifact dir: {artifact_dir}
+    """
+)
+```
+
+## Self-Validation Gate (Before Re-Requesting Validation)
+
+After fixing an issue reported by the validator, you MUST complete this checklist before sending a re-validation request. The purpose is to catch regressions and ensure you're fixing root causes, not symptoms — especially late in the session when context pressure makes it tempting to skip verification.
+
+1. **Root cause reasoning**: Write 2-3 sentences explaining WHY this fix addresses the underlying issue, not just the surface symptom. If you can't articulate the root cause, escalate to Tier 2+ assessment — that's a signal your context is too loaded to reason about this.
+
+2. **Smoke test**: Re-run your own correctness check (`torch.allclose` on optimized vs baseline for at least the smallest batch size). This takes <30 seconds and catches obvious regressions.
+
+3. **Fix-attempt counter**: If this is your 2nd+ attempt to fix the same issue, you MUST delegate the assessment to a fresh-context agent (Tier 2+) before proceeding. No exceptions.
+
+4. **Commit**: Only after steps 1-3 pass.
+
+5. **Message the validator**: Include your root cause reasoning in the re-validation request so the validator has context for what changed and why.
+
 ## Handling Validation Failures
 
 If the validator reports a gate failure:
-1. Read the failure details
-2. Diagnose the root cause
-3. Fix the implementation (edit, recompile if needed, commit)
-4. Message the validator directly to re-validate with the new commit SHA
+1. **Triage the message** using the Tiered Assessment Protocol above
+2. If acting on the finding: diagnose the root cause (delegate if Tier 2+)
+3. Fix the implementation (edit, recompile if needed)
+4. Complete the Self-Validation Gate checklist
+5. Commit and message the validator directly for re-validation with the new commit SHA
 
 The validator writes fresh tests each time — you can't "fix" by influencing the test.
 

@@ -250,6 +250,22 @@ Apply general adversarial reasoning. These are patterns to be alert to, not a ri
 - **Scope creep**: Champion modifies files outside the planned scope without justification. [implementation only]
 - **Wrong branch/worktree**: Champion working on main instead of a worktree branch. [implementation only]
 
+### Champion Quality Degradation [implementation only]
+
+As context fills, champions lose rigor — they skip self-validation, blindly trust messages, and fix symptoms instead of root causes. These signals indicate the champion's reasoning quality is degrading due to context pressure. Catching this early prevents cascading fix-revalidate cycles that waste time.
+
+- **Thrashing**: 8+ `Edit` tool calls targeting the same file within a 20-tool-call window, especially if edits repeatedly add/remove/re-add similar code or each fix introduces new errors. This pattern means the champion is patching symptoms without understanding the root cause.
+  - Message: `DA-MONITOR: [WARNING] You've edited {file} {N} times in quick succession. This suggests symptom-fixing rather than root-cause analysis. Consider delegating the investigation to a fresh-context ammo-delegate (Tier 2+).`
+
+- **Blind fix-and-send**: Champion makes a code change (Edit tool) then immediately calls SendMessage to the validator with a re-validation request, with NO verification step in between — no Bash running pytest/python, no smoke test, no extended reasoning about correctness. The champion's agent definition requires a self-validation gate before re-requesting.
+  - Message: `DA-MONITOR: [WARNING] You sent a re-validation request without running your own smoke test. Your Self-Validation Gate requires: (1) root cause reasoning, (2) smoke test, (3) fix-attempt counter check — before messaging the validator.`
+
+- **Shrinking reasoning**: Champion's response to validation results is dramatically shorter than earlier responses to similar results. Early in the session the champion writes multi-paragraph analysis of validator findings; late in the session it's one-liners like "fixed, sending for re-validation." Compare the champion's post-validation-message reasoning length across the session — a drop from >300 words to <100 words is a strong signal.
+  - Message: `DA-MONITOR: [WARNING] Your analysis of the latest validation results was significantly shorter than earlier analyses ({N} words vs {M} words earlier). Context pressure may be reducing reasoning depth. Consider delegating this assessment to a fresh-context ammo-delegate.`
+
+- **Surface symptom fixing**: Champion reads an error traceback, then immediately edits the exact line mentioned in the error without investigating the broader context. Evidence: traceback appears in tool output → single Edit call to the cited line → no Read of surrounding code, call sites, or related files. The fix addresses the literal error text rather than the condition that caused it.
+  - Message: `DA-MONITOR: [WARNING] You addressed the error at {file}:{line} without investigating why it occurred. The surface fix may not address the root cause — check the call site and data flow before committing.`
+
 ## Independence and Adversarial Stance
 
 You read the champion's thinking blocks. This is your superpower AND your risk — you see everything, but you may unconsciously adopt the champion's framing.
