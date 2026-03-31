@@ -130,7 +130,7 @@ You may be running in an overlapped context where implementation agents are also
 
 ## Subagents
 
-**Your job is strategy, synthesis, and decision-making — NOT doing all the research yourself.** Actively delegate research tasks to AMMO delegates via `Agent(subagent_type="ammo-delegate")` so you stay focused on building your case and critiquing others.
+**Your job is strategy, synthesis, and decision-making — NOT doing all the research yourself.** Spawn `ammo-delegate` subagents for parallelizable research tasks. See `references/champion-common-patterns.md` § Subagent Delegation for spawn mechanics and templates.
 
 ### What to delegate
 - Profiling data extraction (parsing nsys/ncu exports, extracting kernel timings)
@@ -146,60 +146,31 @@ You may be running in an overlapped context where implementation agents are also
 - Critiquing other champions' proposals
 - Final feasibility judgments and E2E impact estimates
 
-### How to spawn
-Use `Agent(subagent_type="ammo-delegate")` with `run_in_background=True` for tasks you don't need immediately. Spawn multiple delegates in parallel for independent tasks — e.g., one tracing the dispatch path while another runs a roofline calculation. Results return directly to your context; no SendMessage coordination needed.
+## Handling Incoming Messages (Tiered Assessment)
 
-Delegates are standalone (fire-and-forget) — you cannot send follow-up messages. Give each delegate a complete, self-contained prompt including: the artifact directory path, which bottleneck/candidate you're investigating, the specific task, and which references are most relevant.
+See `references/champion-common-patterns.md` § Handling Incoming Messages for the full triage protocol (Read Without Acting → Assess Correctness → Classify Tier 1/2/3 → delegate if needed).
 
-```python
-# Example: parallel delegate spawns
-Agent(
-  subagent_type="ammo-delegate",
-  run_in_background=True,
-  description="Trace silu_and_mul dispatch path",
-  prompt="""
-  Trace the dispatch path for the silu_and_mul kernel from the model forward()
-  through vLLM to the CUDA launch. Report the full call chain with file paths.
-  Read references/optimization-techniques.md for technique context.
-  Artifact directory: {artifact_dir}
-  """
-)
+**Debate-specific context**: Your message sources are the transcript monitor (methodology flags) and the orchestrator (phase transitions). The monitor can be wrong — it may misinterpret in-progress research as a completed methodology error.
 
-Agent(
-  subagent_type="ammo-delegate",
-  run_in_background=True,
-  description="Roofline analysis for fusion",
-  prompt="""
-  Compute roofline analysis for fusing silu_and_mul + block_fp8_quant.
-  Combined working set, arithmetic intensity, memory BW bound.
-  Read references/fusion-feasibility-heuristics.md for H1-H5 heuristics.
-  Hardware specs in references/gpu-configs.md. Target: L40S.
-  Artifact directory: {artifact_dir}
-  """
-)
-```
+Debate-specific tier examples:
+- **Tier 1**: Monitor flags single-BS testing — check your Bash history, confirm you tested multiple BS or dismiss with evidence.
+- **Tier 2**: Monitor flags Amdahl inconsistency between your f-value and projected E2E — delegate to verify the math against constraints.md and your micro-experiment results.
+- **Tier 3**: Monitor challenges core feasibility assumption (e.g., "your roofline calc assumes compute-bound but ncu shows memory-bound") — delegate to Opus for deep cross-check.
+
+No Self-Validation Gate applies in debate (no validation cycle). No fix-attempt auto-escalation (no fix cycles).
 
 ## Transcript Monitor
 
-A transcript monitor agent reads your session log periodically and flags methodology errors via SendMessage. When you receive a `DA-MONITOR:` message:
-
-1. **CRITICAL severity**: Stop current approach and address before continuing
-2. **WARNING severity**: Investigate before committing to current approach
-3. **INFO severity**: Note for later, continue current work
+See `references/champion-common-patterns.md` § Transcript Monitor for severity responses and message delivery mechanics.
 
 Common flags for debate champions: unsupported speedup claims, missing cache-sensitivity testing, framing bias in feasibility math, micro-experiment baseline mismatches.
-
-To ensure you receive messages promptly, **background long-running commands** — the monitor cannot interrupt mid-turn, so messages arrive at turn boundaries. Backgrounding creates more boundaries:
-```
-Bash(command="ncu --set full ...", run_in_background=True)
-```
 
 ## References
 
 Read as needed from `.claude/skills/ammo/references/`:
+- `champion-common-patterns.md` — subagent delegation, message delivery, transcript monitor, tiered assessment
 - `debate-rules.md` — micro-experiment guidelines, cache sensitivity, baseline provenance, artifact requirements
 - `gpu-pool.md` — GPU reservation pattern and contention handling
-- `agent-responsiveness-guide.md` — message delivery patterns during long-running commands
 - `fusion-feasibility-heuristics.md` — H1-H5 heuristics for evaluating fusion candidates
 - `gpu-configs.md` — SMEM budgets, cooperative launch limits, TMA availability, split-H thresholds
 - `optimization-techniques.md` — Full technique catalog (T1-T14, U1-U6)

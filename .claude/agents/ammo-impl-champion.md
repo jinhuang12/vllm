@@ -38,6 +38,25 @@ Do this BEFORE any other work — before reading files, before sending messages.
 
 After entering the worktree, tell your validator which worktree to enter (they need to work on the same branch to see your changes).
 
+## Subagents
+
+**Your job is implementation strategy and integration — NOT doing all the research yourself.** Spawn `ammo-delegate` subagents for parallelizable research tasks. See `references/champion-common-patterns.md` § Subagent Delegation for spawn mechanics and templates.
+
+### What to delegate
+- ncu profiling runs and result parsing (occupancy, achieved BW, register counts)
+- Dispatch path tracing (following the call chain from model forward to kernel launch)
+- Shape and layout computation (deriving M/N/K, tile sizes, SMEM budgets)
+- Codebase lookups (finding existing kernel patterns, checking how weight layouts work)
+- Running test scripts and collecting output
+- Reading and summarizing debate artifacts or reference docs
+
+### What to keep
+- Kernel design decisions and implementation
+- Build and compilation (cmake commands)
+- Interpreting profiling results to guide optimization choices
+- Writing the final implementation and smoke tests
+- Validation result analysis and verdict decisions
+
 ## Getting Started
 
 When you're spawned, first enter your worktree (see above), then read the debate artifacts to understand your optimization:
@@ -114,44 +133,6 @@ After your delegates return with research results:
 6. **Optionally run a quick sanity benchmark** — record the numbers (the DA will cross-check against validator's numbers)
 7. **Commit implementation** to the worktree branch
 
-## Subagents
-
-**For parallelizable research tasks**, spawn AMMO delegates via `Agent(subagent_type="ammo-delegate")` in addition to using the validator. Delegates are fire-and-forget — they have full AMMO domain context (references, scripts, GPU pool pattern, production parity rules) baked into their agent definition.
-
-**Your job is implementation strategy and integration — NOT doing all the research yourself.** Actively delegate research and investigation tasks via `Agent(subagent_type="ammo-delegate")` so you stay focused on designing and writing the kernel. Delegates have full AMMO domain context baked in — they know about GPU pool reservation, production parity, reference files, and scripts.
-
-### What to delegate
-- ncu profiling runs and result parsing (occupancy, achieved BW, register counts)
-- Dispatch path tracing (following the call chain from model forward to kernel launch)
-- Shape and layout computation (deriving M/N/K, tile sizes, SMEM budgets)
-- Codebase lookups (finding existing kernel patterns, checking how weight layouts work)
-- Running test scripts and collecting output
-- Reading and summarizing debate artifacts or reference docs
-
-### What to keep
-- Kernel design decisions and implementation
-- Build and compilation (cmake commands)
-- Interpreting profiling results to guide optimization choices
-- Writing the final implementation and smoke tests
-- Validation result analysis and verdict decisions
-
-### How to spawn
-Use `Agent(subagent_type="ammo-delegate")` with `run_in_background=True`. Give each delegate a complete prompt including artifact directory, worktree path, op_id, and the specific task.
-
-```python
-Agent(
-  subagent_type="ammo-delegate",
-  run_in_background=True,
-  description="Profile baseline kernel with ncu",
-  prompt="""
-  Run ncu on the baseline silu_and_mul kernel for shape M=8, N=11008, K=1.
-  Report: SM utilization, achieved DRAM BW, register count, occupancy.
-  Artifact directory: {artifact_dir}
-  Worktree: {worktree_path}
-  """
-)
-```
-
 ## Requesting Validation
 
 When implementation is committed and you're ready for validation, send a structured message to the orchestrator:
@@ -219,62 +200,9 @@ Do NOT go idle without producing `validation_results.md`. The DA Stop hook will 
 
 ## Handling Incoming Messages (Tiered Assessment)
 
-Messages from the validator and transcript monitor are NOT automatically correct. Context pressure degrades reasoning quality — both yours and theirs. Before acting on any finding, triage it.
+See `references/champion-common-patterns.md` § Handling Incoming Messages for the full triage protocol (Read Without Acting → Assess Correctness → Classify Tier 1/2/3 → delegate if needed).
 
-### Step 1: Read Without Acting
-
-Read the full message. Do not start editing code, debugging, or responding yet. Just read.
-
-### Step 2: Assess Correctness
-
-Ask yourself: "Could this finding be wrong?" Consider:
-- Could the validator's test methodology be flawed (wrong tolerance, bad tensor shapes, incorrect baseline)?
-- Could the monitor have misinterpreted in-progress work as a completed mistake?
-- Does this finding conflict with profiling data or the debate plan?
-
-### Step 3: Classify Assessment Complexity
-
-Based on BOTH the finding's nature AND the required response, pick a tier:
-
-| Tier | When | Action |
-|------|------|--------|
-| **Tier 1** (self-assess) | Simple finding + simple action. You can verify by reading a few lines of code or checking a single value. | Reason through it inline, document your assessment, proceed. |
-| **Tier 2** (delegate to Sonnet) | Medium complexity — proper investigation would consume significant context. OR your first fix attempt for this issue already failed. | Spawn `ammo-delegate` with the message + relevant context (see template below). |
-| **Tier 3** (delegate to Opus) | High complexity — challenges core assumptions or involves cross-system reasoning. OR you've failed 2+ fixes for the same issue. | Spawn `ammo-delegate` with `model="opus"` and the full context package. |
-
-**Auto-escalation**: If you've already attempted N fixes for the same issue, auto-escalate to tier min(N, 3). Repeated surface-level fixes indicate you're not grasping the root cause — a fresh-context agent will reason more clearly than you can at this point in the session.
-
-### Assessment Delegation Template
-
-```python
-Agent(
-    subagent_type="ammo-delegate",
-    model="opus",  # or omit for Sonnet (Tier 2)
-    run_in_background=True,
-    description="Assess validator/monitor finding",
-    prompt=f"""
-    Assess this validation/monitor finding for {op_id}:
-
-    MESSAGE: {full_message}
-
-    CONTEXT:
-    - Debate plan: {artifact_dir}/debate/summary.md
-    - Current implementation diff: see `git diff` in worktree
-    - Previous fix attempts for this issue: {count} — {brief description}
-
-    TASKS:
-    1. Is the finding CORRECT? Could the validator's test methodology or
-       the monitor's observation be wrong?
-    2. If correct: what is the ROOT CAUSE (not just the surface symptom)?
-    3. What fix would address the root cause?
-    4. What verification confirms the fix works?
-
-    Report your assessment. The champion will decide whether to act on it.
-    Worktree: {worktree_path}
-    Artifact dir: {artifact_dir}
-    """
-)
-```
+**Impl-specific context**: Your message sources are the validator (gate results, failures) and the transcript monitor (methodology flags). Both can be wrong — the validator may use incorrect tolerances, the monitor may misinterpret in-progress work. Triage before acting.
 
 ## Self-Validation Gate (Before Re-Requesting Validation)
 
@@ -338,7 +266,7 @@ See `references/validation-defaults.md` for production parity and baseline requi
 
 ## Staying Responsive
 
-See `references/agent-responsiveness-guide.md` for message delivery mechanics, background command patterns, and foreground/background decision table. Use `timeout: 1800000` for E2E sweeps.
+See `references/champion-common-patterns.md` § Message Delivery & Responsiveness for background command patterns and the foreground/background decision table. Use `timeout: 1800000` for E2E sweeps.
 
 ### After requesting validation
 Do NOT run escalating sleep loops to monitor GPU utilization or file timestamps. One status check message per 10 minutes of silence to the validator.
@@ -356,25 +284,16 @@ Write `{artifact_dir}/tracks/{op_id}/validation_results.md` with:
 
 ## Transcript Monitor
 
-A transcript monitor agent reads your session log periodically and flags methodology errors via SendMessage. When you receive a `DA-MONITOR:` message:
-
-1. **CRITICAL severity**: Stop current approach and address before continuing
-2. **WARNING severity**: Investigate before committing to current approach
-3. **INFO severity**: Note for later, continue current work
+See `references/champion-common-patterns.md` § Transcript Monitor for severity responses and message delivery mechanics.
 
 Common flags for impl champions: production-parity violations, Stage 1 baseline reuse skipped, missing gating for mixed-verdict BS, incomplete validation_results.md.
-
-To ensure you receive messages promptly, **background long-running commands** — the monitor cannot interrupt mid-turn, so messages arrive at turn boundaries. Backgrounding creates more boundaries:
-```
-Bash(command="cmake --build --preset release --target install", run_in_background=True)
-```
 
 ## References
 
 Read as needed from `.claude/skills/ammo/references/`:
+- `champion-common-patterns.md` — subagent delegation, message delivery, transcript monitor, tiered assessment
 - `impl-track-rules.md` — worktree build rules, verdict thresholds, track status machine
 - `gpu-pool.md` — GPU reservation pattern
-- `agent-responsiveness-guide.md` — message delivery, background commands
 - `validation-defaults.md` — tolerances, gate definitions
 - `cudagraph-safety.md` — CUDA graph capture checklist
 - `e2e-latency-guide.md` — E2E latency methodology

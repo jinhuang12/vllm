@@ -469,7 +469,7 @@ Run, don't modify:
 | Debate-phase agent rules | `references/debate-rules.md` |
 | Implementation-phase agent rules | `references/impl-track-rules.md` |
 | GPU reservation pattern | `references/gpu-pool.md` |
-| Teammate messaging patterns | `references/agent-responsiveness-guide.md` |
+| Champion common patterns (delegation, messaging, triage) | `references/champion-common-patterns.md` |
 
 **Architectural boundary**: Agent files reference `references/*.md` for domain rules. Orchestration docs (`orchestration/*.md`) are orchestrator-only — agents do not read them directly.
 
