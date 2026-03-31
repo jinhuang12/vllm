@@ -21,10 +21,13 @@ SM arch, SMEM, registers, cooperative grid, occupancy, M_avg, EP.
 
 | GPU | SM Arch | SMEM/SM | FP8 Support | TMA | Heuristic BS Threshold (assumes low M_avg) |
 |-----|---------|---------|-------------|-----|-------------------------------------------|
+| B200/GB200 | sm_100 | 256 KB | ✓ | ✓ (TMA v2) | BS ≤ 256 |
+| B300/GB300 | sm_103 | 256 KB | ✓ | ✓ (TMA v2) | BS ≤ 256 |
 | H100/H200 | sm_90a | 228 KB | ✓ | ✓ | BS ≤ 128 |
 | L40S | sm_89 | 100 KB | ✓ | ✗ | BS ≤ 32 |
 | A100 | sm_80 | 164 KB | ✗ | ✗ | BS ≤ 64 |
 | A10 | sm_86 | 100 KB | ✗ | ✗ | BS ≤ 32 |
+| RTX 5090 | sm_120 | 128 KB | ✓ | ✓ | BS ≤ 64 |
 | RTX 4090 | sm_89 | 100 KB | ✓ | ✗ | BS ≤ 32 |
 | RTX 3090 | sm_86 | 100 KB | ✗ | ✗ | BS ≤ 32 |
 
@@ -44,7 +47,7 @@ Practical guidance:
 
 ## TMA (Tensor Memory Accelerator)
 
-**Available on**: Hopper (sm_90a) only
+**Available on**: Hopper (sm_90a) and Blackwell (sm_100, sm_103, sm_120)
 
 **Benefits**:
 - Hardware-accelerated async copy
@@ -53,10 +56,13 @@ Practical guidance:
 
 **Usage**:
 ```cpp
-#if __CUDA_ARCH__ >= 900
-    // Use TMA for prefetch
+#if __CUDA_ARCH__ >= 1000
+    // Blackwell TMA v2 — enhanced with warp-group support
     __nv_tma_desc_t tma_desc;
-    // ... setup TMA descriptor
+    cuda::memcpy_async(dst, src, tma_desc, pipe);
+#elif __CUDA_ARCH__ >= 900
+    // Hopper TMA v1
+    __nv_tma_desc_t tma_desc;
     cuda::memcpy_async(dst, src, tma_desc, pipe);
 #else
     // Fall back to cp.async
@@ -68,6 +74,7 @@ Practical guidance:
 
 | Instance | GPUs | GPU Type | Monokernel Zone | Recommended For |
 |----------|------|----------|-----------------|-----------------|
+| p6-b200.48xlarge | 8 | B200 | BS ≤ 256 | Large MoE, highest throughput |
 | g6e.12xlarge | 4 | L40S | BS ≤ 32 | Small MoE (E≤64) |
 | g6e.24xlarge | 4 | L40S | BS ≤ 32 | Small MoE (E≤64) |
 | g6e.48xlarge | 8 | L40S | BS ≤ 32 | Medium MoE |
@@ -82,6 +89,13 @@ For monokernel, target occupancy is typically 1 CTA/SM:
 SMEM_available = SMEM_per_SM - margin
 margin = 4-8 KB for header structures
 ```
+
+### B200/GB200 (256 KB/SM)
+- Available: ~248 KB
+- Largest SMEM budget of any current GPU
+- 64 max concurrent warps/SM (vs 48 on Hopper)
+- **Use**: Triple buffering + TMA v2
+- **Note**: Blackwell Hardware Event System changes nsys tracing — see `references/nsys-profiling-guide.md` §3.11
 
 ### H100/H200 (228 KB/SM)
 - Available: ~220 KB
@@ -157,9 +171,11 @@ Split-H optimization targets small batches where standard grid underutilizes SMs
 
 | GPU | SM Count | Split-H Threshold | Target Utilization | Notes |
 |-----|----------|-------------------|-------------------|-------|
+| B200/GB200 | 160 | BS ≤ 4 | 80% | Highest SM count; check cuBLAS kernel names (see §3.11) |
 | H100/H200 | 132 | BS ≤ 4 | 80% | High BW means standard often sufficient |
 | L40S | 142 | BS ≤ 4 | 80% | Reference: Qwen3 implementation |
 | A100 | 108 | BS ≤ 4 | 80% | Lower SM count, less benefit |
+| RTX 5090 | 170 | BS ≤ 4 | 80% | Consumer Blackwell (sm_120) |
 | RTX 4090 | 128 | BS ≤ 4 | 80% | Consumer card, similar to H100 |
 
 **Split Factor Calculation**:
@@ -178,14 +194,19 @@ def get_split_factor(batch_size: int, top_k: int, sm_count: int) -> int:
 
 | GPU | Architecture | Async Memory | Recommendation |
 |-----|--------------|--------------|----------------|
+| B200/GB200 | sm_100 | TMA v2 | Enhanced TMA with warp-group support |
 | H100/H200 | sm_90a | TMA | Use TMA for large tiles (>16KB) |
 | L40S | sm_89 | cp.async only | Double buffer with 16-byte aligned copies |
+| RTX 5090 | sm_120 | TMA | Consumer Blackwell with TMA |
 | RTX 4090 | sm_89 | cp.async only | Same as L40S |
 | A100 | sm_80 | cp.async only | Triple buffer compensates for no TMA |
 
 ## Quick Reference Commands
 
 ```bash
+# B200/GB200 (with TMA v2)
+--gpu-arch sm_100 --smem-per-sm 256 --monokernel-threshold 256
+
 # H100/H200 (with TMA)
 --gpu-arch sm_90a --smem-per-sm 228 --monokernel-threshold 128
 

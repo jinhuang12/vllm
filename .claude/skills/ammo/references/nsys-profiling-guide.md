@@ -12,7 +12,7 @@ Always record the exact commands and key findings in `validation_results.md`.
 
 ## Search Anchors
 
-nsys profile, nsys stats, CUDA graphs, torch.compile, fused_moe, fused_experts, topk_softmax, kernel timing, VLLM_WORKER_MULTIPROC_METHOD, ncu, Nsight Compute
+nsys profile, nsys stats, CUDA graphs, torch.compile, fused_moe, fused_experts, topk_softmax, kernel timing, VLLM_WORKER_MULTIPROC_METHOD, ncu, Nsight Compute, Blackwell, SM100, SM120, B200, kernel names
 
 ## Scope
 
@@ -46,6 +46,7 @@ Non-goals:
 ### 2.1 Prefer steady state
 - Always include warmup iterations.
 - If you use CUDA graphs and/or compilation, profile steady-state replay separately from compile/capture.
+- **FlashInfer cubin cold-cache (SM100/Blackwell):** Models using FlashInfer CuTe-DSL kernels (e.g., MoE with NvFP4) download pre-compiled cubins from NVIDIA's artifact server on first use. This takes **~800 seconds** and happens during engine init — well before any benchmark iteration. If you profile without caching these first, the nsys run will appear to "hang" during model loading. **Always run the workload once without nsys** to populate the cubin cache before profiling. Subsequent runs skip the download entirely (<5s init).
 
 ### 2.2 vLLM multiprocessing (important for profilers)
 
@@ -54,6 +55,24 @@ vLLM can spawn worker processes. For cleaner profiler behavior:
 ```bash
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 ```
+**V1 multiprocessing escape (CRITICAL):** vLLM V1's default mode (`VLLM_ENABLE_V1_MULTIPROCESSING=1`) runs ALL GPU work in a child `EngineCoreProc` subprocess spawned via `multiprocessing.spawn`. The parent process only does scheduling and ZMQ I/O. This means:
+
+1. nsys profiling the parent captures **zero GPU kernel data** — only `cudaGraphLaunch` stubs from the parent side.
+2. `--trace-fork-before-exec=true` is required for nsys to inject into the child process (spawn internally does fork+exec).
+3. Alternatively, set `VLLM_ENABLE_V1_MULTIPROCESSING=0` to keep GPU work in the parent process. This is simpler for profiling but changes the execution model slightly.
+
+**Recommended profiling setup:**
+```bash
+# Option A: Let nsys follow the subprocess (production-parity)
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node ...
+
+# Option B: Disable V1 multiprocessing (simpler, same kernel behavior)
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
+nsys profile --cuda-graph-trace=node ...
+```
+
+If your nsys trace shows 0 GPU kernels despite a successful run, the V1 multiprocessing escape is almost certainly the cause.
 
 ### 2.3 NVTX ranges (recommended)
 
@@ -417,6 +436,38 @@ For small TP=1 models (< 10B params), the probe is optional — proceed directly
 
 If nsys profiling fails AFTER the probe passed (unexpected), run the probe as a diagnostic to compare expected vs actual behavior.
 
+### 3.11 Blackwell (SM100/SM120) profiling considerations
+
+Blackwell GPUs introduce a new **Hardware Event System** for CUDA tracing. On Blackwell, `--trace=cuda` uses hardware-accelerated tracing by default (falling back to `cuda-sw` if needed). This changes the trace infrastructure under `--cuda-graph-trace=node`.
+
+**ncu kernel name changes on Blackwell:**
+
+cuBLAS uses architecture-specific kernel implementations. On SM89/SM90, kernels may appear as `bmm_Bfloat16_*` or `sm90_xmma_gemm_*`. On SM100 (Blackwell), cuBLAS has confirmed new code paths (CUDA Toolkit 13.2 release notes: *"Improved performance on Blackwell (sm_100 and sm_103) via heuristics tuning"*), and **kernel names will likely differ** from previous architectures.
+
+**Best practice for ncu on new hardware:**
+
+1. **Discovery run first** (no kernel filter):
+   ```bash
+   ncu --set basic --target-processes all \
+     --launch-count 10 \
+     -o {artifact_dir}/ncu/discovery \
+     vllm bench latency --model {model_id} --batch-size 8 \
+       --input-len 64 --output-len 8 --num-iters-warmup 3 --num-iters 1
+   ```
+   Inspect the output to learn actual kernel names on this architecture.
+
+2. **Use broad regex filters** that are architecture-portable:
+   ```bash
+   # Instead of: --kernel-name "regex:bmm_Bfloat16"
+   # Use:
+   --kernel-name "regex:xmma_gemm.*bf16|gemm.*[Bb]f16|bmm.*[Bb]f16|fused_moe|fused_experts"
+   ```
+
+3. **Use `--kernel-name-base demangled`** for more readable matching:
+   ```bash
+   ncu --kernel-name-base demangled --kernel-name "regex:gemm.*bf16" ...
+   ```
+
 ## 4) Nsight Compute (ncu): targeted kernel profiling (device bottlenecks)
 
 ### 4.1 How to pick kernels for ncu
@@ -609,6 +660,10 @@ nsys profile: {artifact_dir}/nsys/moe_bs8.nsys-rep
 | `cudaStreamSynchronize` | Graph breaks / explicit sync | Identify the sync site; restore async/graph capture |
 | Large gaps between kernels | CPU overhead or sync | Confirm CUDA graphs are active; reduce Python overhead |
 | Missing kernels in trace | Graph not expanded | Ensure `--cuda-graph-trace=node` is set |
+| ncu `--kernel-name` matches 0 kernels | Architecture-specific kernel names | Run discovery pass without `--kernel-name` first; use broader regex (see §3.11) |
+| nsys hang on Blackwell (B200/B300) | Hardware Event System + node replay overhead | Same mitigations as §3.1B/§3.9; do NOT use `node:host-only` (invalid, see §3.11) |
+| Zero GPU kernels in trace despite successful run | V1 multiprocessing: GPU work in child process, nsys only traced parent | Use `VLLM_ENABLE_V1_MULTIPROCESSING=0` or `--trace-fork-before-exec=true` (section 2.2) |
+| nsys "hangs" during model loading (>5 min) | FlashInfer cubin cold-cache download (~800s first time on SM100) | Pre-cache cubins by running once without nsys (section 2.1) |
 | High variance in kernel times | Contention / throttling | Profile on an isolated GPU / stable clocks |
 | Kernel appears in piecewise graph but not FULL decode graph | One-time init, prefill-only, or framework overhead | Compute f_decode separately; if f_decode ≈ 0, this kernel is not worth optimizing for decode-heavy workloads |
 | Kernel instance count >> (num_layers × num_decode_steps) | Autotuning, JIT, or graph capture artifact | Cross-check with multi-iteration run or FULL CUDA graph extraction |

@@ -154,7 +154,7 @@ SendMessage(f"impl-champion-{op_id}", f"Validator spawned as impl-validator-{op_
 
 Champion-validator collaboration follows the fluid timeline in `references/impl-track-rules.md` § Collaboration. Key rules: only champion modifies source, champion has GPU priority, independent validation is non-negotiable, champion idle during validation. See `references/impl-track-rules.md` § Track Rules for full details.
 
-### Three Layers of Verification
+### Two Layers of Verification
 
 ```
 Layer 1: Independent Validator (Sonnet)
@@ -165,11 +165,6 @@ Layer 2: Champion Review (Opus)
   Evaluates E2E results against min_e2e_improvement_pct threshold
   Cross-checks Gate 5.2 numbers against own smoke-test
   Writes final validation_results.md with evidence chain
-
-Layer 3: DA Stop Hook (Sonnet, frontmatter on champion)
-  Fires when champion attempts to stop
-  Audits validation_results.md: completeness, Amdahl's consistency,
-  production parity, independent validation existence, benchmark cross-check
 ```
 
 ### Handling Validation Failures and GATING_REQUIRED

@@ -150,12 +150,6 @@ Send BOTH procedural violations AND reasoning challenges. Procedural hooks (`amm
 
 Do not hold back on these to "save" message budget. A reasoning flaw caught at minute 10 prevents 50 minutes of wasted implementation. Use your messages.
 
-### Rate Limiting
-
-- **Maximum 1 message per minute.** If multiple issues are found within a minute, batch them into a single message with the highest severity. Track the timestamp of your last sent message and skip sending if <60 seconds have passed.
-- **Maximum 10 total messages per session.** After 10 messages, only send CRITICAL severity. The budget is generous — use it for both procedural catches and reasoning challenges.
-- **Never send consecutive messages about the same issue.** If you flagged something and the champion hasn't addressed it yet, wait at least 2 minutes before re-flagging. They may be mid-work.
-
 ### Escalation Protocol (I6)
 
 If you sent a CRITICAL message and the champion has not responded within 2 minutes, check the transcript for evidence of response:

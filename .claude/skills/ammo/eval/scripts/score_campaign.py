@@ -50,7 +50,8 @@ E2E_TIERS = [
     (1.02, 4.0),
     (1.00, 2.0),
 ]
-E2E_EXHAUSTED_SCORE = 0.0
+E2E_EXHAUSTED_DISCOUNT = 0.6  # Exhausted campaigns with shipped opts get 60% of tier score
+E2E_EXHAUSTED_NO_SHIP_SCORE = 0.0  # Exhausted with nothing shipped = 0
 E2E_SHIP_BONUS_PER_EXTRA = 0.5
 E2E_SHIP_BONUS_MAX = 1.5
 
@@ -92,9 +93,14 @@ def score_e2e(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     shipped = campaign.get("shipped_optimizations_count", 0)
     rounds = campaign.get("rounds", [])
 
-    if status == "campaign_exhausted" or shipped == 0:
-        base_score = E2E_EXHAUSTED_SCORE
-        tier = "exhausted"
+    if shipped == 0:
+        base_score = E2E_EXHAUSTED_NO_SHIP_SCORE
+        tier = "exhausted_no_ship"
+    elif status == "campaign_exhausted":
+        # Exhausted but shipped optimizations: discount tier score (not zero)
+        raw_tier = _tier_score(cumulative, E2E_TIERS)
+        base_score = round(raw_tier * E2E_EXHAUSTED_DISCOUNT, 2)
+        tier = f"exhausted_shipped (>={cumulative:.2f}x × {E2E_EXHAUSTED_DISCOUNT})"
     else:
         base_score = _tier_score(cumulative, E2E_TIERS)
         tier = f">={cumulative:.2f}x"
