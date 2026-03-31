@@ -206,7 +206,7 @@ A track **ships** if its final status is `PASS` or `GATED_PASS` (after successfu
 Additional requirements unchanged:
 - Gate 5.1: Correctness — both sub-gates must pass:
   - 5.1a: Validator's independent synthetic correctness tests pass
-  - 5.1b: Baseline tensor comparison passes (champion captures baseline before implementation, validator replays on optimized module)
+  - 5.1b (HARD GATE): Baseline tensor comparison passes, OR champion provides documented N/A justification naming a specific infrastructure dependency. Missing 5.1b artifacts with no justification = track FAIL (validator blocks Gate 5.3b).
 - Gate 5.2: Validator's independent kernel benchmark shows measurable speedup (>1% over baseline) for at least one target bucket
 - Champion's DA Stop hook passed (Amdahl's check, baseline citation, parity, independent validation exists)
 - No unresolved benchmark divergence between champion and validator

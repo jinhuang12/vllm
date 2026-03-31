@@ -195,7 +195,9 @@ Also require:
 - shape/stride parity
 - deterministic indexing for routing and pair ordering (when required by baseline)
 
-### Gate 5.1b: Baseline tensor comparison
+### Gate 5.1b: Baseline tensor comparison (HARD GATE)
+
+**Gate 5.1b is a hard gate.** Missing baseline tensors without a valid N/A justification will FAIL the track. This is not advisory — the validator will block the track from passing.
 
 Component-level output comparison using `torch.allclose` semantics: `|baseline - optimized| <= atol + rtol * |baseline|`
 
@@ -208,7 +210,23 @@ Component-level output comparison using `torch.allclose` semantics: `|baseline -
 
 The baseline is captured by the impl-champion’s delegate BEFORE implementation, using the higher-level model-specific component (e.g., `Llama4MoE`) instantiated with random weights. The validator loads the baseline `state_dict` into the optimized module with `strict=False` and compares outputs. This catches integration bugs like missing bias computation that synthetic kernel tests miss.
 
-Templates: `references/tensor-capture-template.py` (capture), `references/tensor-compare-template.py` (compare). The delegate and validator adapt these templates for the specific component — each writes a concrete script tailored to the module's constructor and forward signature.
+Templates: `references/tensor-capture-template.py` (capture), `references/tensor-compare-template.py` (compare). The delegate and validator adapt these templates for the specific component — each writes a concrete script tailored to the module’s constructor and forward signature.
+
+#### N/A Escape (documented justification required)
+
+Some modules cannot be captured standalone because their `forward()` depends on runtime infrastructure that cannot be provided outside the full engine (e.g., `attn_metadata`, `ForwardContext`, `kv_cache` state pools). These modules silently no-op or return zeros when the infrastructure is absent, making standalone capture produce meaningless data.
+
+If capture is impossible, the champion’s delegate MUST write `{artifact_dir}/tracks/{op_id}/baseline_tensors/NOT_APPLICABLE.md` containing:
+1. Module class and import path
+2. The **specific** infrastructure dependency preventing standalone capture (e.g., "`_forward_core()` returns early when `attn_metadata is None` at line N")
+3. Which gates provide alternative correctness coverage (typically Gate 5.1a synthetic tests + Gate 5.3b E2E)
+
+The validator verifies the justification names a concrete dependency — vague justifications like "too complex" are rejected.
+
+**Known N/A-eligible module patterns:**
+- Modules with `get_forward_context()` → `attn_metadata` early-return guards (e.g., `Qwen3_5GatedDeltaNet`, recurrent state kernels)
+- Attention modules requiring populated `kv_cache` and `attn_metadata` for meaningful output
+- Modules registered in `static_forward_context` that need layer-specific runtime state
 
 ## Default kernel perf gate (Stage 5.2)
 

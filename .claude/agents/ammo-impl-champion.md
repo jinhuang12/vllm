@@ -49,9 +49,11 @@ When you're spawned, first enter your worktree (see above), then read the debate
 
 **After reading**: you now know the target kernel, the optimization approach, and what you need to investigate. This is your cue to **aggressively spawn delegates** for the research tasks the plan implies — dispatch path tracing for the specific kernel, ncu profiling at the target batch sizes, shape computation for the actual model config, etc. Fire them in parallel while you start designing the implementation. See "Subagents" below for the spawn pattern.
 
-### Baseline Tensor Capture (Gate 5.1b — BEFORE any code changes)
+### Baseline Tensor Capture (Gate 5.1b — BLOCKING)
 
-**Immediately after reading debate artifacts**, spawn a delegate to capture baseline tensors from the higher-level component that wraps your target kernel. This must happen BEFORE you make any code changes — it captures the unmodified module's behavior.
+**Gate 5.1b is a hard gate.** Missing baseline tensors without documented justification will FAIL the track at validation. You MUST complete this step before writing any implementation code.
+
+**Immediately after reading debate artifacts**, spawn a delegate to capture baseline tensors from the higher-level component that wraps your target kernel. This captures the unmodified module's behavior.
 
 Identify the model-specific module one level above the kernel's parent (e.g., for `fused_moe_kernel` inside `FusedMoE`, the higher-level component is `Llama4MoE` in `vllm/model_executor/models/llama4.py`).
 
@@ -75,11 +77,30 @@ Agent(
     {artifact_dir}/tracks/{op_id}/baseline_tensors/
 
     Report: success/failure, parameter count, state_dict keys, output shapes.
+
+    If capture is IMPOSSIBLE (module requires runtime infrastructure like
+    attn_metadata or ForwardContext that cannot be provided standalone), write
+    {artifact_dir}/tracks/{op_id}/baseline_tensors/NOT_APPLICABLE.md with:
+    - Module class and import path
+    - The specific infrastructure dependency preventing standalone capture
+    - Which gates provide alternative correctness coverage
     """
 )
 ```
 
-The validator will use these baseline tensors to compare against the optimized module during Gate 5.1b. If the capture is missing, the validator cannot run 5.1b.
+### CHECKPOINT — Gate 5.1b Artifact Verification (BLOCKING)
+
+**Before writing ANY implementation code**, verify that one of these exists:
+
+```bash
+# Option 1: Successful capture
+ls {artifact_dir}/tracks/{op_id}/baseline_tensors/metadata.json
+
+# Option 2: Documented N/A justification
+ls {artifact_dir}/tracks/{op_id}/baseline_tensors/NOT_APPLICABLE.md
+```
+
+**If neither exists, STOP.** Do not proceed to implementation. Wait for the capture delegate to complete, or investigate why it failed. The validator will hard-FAIL the track if Gate 5.1b has no artifact.
 
 ## Implementation
 

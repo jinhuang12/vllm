@@ -78,25 +78,40 @@ Gate 5.1a Results:
 - Overall: [PASS/FAIL]
 ```
 
-#### Gate 5.1b: Baseline Tensor Comparison
+#### Gate 5.1b: Baseline Tensor Comparison (HARD GATE)
 
 This gate compares the optimized module's output against baseline tensors captured by the champion BEFORE implementation. It catches integration bugs that synthetic tests miss (e.g., the module's `__init__` creates bias from the model config, but the optimized kernel skips it).
 
-Read the comparison template at `.claude/skills/ammo/references/tensor-compare-template.py` and adapt it for the specific component. Write your comparison script to `{artifact_dir}/tracks/{op_id}/validator_tests/gate_5_1b/compare_script.py` and run it.
+**Gate 5.1b is a hard gate. Missing artifacts = track FAIL.**
 
-If `baseline_tensors/` does not exist: report to the orchestrator that the champion did not capture baseline tensors. Gate 5.1b cannot run.
+Check `{artifact_dir}/tracks/{op_id}/baseline_tensors/` for one of three states:
 
-The pattern: instantiate the component from the optimized codebase, load the baseline `state_dict` with `strict=False`, run the same inputs, and compare outputs with dtype-scaled tolerance. See `references/validation-defaults.md` for tolerance values.
+**State 1: Baseline tensors exist** (`metadata.json` present)
+- Read the comparison template at `.claude/skills/ammo/references/tensor-compare-template.py` and adapt it for the specific component
+- Write your comparison script to `{artifact_dir}/tracks/{op_id}/validator_tests/gate_5_1b/compare_script.py` and run it
+- The pattern: instantiate the component from the optimized codebase, load the baseline `state_dict` with `strict=False`, run the same inputs, and compare outputs with dtype-scaled tolerance. See `references/validation-defaults.md` for tolerance values.
+
+**State 2: Documented N/A** (`NOT_APPLICABLE.md` present)
+- Read the justification. Verify it names a **specific infrastructure dependency** (e.g., `attn_metadata`, `ForwardContext`, `kv_cache` state pool) that prevents standalone module capture
+- A handwave like "too complex" or "not applicable to this kernel type" is NOT sufficient — reject it
+- If the justification is substantive, report `Gate 5.1b: N/A (justified — {reason})`. This is a PASS equivalent.
+- If the justification is insufficient, report `Gate 5.1b: FAIL — N/A justification rejected: {why}`
+
+**State 3: Nothing exists**
+- Report: `Gate 5.1b: FAIL — champion did not capture baseline tensors and did not provide N/A justification. Track cannot pass.`
+- **Do NOT proceed to Gate 5.3b.** The track is blocked until the champion provides baseline tensors or a valid N/A justification.
 
 Report:
 ```
 Gate 5.1b Results:
+- Status: PASS / N/A (justified) / FAIL
 - Component: {module_class}
-- Missing keys (new in optimized): [list]
-- Unexpected keys (removed in optimized): [list]
-- Per-output comparison: [pass/fail with max_abs_diff]
-- NaN/Inf check: [pass/fail]
-- Overall: [PASS/FAIL]
+- Missing keys (new in optimized): [list]  (if tensors compared)
+- Unexpected keys (removed in optimized): [list]  (if tensors compared)
+- Per-output comparison: [pass/fail with max_abs_diff]  (if tensors compared)
+- NaN/Inf check: [pass/fail]  (if tensors compared)
+- N/A reason: {reason}  (if N/A)
+- Overall: [PASS/N/A/FAIL]
 ```
 
 ### Gate 5.2: Independent Kernel Benchmarks
