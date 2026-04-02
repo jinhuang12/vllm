@@ -75,7 +75,7 @@ Agent(
 
     ## Precision Classification (from debate summary)
     Classification: {classification}  # "lossless" or "lossy" — determines correctness mode and question count
-    # Lossless: --correctness-mode exact_greedy --correctness-num-questions 30
+    # Lossless: --correctness-mode first_divergence_topk --correctness-num-questions 30
     # Lossy: --correctness-mode topk_relaxed --correctness-num-questions 100
 
     ## E2E Threshold

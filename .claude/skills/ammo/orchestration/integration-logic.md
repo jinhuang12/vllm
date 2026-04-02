@@ -67,12 +67,12 @@ python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
 
 # Run combined correctness check (mandatory for multi-candidate integration)
 # Mode selection: if ANY integrated track is classified as lossy → topk_relaxed + 100 questions
-#                 if ALL integrated tracks are lossless → exact_greedy + 30 questions
+#                 if ALL integrated tracks are lossless → first_divergence_topk + 30 questions
 # Read classification from state.json parallel_tracks.{op_id}.classification
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
     --artifact-dir {artifact_dir} --labels opt \
     --baseline-from {stage1_dir} --verify-correctness \
-    --correctness-mode {exact_greedy|topk_relaxed} --correctness-num-questions {30|100}
+    --correctness-mode {first_divergence_topk|topk_relaxed} --correctness-num-questions {30|100}
 
 # If correctness fails: bisect — drop track with worst individual failure rate, re-run
 ```

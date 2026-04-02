@@ -76,7 +76,8 @@ All three gates are handled by a **single** sweep script invocation. Do NOT run 
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
     --artifact-dir $ARTIFACT_DIR --labels opt \
     --baseline-from $STAGE1_DIR --verify-correctness \
-    --correctness-mode {exact_greedy|topk_relaxed} \
+    --correctness-mode {first_divergence_topk|topk_relaxed} \
+    --correctness-num-questions {30|100} \
     --nsys-profile
 ```
 
@@ -86,8 +87,8 @@ This one command does everything in order:
 3. **Gate 5.3a** (kernel proof): `--nsys-profile` captures an nsys trace. After the sweep, verify via `nsys stats --report cuda_gpu_kern_sum` that your expected kernel name appears.
 
 **Mode selection** (based on `classification` field from `debate/summary.md`):
-- `exact_greedy --correctness-num-questions 30` for **lossless** tracks
-- `topk_relaxed --correctness-num-questions 100` for **lossy** tracks (includes "zero questions lost" accuracy gate)
+- `first_divergence_topk --correctness-num-questions 30` for **lossless** tracks (first-divergence top-5 containment + zero questions lost accuracy gate)
+- `topk_relaxed --correctness-num-questions 100` for **lossy** tracks (per-position top-5 containment + zero questions lost accuracy gate)
 - **If `classification` is absent from the summary: treat as lossy** (safe default) and flag to orchestrator
 
 These parameters apply to ALL sweep invocations for your track, including GATING_REQUIRED re-validation sweeps.

@@ -705,7 +705,7 @@ def _compare_correctness(
         gained = sorted(opt_correct - baseline_correct)
         bl_acc = len(baseline_correct) / n if n else 0.0
         op_acc = len(opt_correct) / n if n else 0.0
-        is_hard_gate = mode == "topk_relaxed"
+        is_hard_gate = mode in ("topk_relaxed", "first_divergence_topk")
         accuracy_gate = {
             "enabled": True,
             "baseline_accuracy": round(bl_acc, 4),
@@ -815,6 +815,101 @@ def _compare_correctness(
                                       "length_mismatches": sum(1 for pq in per_question if pq.get("baseline_tokens", 0) != pq.get("opt_tokens", 0)),
                                       "empty_outputs": empty_output_count}
         return result
+    elif mode == "first_divergence_topk":
+        questions_with_divergence = 0
+        first_divergence_failures = 0
+        empty_output_count = 0
+        for q in range(num_questions):
+            b = golden_refs[q]
+            o = opt_outputs[q]
+            b_ids = b["token_ids"]
+            o_ids = o["token_ids"]
+            b_len = len(b_ids)
+            o_len = len(o_ids)
+
+            if b_len == 0 and o_len == 0:
+                empty_output_count += 1
+                per_question.append({
+                    "idx": q, "baseline_tokens": 0, "opt_tokens": 0,
+                    "first_divergence_pos": -1, "containment_pass": None,
+                    "baseline_token_at_div": None, "opt_token_at_div": None,
+                })
+                continue
+
+            # Walk token positions to find the first divergence.
+            min_len = min(b_len, o_len)
+            first_div_pos = -1
+            for pos in range(min_len):
+                if b_ids[pos] != o_ids[pos]:
+                    first_div_pos = pos
+                    break
+
+            # Length mismatch: if all shared positions match but lengths differ,
+            # the first divergence is at the end of the shorter output.
+            if first_div_pos == -1 and b_len != o_len:
+                first_div_pos = min_len
+
+            if first_div_pos == -1:
+                # No divergence at all — question passes.
+                per_question.append({
+                    "idx": q, "baseline_tokens": b_len, "opt_tokens": o_len,
+                    "first_divergence_pos": -1, "containment_pass": None,
+                    "baseline_token_at_div": None, "opt_token_at_div": None,
+                })
+                continue
+
+            questions_with_divergence += 1
+
+            # Check bidirectional top-5 containment at first_div_pos.
+            # If the divergence is from a length mismatch (one output is shorter),
+            # we cannot do top-5 containment — count as failure.
+            if first_div_pos >= b_len or first_div_pos >= o_len:
+                # Length-induced divergence: no logprobs to compare at this position.
+                containment_pass = False
+                b_token_at_div = b_ids[first_div_pos] if first_div_pos < b_len else None
+                o_token_at_div = o_ids[first_div_pos] if first_div_pos < o_len else None
+            else:
+                b_token_at_div = b_ids[first_div_pos]
+                o_token_at_div = o_ids[first_div_pos]
+                b_topk = {int(k) for k in b["logprobs"][first_div_pos]["top_logprobs"]}
+                o_topk = {int(k) for k in o["logprobs"][first_div_pos]["top_logprobs"]}
+                containment_pass = (o_token_at_div in b_topk) and (b_token_at_div in o_topk)
+
+            if not containment_pass:
+                first_divergence_failures += 1
+
+            per_question.append({
+                "idx": q, "baseline_tokens": b_len, "opt_tokens": o_len,
+                "first_divergence_pos": first_div_pos, "containment_pass": containment_pass,
+                "baseline_token_at_div": b_token_at_div, "opt_token_at_div": o_token_at_div,
+            })
+
+        if empty_output_count > num_questions * 0.1:
+            print(f"[correctness] WARNING: {empty_output_count}/{num_questions} questions produced empty output")
+
+        # All questions empty → FAIL (no meaningful comparison).
+        if num_questions == 0 or (empty_output_count == num_questions):
+            verdict = "FAIL"
+            failure_rate = 0.0
+        else:
+            failure_rate = first_divergence_failures / num_questions * 100
+            verdict = "PASS" if failure_rate <= max_topk_failures_pct else "FAIL"
+
+        # Accuracy gate can override to FAIL even if first-divergence containment passes.
+        if verdict == "PASS" and accuracy_gate.get("verdict") == "FAIL":
+            verdict = "FAIL"
+
+        return {
+            "gate": "5.1b", "verdict": verdict, "mode": "first_divergence_topk",
+            "num_questions": num_questions,
+            "questions_with_divergence": questions_with_divergence,
+            "first_divergence_failures": first_divergence_failures,
+            "failure_rate_pct": round(failure_rate, 4),
+            "threshold_pct": max_topk_failures_pct,
+            "per_question_summary": per_question,
+            "gsm8k_accuracy_gate": accuracy_gate,
+        }
+
     else:
         raise ValueError(f"Unknown correctness mode: {mode}")
 
@@ -1380,7 +1475,7 @@ def main() -> None:
     p.add_argument("--verify-correctness", action="store_true", default=False,
                    help="Stage 5: compare GSM8K outputs against golden refs; exit nonzero on mismatch")
     p.add_argument("--correctness-mode", type=str, default="exact_greedy",
-                   choices=["exact_greedy", "topk_relaxed"],
+                   choices=["exact_greedy", "topk_relaxed", "first_divergence_topk"],
                    help="Comparator mode for --verify-correctness (default: exact_greedy)")
     p.add_argument("--correctness-num-questions", type=int, default=30,
                    help="Number of GSM8K questions for correctness phase (default: 30)")

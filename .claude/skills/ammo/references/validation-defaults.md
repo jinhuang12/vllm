@@ -207,28 +207,31 @@ Also require:
 - Stage 1 (capture): `--capture-golden-refs` → saves `json/golden_refs.json`
 - Stage 5 (verify): `--verify-correctness --baseline-from $STAGE1_DIR` → writes `json/correctness_verdict.json`
 
-**Two modes** (selected via `--correctness-mode`):
+**Three modes** (selected via `--correctness-mode`):
 
 | Mode | Default for | Gate logic |
 |------|-------------|------------|
-| `exact_greedy` | Lossless tracks | Every token must match. `--max-divergent-positions 0` by default. |
-| `topk_relaxed` | Lossy tracks (precision reduction introduced) | Bidirectional top-5 containment. `--max-topk-failures-pct 5.0` by default. Length mismatches count as failures. |
+| `first_divergence_topk` | Lossless tracks | Checks bidirectional top-5 containment only at the **first divergent position** per question, then stops (ignores autoregressive cascade). `--max-topk-failures-pct 5.0` = max % of **questions** (not positions) that can fail first-divergence containment. GSM8K accuracy superset check always enabled. |
+| `topk_relaxed` | Lossy tracks (precision reduction introduced) | Bidirectional top-5 containment at **every position**. `--max-topk-failures-pct 5.0` by default. Length mismatches count as failures. GSM8K accuracy superset check always enabled. |
+| `exact_greedy` | (manual opt-in only) | Every token must match. `--max-divergent-positions 0` by default. Not used by default — available for optimizations known to be bit-identical. |
+
+**Why `first_divergence_topk` for lossless**: Most kernel optimizations (GEMM fusions, merges, tiling changes) alter CUTLASS tile selection, producing different FP32 accumulation order. The first token flip is a legitimate near-tie, but autoregressive generation cascades it into widespread divergence. Checking only the first-divergence point catches real bugs (shifted probability distributions) while ignoring cascade noise.
 
 **Mode selection is based on lossy classification from the debate summary** (see `debate-scoring-rubric.md` § Lossy Classification Rule), not on the model's existing dtype. A BF16 model with an optimization that introduces precision reduction (e.g., FP8, INT4, MXFP4) is lossy and uses `topk_relaxed`.
 
-**Lossy track parameter overrides:**
+**Parameter table by classification:**
 
 | Parameter | Lossless tracks | Lossy tracks |
 |-----------|----------------|--------------|
-| `--correctness-mode` | `exact_greedy` | `topk_relaxed` (forced) |
+| `--correctness-mode` | `first_divergence_topk` | `topk_relaxed` |
 | `--correctness-num-questions` | 30 (script default) | **100** |
-| GSM8K accuracy gate | Off | On (implied by `topk_relaxed`) |
+| GSM8K accuracy gate | On (zero questions lost) | On (zero questions lost) |
 
 These overrides apply to ALL sweep invocations for the track, including GATING_REQUIRED re-validation sweeps.
 
-**GSM8K accuracy gate** (lossy tracks): The optimized model cannot get ANY question wrong that the baseline got correct ("zero questions lost"). This is a superset check, not a percentage threshold. Enabled automatically when `--correctness-mode topk_relaxed`.
+**GSM8K accuracy gate**: The optimized model cannot get ANY question wrong that the baseline got correct ("zero questions lost"). This is a superset check, not a percentage threshold. Enabled as a hard gate for `first_divergence_topk` and `topk_relaxed` modes. For `exact_greedy` (manual opt-in), accuracy is reported but not enforced.
 
-**Self-consistency check** (Stage 1 only): Golden ref capture runs prompts twice to verify greedy decode is deterministic. If non-deterministic, metadata records `deterministic: false` and recommends `topk_relaxed` for Stage 5.
+**Self-consistency check** (Stage 1 only): Golden ref capture runs prompts twice to verify greedy decode is deterministic. If non-deterministic, metadata records `deterministic: false`.
 
 **Exit codes**: 3 = correctness FAIL (real divergence), 4 = infrastructure error (retry).
 

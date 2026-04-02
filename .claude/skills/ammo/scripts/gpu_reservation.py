@@ -236,6 +236,7 @@ def reserve(
     session_id: str,
     command_snippet: str = "",
     lease_hours: float = 2.0,
+    auto_release: bool = True,
 ) -> list[int]:
     """Dynamically reserve *num_gpus* GPUs from the pool.
 
@@ -243,8 +244,10 @@ def reserve(
       - For num_gpus=1, takes the first free GPU.
       - For num_gpus>1, requires a contiguous block of free GPUs.
 
-    Auto-releases any existing reservations for *session_id* before
-    allocating, so retries don't exhaust the pool.
+    When *auto_release* is True (default), releases any existing reservations
+    for *session_id* before allocating, so retries don't exhaust the pool.
+    Set *auto_release* to False when multiple agents share a session_id and
+    should not evict each other.
 
     Returns the list of allocated GPU IDs on success.
     Raises ReservationError if the request cannot be satisfied.
@@ -276,9 +279,10 @@ def reserve(
                 state["gpus"][key] = None
 
         # --- Auto-release existing reservations for this session_id ---
-        for key, entry in state["gpus"].items():
-            if entry is not None and entry.get("session_id") == session_id:
-                state["gpus"][key] = None
+        if auto_release:
+            for key, entry in state["gpus"].items():
+                if entry is not None and entry.get("session_id") == session_id:
+                    state["gpus"][key] = None
 
         # --- Find free GPUs ---
         gpu_count = state.get("gpu_count", len(state["gpus"]))
@@ -475,13 +479,22 @@ if __name__ == "__main__":
         "--num-gpus", type=int, required=True, help="Number of GPUs to reserve"
     )
     p_reserve.add_argument(
-        "--session-id", type=str, default="cli", help="Session identifier"
+        "--session-id",
+        type=str,
+        default=os.environ.get("CLAUDE_SESSION_ID", "cli"),
+        help="Session identifier (default: $CLAUDE_SESSION_ID or 'cli')",
     )
     p_reserve.add_argument(
         "--lease-hours", type=float, default=2.0, help="Lease duration in hours"
     )
     p_reserve.add_argument(
         "--command-snippet", type=str, default="", help="Command description"
+    )
+    p_reserve.add_argument(
+        "--no-auto-release",
+        action="store_true",
+        default=False,
+        help="Skip auto-release of existing reservations for this session_id",
     )
 
     # --- release-session ---
@@ -504,6 +517,7 @@ if __name__ == "__main__":
                 session_id=args.session_id,
                 command_snippet=args.command_snippet,
                 lease_hours=args.lease_hours,
+                auto_release=not args.no_auto_release,
             )
             # Print comma-separated GPU IDs to stdout
             print(",".join(str(g) for g in gpu_ids))
