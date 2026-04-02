@@ -102,7 +102,7 @@ Skip the first poll result if it shows only startup activity (venv activation, i
 ### When to Stop Polling
 
 Stop polling when ANY of:
-- The champion's transcript shows a completion message (e.g., "VALIDATION_REQUEST", "Track complete", "Implementation infeasible")
+- The champion's transcript shows a completion message (e.g., "TRACK_COMPLETE", "Track complete", "Implementation infeasible")
 - The orchestrator sends you a shutdown message
 - The transcript stops growing for 5+ minutes AND re-discovery finds no new transcript (see Session Restart below)
 - You have been running for 3 hours (safety time limit)
@@ -204,8 +204,9 @@ Apply general adversarial reasoning. These are patterns to be alert to, not a ri
 **Implementation stage (Stages 4-5) — focus on:**
 - Production parity: `--enforce-eager`, `TORCH_COMPILE_DISABLE` in benchmarks
 - Worktree discipline: edits on correct branch, not main
-- Validation integrity: not sharing test scripts with validator
-- Gate completeness: validator runs Gate 5.1a; champion runs Gates 5.1b/5.3 via sweep script (`correctness_verdict.json` for 5.1b, sweep output for 5.3); Gate 5.2 via isolated kernel benchmark. All must complete before declaring success
+- Validation integrity: not sharing test scripts with kernel validation sub-agent
+- Gate completeness: champion spawns sub-agent for Gates 5.1a + 5.2; champion runs Gates 5.1b/5.3a/5.3b via sweep script. All must complete before declaring success
+- **Missing sub-agent spawn**: champion runs sweep without prior `Agent(subagent_type="ammo-impl-validator")` call → CRITICAL (kernel correctness never independently verified)
 - Stage 1 baseline reuse: not running own baseline measurements
 - validation_results.md written before completion signal
 
@@ -235,7 +236,7 @@ Apply general adversarial reasoning. These are patterns to be alert to, not a ri
 
 - **No validation_results.md before completion**: Champion signals completion without writing the required validation results file. [implementation only]
 - **Source modification outside worktree**: Champion edits files in the main repo instead of the worktree. [implementation only]
-- **Sharing test scripts with validator**: Champion sends test code to the validator. [implementation only]
+- **Sharing test scripts with sub-agent**: Champion's spawn prompt includes test code or points to champion's own test scripts. [implementation only]
 - **Skipping gates**: Champion declares success without running all required gates. [implementation only]
 
 ### Scope/Target Issues
@@ -251,8 +252,8 @@ As context fills, champions lose rigor — they skip self-validation, blindly tr
 - **Thrashing**: 8+ `Edit` tool calls targeting the same file within a 20-tool-call window, especially if edits repeatedly add/remove/re-add similar code or each fix introduces new errors. This pattern means the champion is patching symptoms without understanding the root cause.
   - Message: `DA-MONITOR: [WARNING] You've edited {file} {N} times in quick succession. This suggests symptom-fixing rather than root-cause analysis. Consider delegating the investigation to a fresh-context ammo-delegate (Tier 2+).`
 
-- **Blind fix-and-send**: Champion makes a code change (Edit tool) then immediately calls SendMessage to the validator with a re-validation request, with NO verification step in between — no Bash running pytest/python, no smoke test, no extended reasoning about correctness. The champion's agent definition requires a self-validation gate before re-requesting.
-  - Message: `DA-MONITOR: [WARNING] You sent a re-validation request without running your own smoke test. Your Self-Validation Gate requires: (1) root cause reasoning, (2) smoke test, (3) fix-attempt counter check — before messaging the validator.`
+- **Blind fix-and-respawn**: Champion makes a code change (Edit tool) then immediately spawns a new validation sub-agent, with NO verification step in between — no Bash running pytest/python, no smoke test, no extended reasoning about correctness. The champion's agent definition requires a self-validation gate before re-spawning.
+  - Message: `DA-MONITOR: [WARNING] You re-spawned the validation sub-agent without running your own smoke test. Your Self-Validation Gate requires: (1) root cause reasoning, (2) smoke test, (3) fix-attempt counter check — before re-spawning.`
 
 - **Shrinking reasoning**: Champion's response to validation results is dramatically shorter than earlier responses to similar results. Early in the session the champion writes multi-paragraph analysis of validator findings; late in the session it's one-liners like "fixed, sending for re-validation." Compare the champion's post-validation-message reasoning length across the session — a drop from >300 words to <100 words is a strong signal.
   - Message: `DA-MONITOR: [WARNING] Your analysis of the latest validation results was significantly shorter than earlier analyses ({N} words vs {M} words earlier). Context pressure may be reducing reasoning depth. Consider delegating this assessment to a fresh-context ammo-delegate.`
@@ -271,7 +272,7 @@ You read the champion's thinking blocks. This is your superpower AND your risk �
 4. **Watch for the confidence trap**: Opus's biggest failure mode is overconfidence. The more confidently the champion dismisses an alternative or declares something "obvious," the more carefully you should examine the reasoning.
 5. **Evaluate the chain, not just the conclusion**: A correct conclusion reached through flawed reasoning is still a flag — the same reasoning applied elsewhere will produce incorrect conclusions.
 
-**Limitation**: This protocol is behavioral instructions, not a structural guarantee. The structurally independent verification layers (validator at Layer 1, champion review at Layer 2) remain the primary independence mechanisms.
+**Limitation**: This protocol is behavioral instructions, not a structural guarantee. The structurally independent kernel validation sub-agent (writes own tests from debate plan, not implementation) remains the primary independence mechanism.
 
 ## Communication
 

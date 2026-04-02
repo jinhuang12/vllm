@@ -46,7 +46,7 @@ python .claude/skills/ammo/scripts/new_target.py \
 Stage 1: Baseline Capture          [main session + ammo-researcher subagent]   → constraints.md
 Stage 2: Bottleneck Mining          [main session + ammo-researcher subagent]   → bottleneck_analysis.md (grounded data only)
 Stage 3: Candidate Proposal + Debate [round team: N ammo-champion agents]            → debate/summary.md
-Stage 4+5: Parallel Tracks          [round team reused: per-track impl-champion + impl-validator pairs + DA audit]
+Stage 4+5: Parallel Tracks          [round team reused: per-track impl-champion + DA audit]
   + Round N+1 Debate (overlapped)   [round team: N ammo-champion agents, if round 2+] → debate/campaign_round_{N+1}/summary.md
 Stage 6: Integration Validation     [main session direct]                       → SHIP or round-fail
 Stage 7: Campaign Evaluation        [main session direct]                       → next round, campaign_complete, or campaign_exhausted
@@ -136,7 +136,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 
 **Communication boundaries** (ENFORCED):
 - Debate champions communicate with: each other (via file artifacts), orchestrator (via SendMessage).
-- Implementation agents communicate with: their paired validator (via SendMessage), orchestrator (via SendMessage).
+- Implementation agents communicate with: orchestrator (via SendMessage). Kernel validation is handled internally by spawning an ammo-impl-validator sub-agent (Agent tool, not SendMessage).
 - Debate champions MUST NOT message implementation agents. Implementation agents MUST NOT message debate champions.
 - The orchestrator enforces this by not providing cross-workstream agent names in spawn prompts.
 
@@ -216,15 +216,14 @@ If a red flag fires, the researcher must investigate before the lead proceeds to
 
 ### Stages 4-5: Parallel Worktree Tracks (Adversarial Validation)
 
-Each track uses a **champion + independent validator** pair to prevent reward hacking (observed: cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation). All implementation agents join the **existing round team** created in Stage 3 — no new TeamCreate calls.
+Each track uses a champion with an independently-spawned kernel validation sub-agent to prevent reward hacking (observed: cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation). All implementation agents join the **existing round team** created in Stage 3 — no new TeamCreate calls.
 
 Execute these steps **in order**:
 
 1. **Spawn implementation agents into the round team**: Per winning candidate:
    - Spawn an `ammo-impl-champion` (Opus, `isolation: worktree`) into the existing round team.
    - **Monitor spawn (REQUIRED)**: Immediately spawn an `ammo-transcript-monitor` (Sonnet) as a **team member** (`team_name=round_team_name`, `run_in_background=True`) for that impl-champion. See `orchestration/debate-protocol.md` § Monitor Spawn Pattern.
-   - **Do NOT spawn `ammo-impl-validator` here.** The validator is spawned later by the orchestrator when the champion sends a `VALIDATION_REQUEST` via SendMessage (see `orchestration/parallel-tracks.md` § Validation Spawn Protocol).
-   - The champion implements; when ready, it sends `VALIDATION_REQUEST` to the orchestrator. The orchestrator spawns the validator, who independently writes its own synthetic correctness tests (Gate 5.1a only). Gates 5.1b and 5.3 are handled by the champion via the sweep script with `--verify-correctness`. Gate 5.2 (isolated kernel benchmark) is champion-owned independently. The validator dual-reports raw results to both champion and orchestrator.
+   - The champion implements; when ready, it spawns `ammo-impl-validator` as a sub-agent for kernel-level validation (Gates 5.1a + 5.2). The champion then runs the sweep script for E2E validation (Gates 5.1b + 5.3a + 5.3b). The champion reports the final verdict to the orchestrator via `TRACK_COMPLETE` message.
 
 2. **Launch overlapped debate (round 2+ only)**: If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents into the same round team. **Monitor spawn (REQUIRED)**: After spawning each debate champion, spawn an `ammo-transcript-monitor` as a team member in background. Follow the standard debate protocol while also monitoring implementation tracks. See "Overlapped Debate" section above. For round 1, skip this step.
 
@@ -277,10 +276,9 @@ T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]        
   | Spawn impl-champion-{id} into round team                                           |
   | T8a_{id}: Research + plan reading (champion)               [round team]    <- T7   |
   | T8b_{id}: Implement kernel (champion only)                 [round team]    <- T8a  |
-  |   T8b_val_{id}: Champion sends VALIDATION_REQUEST → orchestrator spawns impl-validator-{id} |
-  | T8c_{id}: Gate 5.1a validation (validator) + E2E sweep with --verify-correctness (champion) [round team] <- T8b |
-  | T8cx_{id}: [IF GATING_REQUIRED] Crossover probing (validator benchmarks,   |
-  |            champion implements gating, validator re-validates)  [round team] <- T8c |
+  | T8c_{id}: Kernel validation sub-agent (5.1a + 5.2) + E2E sweep (5.1b + 5.3a + 5.3b) [round team] <- T8b |
+  | T8cx_{id}: [IF GATING_REQUIRED] Crossover probing (sub-agent benchmarks,  |
+  |            champion implements gating, sub-agent re-validates) [round team] <- T8c  |
   | T8d_{id}: Kill criteria evaluation + validation_results.md (champion) [round team] <- T8c/T8cx |
   | T9_{id}: GATE: compilation check                           [main]          <- T8d  |
   | T10_{id}: State update                                     [main]          <- T9   |
@@ -354,7 +352,7 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 
 Inline DA verification (integrated into helper agents — replaces non-functional Stop hook DAs for team members):
 - **ammo-transcript-monitor** → Periodic transcript-based DA review of champion artifacts. In debate (Stage 3): 7-point DA audit (custom kernel mandate, evidence tier verification with claim-evidence matching, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target, BS-gated sanity); writes to `debate/monitor_audits/`. In implementation (Stages 4-5): scope adherence, methodology checks, reward-hacking detection; writes to `tracks/{op_id}/monitor_audits/`.
-- **ammo-impl-validator** → After Gate 5.1a: DA section in validation report (scope adherence, correctness methodology, cross-track awareness; plus conditional GATED_PASS checks). Gates 5.1b/5.3 results come from the champion's sweep script (`correctness_verdict.json` for 5.1b, sweep output for 5.3). Gate 5.2 (isolated kernel benchmark) is champion-owned independently.
+- **ammo-impl-validator** (champion-spawned sub-agent) → Gates 5.1a + 5.2: DA section in return results (scope adherence, cross-track awareness). Gates 5.1b/5.3 results come from the champion's sweep script.
 - **ammo-researcher** Stop → DA checks for ungrounded claims (subagent — Stop hooks work correctly).
 
 ## State Management

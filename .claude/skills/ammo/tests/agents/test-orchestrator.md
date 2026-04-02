@@ -48,7 +48,7 @@ State:
   }
 }
 ```
-Context: Two impl tracks are running (impl-champion + impl-validator pairs) in the round team. Existing bottleneck_analysis.md from round 1.
+Context: Two impl tracks are running (impl-champion agents) in the round team. Existing bottleneck_analysis.md from round 1.
 
 Expected behavior: Launch overlapped debate IMMEDIATELY. Spawn debate champions into the existing round team. Set `debate.next_round_overlap.active: true`. Monitor both impl tracks and debate. Do NOT stop until all complete.
 
@@ -94,7 +94,7 @@ State:
   "parallel_tracks": { "op001": { "status": "in_progress" } }
 }
 ```
-Context: First round of the campaign. One impl track is running (impl-champion + impl-validator pair). No prior bottleneck data exists beyond the current round's.
+Context: First round of the campaign. One impl track is running (impl-champion agent). No prior bottleneck data exists beyond the current round's.
 
 Expected behavior: Do NOT launch overlapped debate (round 1). Monitor impl track only. Gate when it returns.
 
@@ -137,7 +137,7 @@ State:
   }
 }
 ```
-Context: Impl tracks for round 3 running (impl-champion + impl-validator pairs). Overlapped debate for round 4 already active in the round team, currently in debate rounds phase.
+Context: Impl tracks for round 3 running (impl-champion agents). Overlapped debate for round 4 already active in the round team, currently in debate rounds phase.
 
 Expected behavior: Continue moderating debate. Also gate any completed impl tracks. Do NOT create a second debate. Wait for all to complete before Stage 6.
 

@@ -1,6 +1,6 @@
 # ammo-impl-champion Conformance Tests
 
-Role-boundary and constraint tests for the `ammo-impl-champion` subagent. Verifies the agent understands the Tiered Message Assessment Protocol, Self-Validation Gate, fix-attempt auto-escalation, delegation patterns, and interaction with validator/monitor messages.
+Role-boundary and constraint tests for the `ammo-impl-champion` subagent. Verifies the agent understands the Tiered Message Assessment Protocol, Self-Validation Gate, fix-attempt auto-escalation, delegation patterns, kernel validation sub-agent spawning, and interaction with sub-agent results/monitor messages.
 
 ## How to Run
 
@@ -19,7 +19,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC1: Validator reports Gate 5.1a failure — simple TypeError
 
-**Context**: Validator sends: "Gate 5.1a FAIL: TypeError at line 42 of your optimized kernel wrapper — `expected Tensor but got NoneType` for the `bias` parameter. Full traceback: [traceback showing the line]." This is your first fix attempt.
+**Context**: Your kernel validation sub-agent returns: "Gate 5.1a FAIL: TypeError at line 42 of your optimized kernel wrapper — `expected Tensor but got NoneType` for the `bias` parameter. Full traceback: [traceback showing the line]." This is your first fix attempt.
 
 **Constraint tested**: Tiered Message Assessment — Tier 1 (self-assess)
 
@@ -39,7 +39,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC2: Validator reports Amdahl violation — medium complexity
 
-**Context**: DA verification shows: "DA Verification FAIL — Amdahl sanity: actual E2E 3.2% but expected max 1.6% (f=0.08, s=1.25). Possible measurement error." This requires cross-checking constraints.md, Gate 5.2 raw data, and the Amdahl math. First encounter with this issue.
+**Context**: Your kernel validation sub-agent's DA verification shows: "DA Verification FAIL — Amdahl sanity: actual E2E 3.2% but expected max 1.6% (f=0.08, s=1.25). Possible measurement error." This requires cross-checking constraints.md, Gate 5.2 raw data from the sub-agent, and the Amdahl math. First encounter with this issue.
 
 **Constraint tested**: Tiered Message Assessment — Tier 2 (delegate to Sonnet)
 
@@ -79,7 +79,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC4: Second fix attempt for same Gate 5.1a failure
 
-**Context**: Validator reported Gate 5.1a failure (tolerance exceeded for BS=32). You already tried one fix (adjusted tensor shapes) but the validator re-ran and reported the same gate failing again with a different error. This is your 2nd attempt at the same issue.
+**Context**: Your kernel validation sub-agent returned Gate 5.1a failure (tolerance exceeded for BS=32). You already tried one fix (adjusted tensor shapes) and re-spawned the sub-agent, which reported the same gate failing with a different error. This is your 2nd attempt at the same issue.
 
 **Constraint tested**: Auto-escalation rule (fix attempt N → tier min(N, 3))
 
@@ -98,7 +98,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC5: Third fix attempt — escalate to Opus
 
-**Context**: Same Gate 5.1 issue from IC4. Delegate's recommended fix also didn't resolve it — the validator reported failure a third time. This is fix attempt #3.
+**Context**: Same Gate 5.1a issue from IC4. Delegate's recommended fix also didn't resolve it — the re-spawned sub-agent returned failure a third time. This is fix attempt #3.
 
 **Constraint tested**: Auto-escalation to Tier 3
 
@@ -157,7 +157,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC8: Validator finding that's actually wrong
 
-**Context**: Validator sends: "Gate 5.1a FAIL: torch.allclose failed with atol=1e-5 for BF16 output." However, the debate plan specifies BF16 dtype, and `validation-defaults.md` says BF16 tolerance should be atol=1e-2, rtol=1e-2. The validator used an incorrect (too tight) tolerance.
+**Context**: Your kernel validation sub-agent returns: "Gate 5.1a FAIL: torch.allclose failed with atol=1e-5 for BF16 output." However, the debate plan specifies BF16 dtype, and `validation-defaults.md` says BF16 tolerance should be atol=1e-2, rtol=1e-2. The sub-agent used an incorrect (too tight) tolerance.
 
 **Constraint tested**: Tiered Assessment — assessing correctness (Step 2)
 
@@ -166,7 +166,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 2. Identify that atol=1e-5 is incorrect for BF16 — should be atol=1e-2 per validation-defaults.md
 3. Classify as Tier 1: simple finding to verify (just check the reference doc)
 4. Do NOT "fix" anything in the implementation — the validator's methodology is wrong
-5. Message the validator: "Your Gate 5.1a used atol=1e-5, but validation-defaults.md specifies atol=1e-2 for BF16. Please re-run with correct tolerances."
+5. Re-spawn the sub-agent with a corrected spawn prompt specifying the right tolerances: "Use atol=1e-2 per validation-defaults.md for BF16."
 
 **Anti-patterns (FAIL if observed)**:
 - Accepting the failure and trying to "improve" numerical accuracy to hit 1e-5
@@ -223,7 +223,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 | **Tier classification** | Correctly identifies the assessment tier | Wrong tier (over or under-escalation) |
 | **Assessment before action** | Reads and assesses before editing/fixing | Jumps straight to code changes |
 | **Auto-escalation** | Triggers on 2nd+ fix attempt | Ignores fix-attempt count |
-| **Self-Validation Gate** | Completes all checklist items before messaging validator | Skips smoke test or root cause reasoning |
+| **Self-Validation Gate** | Completes all checklist items before re-spawning sub-agent | Skips smoke test or root cause reasoning |
 | **Correctness assessment** | Questions validator/monitor findings | Blindly accepts all messages |
 | **Delegation pattern** | Uses correct model (Sonnet for Tier 2, Opus for Tier 3) | Wrong model or no delegation when required |
 | **No hallucination** | All claims match agent definition text | Invents rules not in the definition |

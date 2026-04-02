@@ -2,8 +2,8 @@
 """
 AMMO Kernel Benchmark Template (Gate 5.2)
 
-Independent kernel benchmark for adversarial validation. The champion (or their
-delegate) adapts this template for the specific target kernel — filling in
+Independent kernel benchmark for adversarial validation. The kernel validation
+sub-agent (or champion's delegate) adapts this template — filling in
 imports, tensor shapes, and kernel invocations.
 
 METHODOLOGY (non-negotiable):
@@ -19,7 +19,7 @@ USAGE:
     --op-id <op_id> \
     --output <path/to/gate_5_2_results.json>
 
-The champion (or their delegate) fills in the sections marked CHAMPION_FILL below.
+Fill in the sections marked FILL below.
 """
 
 import argparse
@@ -32,7 +32,7 @@ import torch
 import torch.cuda
 
 # ============================================================
-# CHAMPION_FILL: Import baseline and optimized kernels
+# FILL: Import baseline and optimized kernels
 # ============================================================
 # Example for MoE:
 #   from vllm.model_executor.layers.fused_moe import fused_experts as baseline_fn
@@ -52,7 +52,7 @@ def load_target_config(artifact_dir: str) -> dict:
 
 def create_input_tensors(batch_size: int, config: dict, device: str = "cuda"):
     """
-    CHAMPION_FILL: Create input tensors for the target kernel.
+    FILL: Create input tensors for the target kernel.
 
     Use the kernel's expected input shapes based on the model config.
     Example for MoE:
@@ -67,7 +67,7 @@ def create_input_tensors(batch_size: int, config: dict, device: str = "cuda"):
 
 def run_baseline(inputs: dict):
     """
-    CHAMPION_FILL: Run the vLLM production baseline kernel.
+    FILL: Run the vLLM production baseline kernel.
 
     Example:
         return baseline_fn(inputs["x"], inputs["w1"], inputs["w2"], ...)
@@ -77,7 +77,7 @@ def run_baseline(inputs: dict):
 
 def run_optimized(inputs: dict):
     """
-    CHAMPION_FILL: Run the optimized kernel.
+    FILL: Run the optimized kernel.
 
     Example:
         return optimized_fn(inputs["x"], inputs["w1"], inputs["w2"], ...)

@@ -1,6 +1,6 @@
 # Stages 4-5: Parallel Worktree Track Management
 
-Each winning candidate from Stage 3 gets its own git worktree, branch, and implementation agent pair. All agents -- across all tracks -- belong to the **same round team** created at the start of Stage 3. The orchestrator can only lead one team at a time, so a single round-scoped team is used for the entire round lifecycle (debate through implementation). Tracks run in parallel across GPUs. Within a track, the champion and validator collaborate fluidly -- both may be active simultaneously, with GPU access coordinated via SendMessage. During round 2+, debate champions for the next round may also be present in the team (see Overlapped Debate below). Implementation and debate agents share the team but operate as independent workstreams -- they do not communicate directly.
+Each winning candidate from Stage 3 gets its own git worktree, branch, and implementation champion. All agents -- across all tracks -- belong to the **same round team** created at the start of Stage 3. The orchestrator can only lead one team at a time, so a single round-scoped team is used for the entire round lifecycle (debate through implementation). Tracks run in parallel across GPUs. Within a track, the champion manages validation internally by spawning a kernel validation sub-agent (not a team member). During round 2+, debate champions for the next round may also be present in the team (see Overlapped Debate below). Implementation and debate agents share the team but operate as independent workstreams -- they do not communicate directly.
 
 ## Team Structure (Single Round Team)
 
@@ -9,11 +9,11 @@ All implementation agents join the existing round team. The team was created at 
 ```
 Round Team: ammo-round-{round_id}-{model_short}-{hardware}
 [Implementation Workstream]
-+-- impl-champion-{op_id_1} (Opus)           -- implementation, E2E threshold evaluation
++-- impl-champion-{op_id_1} (Opus)           -- implementation + validation orchestration
 +-- monitor-impl-champion-{op_id_1} (Sonnet) -- transcript monitor (background, team member)
-+-- impl-champion-{op_id_2} (Opus)           -- implementation, E2E threshold evaluation
++-- impl-champion-{op_id_2} (Opus)           -- implementation + validation orchestration
 +-- monitor-impl-champion-{op_id_2} (Sonnet) -- transcript monitor (background, team member)
-+-- impl-validator-{op_id} (Sonnet)          -- spawned by orchestrator AT VALIDATION TIME ONLY
+    (kernel validation sub-agents spawned by champions as needed -- NOT team members)
 [Overlapped Debate Workstream -- round 2+ only]
 +-- champion-r{N+1}-1 (Opus)                 -- next-round debate champion [shut down after selection]
 +-- monitor-champion-r{N+1}-1 (Sonnet)       -- transcript monitor (background) [shut down after selection]
@@ -21,7 +21,7 @@ Round Team: ammo-round-{round_id}-{model_short}-{hardware}
 +-- monitor-champion-r{N+1}-2 (Sonnet)       -- transcript monitor (background) [shut down after selection]
 ```
 
-Each track uses an **adversarial validation model**: the champion implements, an orchestrator-spawned independent validator validates. This separation prevents reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation). Transcript monitors provide continuous DA oversight of champion work.
+Each track uses an **adversarial validation model**: the champion implements, then spawns a kernel validation sub-agent that independently writes its own correctness tests and benchmarks. This separation prevents reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation). Transcript monitors provide continuous DA oversight of champion work.
 
 **Why adversarial validation**: The AMMO pipeline has observed four types of reward hacking when the same agent both implements and validates. Separating implementation from validation into independent agents with differing goals catches issues in real-time.
 
@@ -31,7 +31,7 @@ Each track uses an **adversarial validation model**: the champion implements, an
 
 Worktrees are created automatically by the Agent tool when spawning `ammo-impl-champion` subagents (which have `isolation: worktree` in their definition). The `WorktreeCreate` hook (`worktree-create-with-build.sh`) pre-configures Python isolation, copies `.so` files, and creates a per-worktree `.venv`.
 
-The validator agent shares the champion's worktree (same track team). Both agents may be active simultaneously — GPU access is coordinated via SendMessage, with the champion having priority.
+The champion spawns the kernel validation sub-agent with the worktree path in the spawn prompt. The sub-agent runs sequentially (Gates 5.1a + 5.2 first, then champion runs the E2E sweep).
 
 ### GPU Pool
 
@@ -86,9 +86,9 @@ Agent(
     Workflow:
     1. Read debate artifacts, spawn ammo-delegate subagents for research tasks
     2. Implement the kernel optimization
-    3. Commit implementation, send VALIDATION_REQUEST to orchestrator (team-lead)
-    4. Receive validation results from orchestrator-spawned validator
-    5. Run E2E sweep: `run_vllm_bench_latency_sweep.py --verify-correctness --baseline-from {stage1_dir}`
+    3. Commit implementation
+    4. Spawn kernel validation sub-agent for Gates 5.1a + 5.2 (see your agent definition § Kernel Validation)
+    5. Run E2E sweep per your agent definition § E2E Validation (ONE command handles 5.1b + 5.3a + 5.3b)
     6. Evaluate E2E results against min_e2e_improvement_pct threshold, write validation_results.md
     """
 )
@@ -114,61 +114,42 @@ Agent(
     See your agent definition § Stage-Specific Focus for the full list."""
 )
 
-# NOTE: impl-validator is NOT spawned here. It is spawned by the orchestrator
-# when the impl-champion sends a VALIDATION_REQUEST. See "Validation Spawn Protocol" below.
+# NOTE: The champion spawns ammo-impl-validator as a sub-agent internally.
+# The orchestrator does NOT spawn or manage the validator.
 ```
 
-### Validation Spawn Protocol
+### Champion-Managed Validation
 
-When an impl-champion sends `VALIDATION_REQUEST` to the orchestrator via SendMessage, the orchestrator spawns the validator:
+The champion manages kernel validation internally:
+1. Champion spawns `ammo-impl-validator` as a sub-agent via `Agent()` (not a team member)
+2. Sub-agent runs Gates 5.1a (kernel correctness) + 5.2 (kernel speedup), returns results
+3. If 5.1a FAIL: champion fixes, re-spawns sub-agent (no wasted E2E sweep)
+4. If 5.1a PASS: champion runs sweep (5.1b + 5.3a + 5.3b)
+5. Champion combines all gate results into `validation_results.md`
+6. Champion reports `TRACK_COMPLETE` to orchestrator via SendMessage
 
-```python
-# Orchestrator receives VALIDATION_REQUEST from impl-champion-{op_id}
-# Extract fields: op_id, commit_sha, worktree_path, artifact_dir, expect_kernel, batch_sizes
-
-Agent(
-    name=f"impl-validator-{op_id}",
-    subagent_type="ammo-impl-validator",
-    model="sonnet",
-    team_name=existing_team_name,
-    prompt=f"""You are the independent validator for optimization {op_id}.
-    Champion: impl-champion-{op_id}. Orchestrator: team-lead.
-    Artifact dir: {artifact_dir}. Worktree: {worktree_path}
-    Expected kernel: {kernel_name}. Batch sizes: {batch_sizes}
-    E2E threshold: {min_e2e_improvement_pct}
-    GPU pool: CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>
-
-    Write YOUR OWN independent synthetic correctness tests (Gate 5.1a only).
-    Gates 5.1b and 5.3 are handled by the champion via the sweep script.
-    Gate 5.2 (isolated kernel benchmark) is champion-owned independently.
-    DUAL-REPORT raw results to BOTH impl-champion-{op_id} AND team-lead.
-
-    Key references:
-    - Validation defaults: .claude/skills/ammo/references/validation-defaults.md
-    - CUDA graph safety: .claude/skills/ammo/references/cudagraph-safety.md"""
-)
-
-# Notify champion that validator is spawned
-SendMessage(f"impl-champion-{op_id}", f"Validator spawned as impl-validator-{op_id}. Await results.")
-```
+The orchestrator reads `validation_results.md` for gate decisions but does not participate in the validation loop.
 
 ### Collaboration Timeline and Key Rules
 
-Champion-validator collaboration follows the fluid timeline in `references/impl-track-rules.md` § Collaboration. Key rules: only champion modifies source, champion has GPU priority, independent validation is non-negotiable, champion idle during validation. See `references/impl-track-rules.md` § Track Rules for full details.
+The champion manages kernel validation by spawning the sub-agent sequentially before running the E2E sweep. Key rules: only the champion modifies source, independent validation is non-negotiable (sub-agent writes own tests from debate plan). See `references/impl-track-rules.md` for full constraints.
 
-### Two Layers of Verification
+### Champion-Owned Validation with Kernel Sub-Agent
 
 ```
-Layer 1: Independent Validator (Sonnet)
-  Writes OWN synthetic correctness tests (Gate 5.1a)
-  Reports raw structured results — no interpretation
+Kernel-Level (Sub-Agent, Sonnet):
+  Gate 5.1a: Writes OWN kernel correctness tests, returns structured results
+  Gate 5.2: Runs kernel speedup benchmark under CUDA graphs
 
-Layer 2: Champion (Opus)
-  Runs sweep with --verify-correctness (Gates 5.1b/5.3)
-  Evaluates E2E results against min_e2e_improvement_pct threshold
+E2E-Level (Champion, Opus):
+  Gate 5.1b: Sweep --verify-correctness (GSM8K greedy decode)
+  Gate 5.3a: Sweep --nsys-profile (kernel execution proof)
+  Gate 5.3b: Sweep E2E latency (per-BS verdicts)
   Cross-checks Gate 5.1a against correctness_verdict.json
   Writes final validation_results.md with evidence chain
 ```
+
+The sub-agent provides adversarial kernel-level verification. The champion provides E2E-level verification. The transcript monitor provides continuous DA oversight.
 
 ### Handling Validation Failures and GATING_REQUIRED
 
@@ -178,8 +159,8 @@ When validation fails or a GATING_REQUIRED verdict is reported, follow the workf
 
 After all tracks complete, main reads each track's outputs:
 
-1. `{artifact_dir}/tracks/{op_id}/validation_results.md` — champion's final report
-2. `{artifact_dir}/tracks/{op_id}/validator_tests/` — validator's independent scripts and results
+1. `{artifact_dir}/tracks/{op_id}/validation_results.md` — champion's final report (includes sub-agent results)
+2. `{artifact_dir}/tracks/{op_id}/validator_tests/` — sub-agent's independent scripts and results
 3. `state.json` field `parallel_tracks.{op_id}.result` — structured summary
 
 Main aggregates results to determine which candidates pass to Stage 6 integration.
@@ -197,7 +178,7 @@ A track **ships** if its final status is `PASS` or `GATED_PASS` (after successfu
 
 Additional requirements unchanged:
 - Gate 5.1: Correctness — both sub-gates must pass:
-  - 5.1a: Validator's independent synthetic correctness tests pass
+  - 5.1a: Kernel validation sub-agent's independent correctness tests pass
   - 5.1b: Sweep script `--verify-correctness` verdict is PASS in `correctness_verdict.json` (deterministic — no N/A escape)
 
 ### Track Status Machine
@@ -268,7 +249,7 @@ The orchestrator MUST NOT advance to Stage 6 integration until:
 | Agent Type | GPU Access |
 |-----------|-----------|
 | Implementation champions | Pool access — kernel work (--num-gpus 1) + E2E sweep (--num-gpus {tp}) |
-| Implementation validators | Pool access — kernel work (--num-gpus 1) + E2E sweep (--num-gpus {tp}) |
+| Kernel validation sub-agents | Pool access — kernel work only (--num-gpus 1) |
 | Debate champions | Pool access — micro-benchmarks OK (--num-gpus 1) |
 | Transcript monitors | Read-only — no GPU access (transcript parsing + analysis only) |
 

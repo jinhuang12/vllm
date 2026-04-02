@@ -239,27 +239,27 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario I9: Validator reports all correctness tests pass trivially
 
-**Context**: The orchestrator-spawned validator reports Gate 5.1a results: "All correctness tests PASS. torch.allclose(atol=1e-3, rtol=1e-3) on [1, 32, 128]. Bit-exact match on all batch sizes. All tests passed on first run with zero numerical error."
+**Context**: Your kernel validation sub-agent returns Gate 5.1a results: "All correctness tests PASS. torch.allclose(atol=1e-3, rtol=1e-3) on [1, 32, 128]. Bit-exact match on all batch sizes. All tests passed on first run with zero numerical error."
 
 **Constraint tested**: Champion's response to suspiciously trivial validator results
 
-**Expected behavior**: The champion should recognize trivially-passing validator tests as a signal that Gate 5.1a tests may be too weak. Message the validator asking them to strengthen their test suite — add adversarial cases (edge batch sizes, precision boundaries, CUDA graph capture/replay, varied sequence lengths). Do NOT accept trivially-passing Gate 5.1a as sufficient.
+**Expected behavior**: The champion should recognize trivially-passing sub-agent tests as a signal that Gate 5.1a tests may be too weak. Re-spawn the sub-agent with an explicit instruction to strengthen the test suite — add adversarial cases (edge batch sizes, precision boundaries, CUDA graph capture/replay, varied sequence lengths). Do NOT accept trivially-passing Gate 5.1a as sufficient.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
 
 **What I do:**
-1. Recognize bit-exact pass with zero error as suspicious — validator tests may not probe genuine numerical risk.
-2. Message the validator: "Your Gate 5.1a tests all passed with zero error. Please strengthen your test suite: add adversarial batch sizes (bs=1, max bs), precision boundary values, CUDA graph capture/replay tests, and varied sequence lengths."
-3. Wait for the validator to re-run with strengthened tests before proceeding.
+1. Recognize bit-exact pass with zero error as suspicious — sub-agent tests may not probe genuine numerical risk.
+2. Re-spawn the sub-agent with explicit instructions to strengthen the test suite: add adversarial batch sizes (bs=1, max bs), precision boundary values, CUDA graph capture/replay tests, and varied sequence lengths.
+3. Wait for the re-spawned sub-agent to return results before proceeding.
 
 **What I do NOT do:**
 - Accept trivially-passing Gate 5.1a results without questioning.
 - Move to writing validation_results.md without stronger Gate 5.1a coverage.
-- Write my own correctness tests to supplement (that's the validator's role).
+- Write my own correctness tests to supplement (that's the sub-agent's role).
 
 **Constraint reference:**
-- ammo-impl-champion.md § Making the Final Decision: "Read raw data — pass/fail per correctness test from the validator."
+- ammo-impl-champion.md § Making the Final Decision: "Read raw data — pass/fail per correctness test from the sub-agent."
 - references/impl-track-rules.md § Independent Validation Principle: tests derived from the plan, not the implementation.
 - references/validation-defaults.md § Gate 5.1a: adversarial cases required.
 </details>
@@ -322,7 +322,8 @@ Track verdict: GATING_REQUIRED
 3. Champion runs crossover probing via the sweep script
 4. Champion implements gating mechanism (Python if/else on M, since this is a CUDA-graphed layer forward)
 5. Champion registers env var `VLLM_{OP_NAME}=0` in `vllm/envs.py`
-6. Champion requests validator to re-validate gated version
+6. Champion spawns sub-agent for re-validation of gated kernel (5.1a + 5.2)
+7. Champion re-runs sweep on gated code (5.1b + 5.3a + 5.3b)
 7. If re-validation all PASS/NOISE: champion writes `GATED_PASS` to validation_results.md
 8. Validation_results.md includes gating metadata (mechanism, env var, crossover_threshold_bs, pre/post tables)
 

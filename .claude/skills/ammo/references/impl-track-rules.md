@@ -9,46 +9,47 @@ Agent-facing rules for Stages 4-5 parallel implementation tracks. Both the impl-
 | **Pure Python** (model code, Triton kernels, configs) | Edit, test, commit. **No rebuild.** | Immediate |
 | **C++ kernel** (csrc/ changes) | `cmake --preset release && cmake --build --preset release --target install` | ~5-55s (ccache) |
 
-Only the champion compiles. The validator never runs cmake. The validator only executes against committed, compiled code.
+Only the champion compiles. The kernel validation sub-agent never runs cmake — it only executes against committed, compiled code.
 
 ## Source Modification Rules
 
 - Only the champion modifies source files (`csrc/`, `vllm/`, etc.).
-- The validator reads files and writes to `{artifact_dir}/tracks/{op_id}/validator_prep/` only.
-- Champion has GPU priority. The validator coordinates via SendMessage before GPU-intensive work (ncu profiling, E2E sweeps). The champion signals when it needs the GPU.
+- The kernel validation sub-agent reads files and writes to `{artifact_dir}/tracks/{op_id}/validator_tests/` only.
+- The sub-agent runs sequentially before the champion's E2E sweep — no GPU coordination needed.
 
 ## Independent Validation Principle
 
-When validating, the validator writes its OWN correctness tests and benchmarks from the **optimization plan and debate summary** — not from the champion's scripts or implementation. This is the structural guarantee against reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation).
+The kernel validation sub-agent writes its OWN correctness tests and benchmarks from the **optimization plan and debate summary** — not from the champion's scripts or implementation. This is the structural guarantee against reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation).
 
-The validator can know everything about the codebase from its support work and still write unbiased validation tests, as long as tests are derived from what the optimization SHOULD do (the plan) rather than what it DOES do (the implementation).
+The sub-agent derives tests from what the optimization SHOULD do (the plan) rather than what it DOES do (the implementation).
 
-## Two Layers of Verification
+## Champion-Owned Validation
 
-Each track undergoes two layers of verification:
+The champion owns all Stage 5 validation, with a sub-agent for kernel-level gates:
 
 ```
-Layer 1: Independent Validator (Sonnet)
-  Writes OWN synthetic correctness tests (Gate 5.1a only)
-  Reports raw correctness results — no interpretation
+Kernel-Level (Sub-Agent):
+  Gate 5.1a: Independent kernel correctness tests
+  Gate 5.2: Kernel speedup benchmark under production parity
 
-Layer 2: Champion Review
-  Evaluates E2E results against min_e2e_improvement_pct threshold
-  Cross-checks Gate 5.2 numbers against own smoke-test
+E2E-Level (Champion):
+  Gate 5.1b: Sweep --verify-correctness
+  Gate 5.3a: Sweep --nsys-profile (kernel proof)
+  Gate 5.3b: Sweep E2E latency (per-BS verdicts)
   Writes final validation_results.md with evidence chain
 ```
 
 ## Handling Validation Failures
 
-When the validator reports a gate failure:
+When the kernel validation sub-agent returns a gate failure:
 
-1. Validator reports failure details to champion (SendMessage with full error context)
+1. Sub-agent returns failure details to champion (via Agent tool return value)
 2. Champion diagnoses root cause
-3. Champion fixes implementation, recompiles if needed, commits
-4. Champion messages validator directly for re-validation with new commit SHA
-5. Validator re-runs Gate 5.1a from scratch with fresh independent tests
+3. Champion fixes implementation, recompiles if needed
+4. Champion completes Self-Validation Gate checklist (root cause reasoning, smoke test, fix-attempt counter)
+5. Champion commits and spawns a fresh kernel validation sub-agent for re-validation
 
-The validator writes new tests each re-validation cycle — the champion cannot "fix" by influencing the test methodology.
+Each sub-agent invocation is independent — the champion cannot "fix" by influencing the test methodology.
 
 ## GATING_REQUIRED Workflow
 
@@ -56,16 +57,16 @@ The validator writes new tests each re-validation cycle — the champion cannot 
 
 When per-BS verdicts show mixed results (some PASS + some REGRESSED), the track enters GATING_REQUIRED:
 
-1. Validator reports per-BS verdict table to champion
+1. Sweep reports per-BS verdict table showing mixed results
 2. Champion evaluates gating feasibility (is the dispatch site compatible with a gating mechanism?)
-3. If feasible: champion requests validator to run crossover probing benchmarks
-4. Validator runs kernel sweep + E2E confirmation per `crossover-probing.md`, reports probe results
+3. If feasible: champion spawns sub-agent for crossover probing benchmarks
+4. Sub-agent runs kernel sweep + E2E confirmation per `crossover-probing.md`, returns probe results
 5. Champion implements gating mechanism per `code-templates.md` dispatch decision tree
 6. Champion registers env var in `vllm/envs.py`: `VLLM_{OP_NAME}=0`
 7. Champion commits gated implementation
-8. Champion requests validator to re-validate gated version
-9. Validator re-validates at all BS — all must be PASS or NOISE
-10. If re-validation passes: verdict = `GATED_PASS`. If fails: verdict = `FAIL`.
+8. Champion spawns sub-agent for re-validation of gated kernel (5.1a + 5.2)
+9. Champion re-runs sweep on gated code (5.1b + 5.3a + 5.3b) — all BS must be PASS or NOISE
+10. If both kernel re-validation and sweep pass: verdict = `GATED_PASS`. If either fails: verdict = `FAIL`.
 
 One gating attempt per track — no nested gating. The validator runs benchmarks and reports results but does NOT implement gating code.
 

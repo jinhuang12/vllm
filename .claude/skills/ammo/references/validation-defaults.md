@@ -248,7 +248,7 @@ Cost: ~85s (4B/L40S), ~4.5 min (70B/8xH100).
 
 ### Gate 5.3b: E2E Measurement Sweep
 
-Run E2E under identical knobs and capture/compile settings. **Only runs after Gate 5.3a passes.**
+Run E2E under identical knobs and capture/compile settings. **Gate 5.3b latency results are only VALID if Gate 5.3a passes** — if the optimized kernel is not found in the nsys trace, E2E numbers are inadmissible.
 
 Default iteration counts:
 - **Profiling** (Stage 1): `--num-iters 1` (keep traces small)
@@ -277,13 +277,14 @@ Thresholds from `target.json` gating block (defaults: `noise_tolerance_pct: 0.5`
 ### GATING_REQUIRED Workflow
 
 When the track verdict is `GATING_REQUIRED`:
-1. Validator reports per-BS verdict table to champion
+1. Sweep reports per-BS verdict table showing mixed results (some PASS + some REGRESSED)
 2. Champion evaluates gating feasibility
-3. Champion requests validator to run crossover probing (see `references/crossover-probing.md`)
+3. Champion spawns sub-agent for crossover probing (see `references/crossover-probing.md`)
 4. Champion implements gating mechanism per `references/code-templates.md` dispatch decision tree
-5. Validator re-validates gated version — all BS must be PASS or NOISE
-6. If re-validation passes: track status = `GATED_PASS`
-7. If re-validation fails or gating infeasible: track status = `FAIL` (one gating attempt per track)
+5. Champion spawns sub-agent for re-validation of gated kernel (5.1a + 5.2)
+6. Champion re-runs sweep on gated code (`--labels opt --verify-correctness --nsys-profile --baseline-from $STAGE1_DIR`) — all BS must be PASS or NOISE
+7. If both kernel re-validation and sweep pass: track status = `GATED_PASS`
+8. If either fails or gating infeasible: track status = `FAIL` (one gating attempt per track)
 
 Target batch sizes are defined in `target.json`. Use `references/e2e-delta-math.md` to set realistic expectations for E2E delta given component share `f`.
 
