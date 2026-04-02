@@ -1,3 +1,6 @@
+> **DEPRECATED (2026-04-01)**: This design was superseded by the Gate 5.1b Redesign.
+> See `docs/superpowers/specs/2026-04-01-gate-5-1b-redesign-design.md` for the current design.
+
 # Tensor Capture Gate Design (v3)
 
 **Date**: 2026-03-27

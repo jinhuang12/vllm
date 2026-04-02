@@ -82,7 +82,7 @@ Read as needed from `.claude/skills/ammo/references/`. Your spawning champion wi
 | `debate-scoring-rubric.md` | Scoring criteria for debate proposals |
 | `crossover-probing.md` | Crossover point analysis for gating decisions |
 | `validator-troubleshooting.md` | Common validation issues and investigation playbook |
-| `kernel-benchmark-template.py` | Benchmark script template |
+| `kernel-benchmark-template.py` | Benchmark script template (champion-owned, Gate 5.2 — not validator-directed) |
 
 ## Output
 

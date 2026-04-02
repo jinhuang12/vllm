@@ -93,6 +93,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import ast
 
 
 PLACEHOLDER = "<FILL_ME>"
@@ -570,6 +571,254 @@ def _build_cli_equivalent_args_for_inproc(
     return base + (extra_args or [])
 
 
+# ---- GSM8K helpers (adapted from tests/evals/gsm8k/gsm8k_eval.py) ----
+
+_GSM8K_SUBSET_PATH = Path(__file__).parent.parent / "data" / "gsm8k_subset.json"
+_INVALID_ANSWER = -9999999
+
+
+def _download_and_cache_file(url: str, filename: str | None = None) -> str:
+    import requests as _requests_mod  # Lazy: only needed for >30 question fallback
+    if filename is None:
+        filename = os.path.join("/tmp", url.split("/")[-1])
+    if os.path.exists(filename):
+        return filename
+    print(f"Downloading from {url} to {filename}")
+    response = _requests_mod.get(url, stream=True)
+    response.raise_for_status()
+    with open(filename, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024):
+            f.write(chunk)
+    return filename
+
+
+def _read_jsonl(filename: str):
+    with open(filename) as fin:
+        for line in fin:
+            if not line.startswith("#"):
+                yield json.loads(line)
+
+
+def _load_gsm8k_data(num_questions: int) -> Tuple[List[dict], List[dict]]:
+    """Load GSM8K data — bundled subset first, GitHub fallback if needed."""
+    if num_questions <= 30 and _GSM8K_SUBSET_PATH.exists():
+        with open(_GSM8K_SUBSET_PATH) as f:
+            data = json.load(f)
+        return data["train"], data["test"][:num_questions]
+    # Fallback to full download
+    train_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl"
+    test_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
+    train_file = _download_and_cache_file(train_url)
+    test_file = _download_and_cache_file(test_url)
+    return list(_read_jsonl(train_file)), list(_read_jsonl(test_file))
+
+
+def _get_answer_value(answer_str: str) -> int:
+    answer_str = answer_str.replace(",", "")
+    numbers = re.findall(r"\d+", answer_str)
+    if len(numbers) < 1:
+        return _INVALID_ANSWER
+    try:
+        return ast.literal_eval(numbers[-1])
+    except SyntaxError:
+        return _INVALID_ANSWER
+
+
+def _build_gsm8k_prompts(
+    num_questions: int = 30, num_shots: int = 5
+) -> Tuple[List[str], List[int]]:
+    """Build few-shot GSM8K prompts and ground-truth labels."""
+    if num_questions == 0:
+        return [], []
+    train_data, test_data = _load_gsm8k_data(num_questions)
+    num_questions = min(num_questions, len(test_data))
+    few_shot_examples = ""
+    for i in range(min(num_shots, len(train_data))):
+        few_shot_examples += (
+            f"Question: {train_data[i]['question']}\n"
+            f"Answer: {train_data[i]['answer']}\n\n"
+        )
+    prompts, labels = [], []
+    for i in range(num_questions):
+        prompts.append(few_shot_examples + f"Question: {test_data[i]['question']}\nAnswer:")
+        labels.append(_get_answer_value(test_data[i]["answer"]))
+    assert all(label != _INVALID_ANSWER for label in labels), "Some labels are invalid"
+    return prompts, labels
+
+
+def _serialize_correctness_outputs(outputs) -> List[Dict[str, Any]]:
+    """Serialize vLLM RequestOutput objects to JSON-safe dicts."""
+    serialized = []
+    for i, req_output in enumerate(outputs):
+        comp = req_output.outputs[0]
+        token_ids = list(comp.token_ids)
+        logprobs_list = []
+        if comp.logprobs is not None:
+            for pos_logprobs in comp.logprobs:
+                top_lps = {str(tid): lp.logprob for tid, lp in pos_logprobs.items()}
+                logprobs_list.append({"top_logprobs": top_lps})
+        serialized.append({
+            "prompt_index": i,
+            "token_ids": token_ids,
+            "text": comp.text,
+            "logprobs": logprobs_list,
+            "num_tokens": len(token_ids),
+        })
+    return serialized
+
+
+def _score_gsm8k_predictions(outputs, labels: List[int]) -> Tuple[List[int], float]:
+    """Score GSM8K outputs. Returns (predictions_list, accuracy)."""
+    preds = []
+    for req_output in outputs:
+        text = req_output.outputs[0].text
+        preds.append(_get_answer_value(text))
+    correct = sum(1 for p, l in zip(preds, labels) if p == l)
+    accuracy = correct / len(labels) if labels else 0.0
+    return preds, accuracy
+
+
+def _compare_correctness(
+    *,
+    golden_refs: List[Dict[str, Any]],
+    opt_outputs: List[Dict[str, Any]],
+    mode: str,
+    max_divergent_positions: int,
+    max_topk_failures_pct: float,
+    labels: Optional[List[int]],
+    baseline_preds: Optional[List[int]],
+    opt_preds: Optional[List[int]],
+) -> Dict[str, Any]:
+    """Compare optimized outputs against golden references."""
+    num_questions = min(len(golden_refs), len(opt_outputs))
+    per_question = []
+
+    # ---- Accuracy gate (computed for both modes) ----
+    accuracy_gate: Dict[str, Any] = {"enabled": False}
+    if labels is not None and baseline_preds is not None and opt_preds is not None:
+        # Truncate to shortest list to avoid false failures from mismatched question counts.
+        n = min(len(labels), len(baseline_preds), len(opt_preds))
+        labels_t, baseline_preds_t, opt_preds_t = labels[:n], baseline_preds[:n], opt_preds[:n]
+        baseline_correct = {i for i, (p, l) in enumerate(zip(baseline_preds_t, labels_t)) if p == l}
+        opt_correct = {i for i, (p, l) in enumerate(zip(opt_preds_t, labels_t)) if p == l}
+        lost = sorted(baseline_correct - opt_correct)
+        gained = sorted(opt_correct - baseline_correct)
+        bl_acc = len(baseline_correct) / n if n else 0.0
+        op_acc = len(opt_correct) / n if n else 0.0
+        is_hard_gate = mode == "topk_relaxed"
+        accuracy_gate = {
+            "enabled": True,
+            "baseline_accuracy": round(bl_acc, 4),
+            "baseline_correct_indices": sorted(baseline_correct),
+            "optimized_accuracy": round(op_acc, 4),
+            "optimized_correct_indices": sorted(opt_correct),
+            "lost_questions": lost,
+            "gained_questions": gained,
+            "verdict": "FAIL" if (is_hard_gate and len(lost) > 0) else ("PASS" if is_hard_gate else "INFO"),
+        }
+
+    if mode == "exact_greedy":
+        total_divergent = 0
+        total_positions = 0
+        first_divergence = None
+        for q in range(num_questions):
+            b_ids = golden_refs[q]["token_ids"]
+            o_ids = opt_outputs[q]["token_ids"]
+            min_len = min(len(b_ids), len(o_ids))
+            divergent = sum(1 for p in range(min_len) if b_ids[p] != o_ids[p])
+            first_div = next((p for p in range(min_len) if b_ids[p] != o_ids[p]), -1)
+            divergent += abs(len(b_ids) - len(o_ids))
+            total_divergent += divergent
+            total_positions += max(len(b_ids), len(o_ids))
+            per_question.append({
+                "idx": q, "baseline_tokens": len(b_ids), "opt_tokens": len(o_ids),
+                "divergent": divergent, "first_divergence_pos": first_div,
+            })
+            if first_divergence is None and first_div >= 0:
+                first_divergence = {"question_idx": q, "position": first_div,
+                                     "baseline_token": b_ids[first_div], "opt_token": o_ids[first_div]}
+        if total_positions == 0:
+            verdict = "FAIL"  # All questions produced empty output
+        else:
+            verdict = "PASS" if total_divergent <= max_divergent_positions else "FAIL"
+        result = {
+            "gate": "5.1b", "verdict": verdict, "mode": "exact_greedy",
+            "num_questions": num_questions, "total_positions": total_positions,
+            "divergent_positions": total_divergent, "threshold": max_divergent_positions,
+            "per_question_summary": per_question, "gsm8k_accuracy_gate": accuracy_gate,
+        }
+        if verdict == "FAIL" and first_divergence:
+            result["diagnostics"] = {"first_divergence": first_divergence,
+                                      "divergence_summary": f"{sum(1 for pq in per_question if pq['divergent'] > 0)} of {num_questions} questions diverged"}
+        return result
+
+    elif mode == "topk_relaxed":
+        total_positions = 0
+        containment_failures = 0
+        empty_output_count = 0
+        first_failure = None
+        for q in range(num_questions):
+            b = golden_refs[q]
+            o = opt_outputs[q]
+            b_len = len(b["token_ids"])
+            o_len = len(o["token_ids"])
+            if b_len == 0 and o_len == 0:
+                empty_output_count += 1
+                per_question.append({"idx": q, "baseline_tokens": 0, "opt_tokens": 0, "containment_failures": 0})
+                continue
+            min_len = min(b_len, o_len)
+            max_len = max(b_len, o_len)
+            q_failures = 0
+            for pos in range(min_len):
+                total_positions += 1
+                b_topk = {int(k) for k in b["logprobs"][pos]["top_logprobs"]}
+                o_topk = {int(k) for k in o["logprobs"][pos]["top_logprobs"]}
+                b_token = b["token_ids"][pos]
+                o_token = o["token_ids"][pos]
+                if o_token not in b_topk or b_token not in o_topk:
+                    containment_failures += 1
+                    q_failures += 1
+                    if first_failure is None:
+                        first_failure = {"question_idx": q, "position": pos,
+                                          "baseline_token": b_token, "opt_token": o_token,
+                                          "baseline_top5": dict(b["logprobs"][pos]["top_logprobs"]),
+                                          "opt_top5": dict(o["logprobs"][pos]["top_logprobs"])}
+            length_penalty = max_len - min_len
+            total_positions += length_penalty
+            containment_failures += length_penalty
+            per_question.append({"idx": q, "baseline_tokens": b_len, "opt_tokens": o_len, "containment_failures": q_failures + length_penalty})
+
+        if empty_output_count > num_questions * 0.1:
+            print(f"[correctness] WARNING: {empty_output_count}/{num_questions} questions produced empty output")
+        if total_positions == 0:
+            verdict = "FAIL"
+            failure_rate = 0.0
+        else:
+            failure_rate = containment_failures / total_positions * 100
+            verdict = "PASS" if failure_rate <= max_topk_failures_pct else "FAIL"
+
+        # Accuracy gate can override to FAIL even if token-level passes
+        if verdict == "PASS" and accuracy_gate.get("verdict") == "FAIL":
+            verdict = "FAIL"
+
+        result = {
+            "gate": "5.1b", "verdict": verdict, "mode": "topk_relaxed",
+            "num_questions": num_questions, "total_positions": total_positions,
+            "containment_failures": containment_failures,
+            "failure_rate_pct": round(failure_rate, 4), "threshold_pct": max_topk_failures_pct,
+            "empty_output_count": empty_output_count,
+            "per_question_summary": per_question, "gsm8k_accuracy_gate": accuracy_gate,
+        }
+        if verdict == "FAIL" and first_failure:
+            result["diagnostics"] = {"first_divergence": first_failure,
+                                      "divergence_summary": f"{containment_failures} containment failures across {total_positions} positions ({failure_rate:.1f}%)",
+                                      "length_mismatches": sum(1 for pq in per_question if pq.get("baseline_tokens", 0) != pq.get("opt_tokens", 0)),
+                                      "empty_outputs": empty_output_count}
+        return result
+    else:
+        raise ValueError(f"Unknown correctness mode: {mode}")
+
+
 def _run_inproc_latency_sweep_child(
     *,
     label: str,
@@ -582,6 +831,12 @@ def _run_inproc_latency_sweep_child(
     out_root: Path,
     timeout_s_per_bucket: int,
     nsys_profile: bool = False,
+    capture_golden_refs: bool = False,
+    verify_correctness: bool = False,
+    correctness_mode: str = "exact_greedy",
+    correctness_num_questions: int = 30,
+    max_divergent_positions: int = 0,
+    max_topk_failures_pct: float = 5.0,
 ) -> int:
     """Child-mode runner: load model once, benchmark all buckets.
 
@@ -687,6 +942,110 @@ def _run_inproc_latency_sweep_child(
             ea_dict[_cfg_key] = {k: v for k, v in ea_dict[_cfg_key].items() if v is not None}
     llm = LLM(**ea_dict)
     _update_status("model_loaded")
+
+    # ---- Phase 1: Correctness (GSM8K greedy decode) ----
+    if capture_golden_refs or verify_correctness:
+        import torch
+        from vllm import SamplingParams as _CorrectnessSP
+        _update_status("correctness_phase_start")
+        json_dir = out_root / "json"
+        json_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            prompts, gsm8k_labels = _build_gsm8k_prompts(num_questions=correctness_num_questions)
+            correctness_sp = _CorrectnessSP(
+                temperature=0.0, max_tokens=256,
+                stop=["Question", "Assistant:", "<|separator|>"],
+                seed=42, logprobs=5,
+            )
+            print(f"[correctness] Running GSM8K greedy decode: {len(prompts)} questions")
+            t0 = time.time()
+            outputs = llm.generate(prompts, sampling_params=correctness_sp, use_tqdm=False)
+            duration = time.time() - t0
+            print(f"[correctness] Generation done in {duration:.1f}s")
+
+            serialized = _serialize_correctness_outputs(outputs)
+            preds, accuracy = _score_gsm8k_predictions(outputs, gsm8k_labels)
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"
+
+            if capture_golden_refs:
+                # Self-consistency check: run prompts a second time
+                print("[correctness] Running self-consistency check...")
+                outputs2 = llm.generate(prompts, sampling_params=correctness_sp, use_tqdm=False)
+                serialized2 = _serialize_correctness_outputs(outputs2)
+                deterministic = all(
+                    s1["token_ids"] == s2["token_ids"]
+                    for s1, s2 in zip(serialized, serialized2)
+                )
+                if not deterministic:
+                    print("[correctness] WARNING: Self-consistency check FAILED — environment is non-deterministic.")
+                    print("[correctness] Recommended mode for Stage 5: topk_relaxed")
+                else:
+                    print("[correctness] Self-consistency check PASSED — greedy decode is deterministic.")
+
+                golden_data = {
+                    "metadata": {
+                        "num_questions": len(prompts), "num_shots": 5, "max_tokens": 256,
+                        "seed": 42, "logprobs_k": 5, "gsm8k_accuracy": round(accuracy, 4),
+                        "capture_duration_s": round(duration, 2), "gpu_name": gpu_name,
+                        "deterministic": deterministic,
+                        "baseline_preds": preds, "labels": gsm8k_labels,
+                    },
+                    "outputs": serialized,
+                }
+                golden_path = json_dir / "golden_refs.json"
+                _write_json(golden_path, golden_data)
+                print(f"[correctness] Golden refs saved to {golden_path}")
+                _update_status("correctness_done", extra={"accuracy": accuracy, "deterministic": deterministic})
+
+            if verify_correctness:
+                golden_path = json_dir / "golden_refs.json"
+                if not golden_path.exists():
+                    print(f"[correctness] ERROR: golden_refs.json not found at {golden_path}")
+                    _update_status("correctness_error", extra={"error": "golden_refs.json not found"})
+                    return 4
+                golden_data = json.loads(golden_path.read_text(encoding="utf-8"))
+                golden_refs = golden_data["outputs"]
+                golden_meta = golden_data.get("metadata", {})
+                baseline_preds = golden_meta.get("baseline_preds")
+                golden_labels = golden_meta.get("labels")
+
+                # GPU name mismatch warning
+                golden_gpu = golden_meta.get("gpu_name", "")
+                if golden_gpu and golden_gpu != gpu_name:
+                    print(f"[correctness] WARNING: GPU mismatch — golden refs captured on '{golden_gpu}', current GPU is '{gpu_name}'")
+
+                # Save opt outputs
+                opt_path = json_dir / "opt_outputs.json"
+                _write_json(opt_path, {"outputs": serialized})
+
+                # Run comparator
+                verdict = _compare_correctness(
+                    golden_refs=golden_refs, opt_outputs=serialized,
+                    mode=correctness_mode,
+                    max_divergent_positions=max_divergent_positions,
+                    max_topk_failures_pct=max_topk_failures_pct,
+                    labels=golden_labels, baseline_preds=baseline_preds, opt_preds=preds,
+                )
+                verdict["gsm8k_accuracy_baseline"] = golden_meta.get("gsm8k_accuracy")
+                verdict["gsm8k_accuracy_optimized"] = round(accuracy, 4)
+                verdict["duration_s"] = round(duration, 2)
+
+                verdict_path = json_dir / "correctness_verdict.json"
+                _write_json(verdict_path, verdict)
+                print(f"[correctness] Verdict: {verdict['verdict']}")
+                print(f"[correctness] Written to {verdict_path}")
+
+                if verdict["verdict"] != "PASS":
+                    _update_status("correctness_failed", extra=verdict)
+                    return 3  # Correctness FAIL — don't proceed to latency
+                _update_status("correctness_done", extra=verdict)
+
+        except Exception as e:
+            print(f"[correctness] ERROR: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            _update_status("correctness_error", extra={"error": str(e)})
+            return 4  # Infrastructure error
+    # ---- End Phase 1 ----
 
     for bucket in buckets:
         b_input_len = bucket["input_len"]
@@ -1016,12 +1375,31 @@ def main() -> None:
             "When omitted with '--labels opt', results are flagged with a warning."
         ),
     )
+    p.add_argument("--capture-golden-refs", action="store_true", default=False,
+                   help="Stage 1: run GSM8K greedy decode and save golden refs to json/golden_refs.json")
+    p.add_argument("--verify-correctness", action="store_true", default=False,
+                   help="Stage 5: compare GSM8K outputs against golden refs; exit nonzero on mismatch")
+    p.add_argument("--correctness-mode", type=str, default="exact_greedy",
+                   choices=["exact_greedy", "topk_relaxed"],
+                   help="Comparator mode for --verify-correctness (default: exact_greedy)")
+    p.add_argument("--correctness-num-questions", type=int, default=30,
+                   help="Number of GSM8K questions for correctness phase (default: 30)")
+    p.add_argument("--max-divergent-positions", type=int, default=0,
+                   help="(exact_greedy) max allowed token mismatches (default: 0)")
+    p.add_argument("--max-topk-failures-pct", type=float, default=5.0,
+                   help="(topk_relaxed) max pct of positions failing top-K containment (default: 5.0)")
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_cudagraph-capture-sizes", nargs="+", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-output-len", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-num-iters", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_capture-golden-refs", action="store_true", default=False, help=argparse.SUPPRESS)
+    p.add_argument("--_verify-correctness", action="store_true", default=False, help=argparse.SUPPRESS)
+    p.add_argument("--_correctness-mode", type=str, default="exact_greedy", help=argparse.SUPPRESS)
+    p.add_argument("--_correctness-num-questions", type=int, default=30, help=argparse.SUPPRESS)
+    p.add_argument("--_max-divergent-positions", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--_max-topk-failures-pct", type=float, default=5.0, help=argparse.SUPPRESS)
 
     args = p.parse_args()
 
@@ -1052,6 +1430,12 @@ def main() -> None:
         raise SystemExit(
             f"--nsys-num-iters must be positive, got {args.nsys_num_iters}"
         )
+
+    # Validate correctness flag constraints.
+    if args.capture_golden_refs and args.verify_correctness:
+        raise SystemExit("--capture-golden-refs and --verify-correctness are mutually exclusive")
+    if args.verify_correctness and not args.baseline_from:
+        raise SystemExit("--verify-correctness requires --baseline-from (to import golden_refs.json)")
 
     # Parse and validate --labels.
     selected_labels = {s.strip() for s in args.labels.split(",")}
@@ -1465,6 +1849,12 @@ def main() -> None:
             out_root=out_root,
             timeout_s_per_bucket=args.timeout_s,
             nsys_profile=getattr(args, "_nsys_profile", False),
+            capture_golden_refs=getattr(args, "_capture_golden_refs", False),
+            verify_correctness=getattr(args, "_verify_correctness", False),
+            correctness_mode=getattr(args, "_correctness_mode", "exact_greedy"),
+            correctness_num_questions=getattr(args, "_correctness_num_questions", 30),
+            max_divergent_positions=getattr(args, "_max_divergent_positions", 0),
+            max_topk_failures_pct=getattr(args, "_max_topk_failures_pct", 5.0),
         )
         raise SystemExit(returncode)
 
@@ -1504,6 +1894,19 @@ def main() -> None:
     if "opt" in selected_labels:
         runs_to_execute.append(opt_run)
 
+    # Copy golden refs BEFORE spawning children — children need it during Phase 1.
+    if baseline_from and args.verify_correctness:
+        golden_src = baseline_from / "json" / "golden_refs.json"
+        golden_dst = json_dir / "golden_refs.json"
+        if golden_src.exists():
+            shutil.copy2(str(golden_src), str(golden_dst))
+            print(f"Imported golden references from {golden_src}")
+        else:
+            raise SystemExit(
+                f"--verify-correctness requires golden_refs.json but "
+                f"--baseline-from has none at {golden_src}"
+            )
+
     for run in runs_to_execute:
         child_cmd = [
             sys.executable,
@@ -1536,6 +1939,17 @@ def main() -> None:
                 child_cmd.extend(["--_nsys-output-len", str(nsys_ol)])
             if nsys_ni is not None:
                 child_cmd.extend(["--_nsys-num-iters", str(nsys_ni)])
+
+        # Forward correctness flags to child.
+        if args.capture_golden_refs:
+            child_cmd.append("--_capture-golden-refs")
+        if args.verify_correctness:
+            child_cmd.extend(["--_verify-correctness",
+                              "--_correctness-mode", args.correctness_mode,
+                              "--_max-divergent-positions", str(args.max_divergent_positions),
+                              "--_max-topk-failures-pct", str(args.max_topk_failures_pct)])
+        if args.correctness_num_questions != 30:
+            child_cmd.extend(["--_correctness-num-questions", str(args.correctness_num_questions)])
 
         # Prepend nsys wrapper when profiling.
         child_env = dict(run.env) if run.env else dict(os.environ)

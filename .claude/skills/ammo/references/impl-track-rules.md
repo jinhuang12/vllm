@@ -23,24 +23,19 @@ When validating, the validator writes its OWN correctness tests and benchmarks f
 
 The validator can know everything about the codebase from its support work and still write unbiased validation tests, as long as tests are derived from what the optimization SHOULD do (the plan) rather than what it DOES do (the implementation).
 
-## Three Layers of Verification
+## Two Layers of Verification
 
-Each track undergoes three layers of verification:
+Each track undergoes two layers of verification:
 
 ```
-Layer 1: Independent Validator
-  Writes OWN correctness tests, OWN benchmark scripts, runs E2E sweep
-  Reports raw timings (Gates 5.1/5.2) and mechanical per-BS verdicts (Gate 5.3)
+Layer 1: Independent Validator (Sonnet)
+  Writes OWN synthetic correctness tests (Gate 5.1a only)
+  Reports raw correctness results — no interpretation
 
 Layer 2: Champion Review
   Evaluates E2E results against min_e2e_improvement_pct threshold
   Cross-checks Gate 5.2 numbers against own smoke-test
   Writes final validation_results.md with evidence chain
-
-Layer 3: DA Stop Hook (frontmatter on champion)
-  Fires when champion attempts to stop
-  Audits validation_results.md: completeness, Amdahl's consistency,
-  production parity, independent validation existence, benchmark cross-check
 ```
 
 ## Handling Validation Failures
@@ -51,11 +46,13 @@ When the validator reports a gate failure:
 2. Champion diagnoses root cause
 3. Champion fixes implementation, recompiles if needed, commits
 4. Champion messages validator directly for re-validation with new commit SHA
-5. Validator re-runs ALL gates from scratch with fresh independent tests
+5. Validator re-runs Gate 5.1a from scratch with fresh independent tests
 
 The validator writes new tests each re-validation cycle — the champion cannot "fix" by influencing the test methodology.
 
 ## GATING_REQUIRED Workflow
+
+> **This is the canonical definition.** Other files reference this section.
 
 When per-BS verdicts show mixed results (some PASS + some REGRESSED), the track enters GATING_REQUIRED:
 
@@ -64,11 +61,11 @@ When per-BS verdicts show mixed results (some PASS + some REGRESSED), the track 
 3. If feasible: champion requests validator to run crossover probing benchmarks
 4. Validator runs kernel sweep + E2E confirmation per `crossover-probing.md`, reports probe results
 5. Champion implements gating mechanism per `code-templates.md` dispatch decision tree
-6. Champion registers env var in `vllm/envs.py`: `VLLM_{OP_NAME}=1`
+6. Champion registers env var in `vllm/envs.py`: `VLLM_{OP_NAME}=0`
 7. Champion commits gated implementation
 8. Champion requests validator to re-validate gated version
 9. Validator re-validates at all BS — all must be PASS or NOISE
-10. If re-validation passes: determination = `GATED_PASS`. If fails: determination = `FAIL`.
+10. If re-validation passes: verdict = `GATED_PASS`. If fails: verdict = `FAIL`.
 
 One gating attempt per track — no nested gating. The validator runs benchmarks and reports results but does NOT implement gating code.
 

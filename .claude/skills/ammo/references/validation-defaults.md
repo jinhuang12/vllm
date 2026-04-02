@@ -195,38 +195,30 @@ Also require:
 - shape/stride parity
 - deterministic indexing for routing and pair ordering (when required by baseline)
 
-### Gate 5.1b: Baseline tensor comparison (HARD GATE)
+### Gate 5.1b: E2E Greedy Decode Correctness (HARD GATE)
 
-**Gate 5.1b is a hard gate.** Missing baseline tensors without a valid N/A justification will FAIL the track. This is not advisory — the validator will block the track from passing.
+**Gate 5.1b is a hard gate.** Correctness failure blocks the track from proceeding to latency benchmarks.
 
-Component-level output comparison using `torch.allclose` semantics: `|baseline - optimized| <= atol + rtol * |baseline|`
+**Owner**: Champion via sweep script (deterministic — no validator involvement).
 
-| Dtype | atol | rtol |
-|-------|------|------|
-| FP32  | 1e-5 | 1e-4 |
-| FP16  | 1e-3 | 1e-2 |
-| BF16  | 1e-2 | 1e-1 |
-| FP8 (E4M3) | 5e-1 | 5e-1 |
+**Mechanism**: The sweep script’s Phase 1 runs GSM8K greedy decode with `logprobs=5`, comparing optimized outputs against golden refs captured in Stage 1.
 
-The baseline is captured by the impl-champion’s delegate BEFORE implementation, using the higher-level model-specific component (e.g., `Llama4MoE`) instantiated with random weights. The validator loads the baseline `state_dict` into the optimized module with `strict=False` and compares outputs. This catches integration bugs like missing bias computation that synthetic kernel tests miss.
+**Invocation**:
+- Stage 1 (capture): `--capture-golden-refs` → saves `json/golden_refs.json`
+- Stage 5 (verify): `--verify-correctness --baseline-from $STAGE1_DIR` → writes `json/correctness_verdict.json`
 
-Templates: `references/tensor-capture-template.py` (capture), `references/tensor-compare-template.py` (compare). The delegate and validator adapt these templates for the specific component — each writes a concrete script tailored to the module’s constructor and forward signature.
+**Two modes** (selected via `--correctness-mode`):
 
-#### N/A Escape (documented justification required)
+| Mode | Default for | Gate logic |
+|------|-------------|------------|
+| `exact_greedy` | BF16/non-quantization tracks | Every token must match. `--max-divergent-positions 0` by default. |
+| `topk_relaxed` | FP8/quantization tracks | Bidirectional top-5 containment. `--max-topk-failures-pct 5.0` by default. Length mismatches count as failures. |
 
-Some modules cannot be captured standalone because their `forward()` depends on runtime infrastructure that cannot be provided outside the full engine (e.g., `attn_metadata`, `ForwardContext`, `kv_cache` state pools). These modules silently no-op or return zeros when the infrastructure is absent, making standalone capture produce meaningless data.
+**GSM8K accuracy gate** (quantization tracks only): The optimized model cannot get ANY question wrong that the baseline got correct ("zero questions lost"). This is a superset check, not a percentage threshold. Enabled automatically when `--correctness-mode topk_relaxed`.
 
-If capture is impossible, the champion’s delegate MUST write `{artifact_dir}/tracks/{op_id}/baseline_tensors/NOT_APPLICABLE.md` containing:
-1. Module class and import path
-2. The **specific** infrastructure dependency preventing standalone capture (e.g., "`_forward_core()` returns early when `attn_metadata is None` at line N")
-3. Which gates provide alternative correctness coverage (typically Gate 5.1a synthetic tests + Gate 5.3b E2E)
+**Self-consistency check** (Stage 1 only): Golden ref capture runs prompts twice to verify greedy decode is deterministic. If non-deterministic, metadata records `deterministic: false` and recommends `topk_relaxed` for Stage 5.
 
-The validator verifies the justification names a concrete dependency — vague justifications like "too complex" are rejected.
-
-**Known N/A-eligible module patterns:**
-- Modules with `get_forward_context()` → `attn_metadata` early-return guards (e.g., `Qwen3_5GatedDeltaNet`, recurrent state kernels)
-- Attention modules requiring populated `kv_cache` and `attn_metadata` for meaningful output
-- Modules registered in `static_forward_context` that need layer-specific runtime state
+**Exit codes**: 3 = correctness FAIL (real divergence), 4 = infrastructure error (retry).
 
 ## Default kernel perf gate (Stage 5.2)
 
@@ -245,20 +237,12 @@ Reporting requirements:
 
 ### Gate 5.3a: Kernel Execution Proof (NON-NEGOTIABLE)
 
-Before the E2E measurement sweep, the validator runs a minimal nsys-profiled run to confirm the optimized kernel actually dispatches under production conditions (CUDA graphs + torch.compile).
+Gate 5.3a is verified as part of the **same sweep run** as Gates 5.1b and 5.3b — add `--nsys-profile` to the main sweep command. Do NOT run a separate sweep for kernel proof.
 
-```bash
-python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
-  --artifact-dir {artifact_dir} --labels opt \
-  --nsys-profile --nsys-output-len 2 --nsys-num-iters 1 \
-  --out-name kernel_proof
-```
+After the sweep completes, verify via `nsys stats --report cuda_gpu_kern_sum` that the expected kernel name appears in the GPU trace at `{artifact_dir}/e2e_latency/nsys/`.
 
-Then verifies via `nsys stats --report cuda_gpu_kern_sum` that the expected kernel name (provided by champion) appears in the GPU trace.
-
-- **If kernel found**: PASS. Proceed to Gate 5.3b.
-- **If kernel NOT found**: FAIL. Do NOT run Gate 5.3b. E2E results would be inadmissible — the optimization is not activating.
-- **Latency numbers from this run are INVALID** (nsys overhead). Only the `.nsys-rep` trace matters.
+- **If kernel found**: PASS.
+- **If kernel NOT found**: FAIL. The optimization is not activating — latency numbers are inadmissible.
 
 Cost: ~85s (4B/L40S), ~4.5 min (70B/8xH100).
 

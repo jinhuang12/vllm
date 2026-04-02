@@ -1,16 +1,17 @@
-# ammo-implementer Conformance Tests
+# ammo-impl-champion Conformance Tests
 
-Role-boundary and constraint tests for the `ammo-implementer` subagent. Verifies the agent understands baseline reuse rules, production parity, sweep script mandate, scope adherence, Amdahl's Law, build rules, cross-track contamination, and output path compliance.
+Role-boundary and constraint tests for the `ammo-impl-champion` subagent. Verifies the agent understands baseline reuse rules, production parity, sweep script mandate, scope adherence, Amdahl's Law, build rules, cross-track contamination, and output path compliance.
 
 ## How to Run
 
 ```
-Run the AMMO implementer conformance tests. Spawn a Sonnet subagent that:
-1. Reads .claude/agents/ammo-implementer.md
-2. Reads .claude/skills/ammo/SKILL.md (Stages 4-5, Non-Negotiables)
-3. Reads .claude/skills/ammo/orchestration/parallel-tracks.md
-4. Role-plays AS the ammo-implementer
-5. For each scenario in .claude/skills/ammo/tests/agents/test-implementer.md,
+Run the AMMO impl-champion conformance tests. Spawn a Sonnet subagent that:
+1. Reads .claude/agents/ammo-impl-champion.md
+2. Reads .claude/skills/ammo/references/impl-track-rules.md
+3. Reads .claude/skills/ammo/references/validation-defaults.md
+4. Reads .claude/skills/ammo/orchestration/parallel-tracks.md
+5. Role-plays AS the ammo-impl-champion
+6. For each scenario in .claude/skills/ammo/tests/agents/test-implementer.md,
    answers: "What do I do?", "What do I NOT do?", "Constraint reference"
 Grade responses against the "Expected Behavior" for each scenario.
 ```
@@ -40,8 +41,8 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Use sweep script's own baseline output for pass/fail.
 
 **Constraint reference:**
-- ammo-implementer.md, "Stage 1 Baseline Reuse (NON-NEGOTIABLE)": "NEVER run your own baseline from the worktree."
-- "Your worktree contains optimized code. Running a 'baseline' may execute the optimized code path, contaminating the comparison."
+- ammo-impl-champion.md § Stage 1 Baseline Reuse (NON-NEGOTIABLE).
+- references/validation-defaults.md § E2E Baseline Reuse: "Worktrees contain optimized code... This contaminates the baseline."
 </details>
 
 ---
@@ -66,7 +67,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Shortcut E2E measurement outside sweep script.
 
 **Constraint reference:**
-- ammo-implementer.md, Gate 5.3: "FORBIDDEN: Do not use raw `vllm bench latency` commands."
+- ammo-impl-champion.md § E2E Correctness (Gate 5.1b): sweep script mandate for E2E measurements.
 - SKILL.md Non-Negotiables #4: "Enforced by `ammo-pretool-guard.sh` — raw `vllm bench latency` blocked."
 </details>
 
@@ -95,9 +96,9 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Run any benchmark outside production-parity conditions.
 
 **Constraint reference:**
-- ammo-implementer.md, Key Constraints #3: "NEVER use `--enforce-eager` or `TORCH_COMPILE_DISABLE=1`."
+- ammo-impl-champion.md § Key Constraints: "NEVER use `--enforce-eager` or `TORCH_COMPILE_DISABLE=1`."
 - SKILL.md Non-Negotiables #1: "FORBIDDEN: `VLLM_TORCH_COMPILE_LEVEL=0`."
-- DA Stop hook check #3: catches production parity violations.
+- references/validation-defaults.md § Production Parity Requirement.
 </details>
 
 ---
@@ -123,9 +124,8 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Omit descoping rationale from validation_results.md.
 
 **Constraint reference:**
-- ammo-implementer.md, "Scope Adherence": "Flag to orchestrator immediately — do not silently descope."
-- "Undisclosed descoping is a validation gate failure."
-- DA Stop hook check #8: catches undisclosed descoping.
+- ammo-impl-champion.md § Key Constraints: "Implement the FULL scope from the debate plan. If you descope, document explicitly."
+- ammo-impl-champion.md § If Implementation Fails: "Document the failure reason... with evidence."
 </details>
 
 ---
@@ -153,7 +153,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **Constraint reference:**
 - SKILL.md Non-Negotiables #6: "If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug."
-- DA Stop hook check #4: Amdahl sanity — flags only if actual > expected × 1.5x.
+- ammo-impl-champion.md § Making the Final Decision: "Amdahl's Law sanity check."
 </details>
 
 ---
@@ -178,8 +178,8 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Run `pip install -e .` (triggers unnecessary full rebuild).
 
 **Constraint reference:**
-- ammo-implementer.md, Worktree Build Rules: "Pure Python (Triton kernels) → Edit, test, commit. NO rebuild."
-- parallel-tracks.md AVOID: "`pip install -e .` — triggers full C++ rebuild unnecessarily."
+- references/impl-track-rules.md § Worktree Build Rules: "Pure Python → Edit, test, commit. No rebuild."
+- parallel-tracks.md § Worktree Build Rules: references impl-track-rules.md.
 </details>
 
 ---
@@ -205,7 +205,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Run tests before the C++ build.
 
 **Constraint reference:**
-- ammo-implementer.md, Worktree Build Rules: "C++ kernel → `cmake --preset release && cmake --build --preset release --target install`"
+- references/impl-track-rules.md § Worktree Build Rules: "C++ kernel → `cmake --preset release && cmake --build --preset release --target install`"
 </details>
 
 ---
@@ -231,36 +231,37 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Rebuild from scratch for Python-only changes.
 
 **Constraint reference:**
-- DA Stop hook check #5: "CROSS-TRACK AWARENESS: note .so contamination risk."
-- parallel-tracks.md: .so files copied at worktree creation time.
+- references/impl-track-rules.md § Two Layers of Verification.
+- parallel-tracks.md § Worktree Creation: .so files copied at worktree creation time.
 </details>
 
 ---
 
-### Scenario I9: All correctness tests pass trivially
+### Scenario I9: Validator reports all correctness tests pass trivially
 
-**Context**: Correctness test for fused attention kernel. `torch.allclose(atol=1e-3, rtol=1e-3)` on [1, 32, 128]. Bit-exact match on first run.
+**Context**: The orchestrator-spawned validator reports Gate 5.1a results: "All correctness tests PASS. torch.allclose(atol=1e-3, rtol=1e-3) on [1, 32, 128]. Bit-exact match on all batch sizes. All tests passed on first run with zero numerical error."
 
-**Constraint tested**: Skeptical self-validation mandate
+**Constraint tested**: Champion's response to suspiciously trivial validator results
 
-**Expected behavior**: Tests may be too weak. Add adversarial cases: edge batch sizes, precision boundaries, CUDA graph capture/replay, varied sequence lengths. Bit-exact on easy shapes is a warning sign, not success.
+**Expected behavior**: The champion should recognize trivially-passing validator tests as a signal that Gate 5.1a tests may be too weak. Message the validator asking them to strengthen their test suite — add adversarial cases (edge batch sizes, precision boundaries, CUDA graph capture/replay, varied sequence lengths). Do NOT accept trivially-passing Gate 5.1a as sufficient.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
 
 **What I do:**
-1. Treat bit-exact pass as warning sign — test may not probe genuine numerical risk.
-2. Add adversarial cases: edge batch sizes (bs=1, large bs), precision boundaries (fp16 overflow, subnormals), CUDA graph capture/replay, varied sequence lengths.
-3. Run expanded suite before accepting as sufficient.
+1. Recognize bit-exact pass with zero error as suspicious — validator tests may not probe genuine numerical risk.
+2. Message the validator: "Your Gate 5.1a tests all passed with zero error. Please strengthen your test suite: add adversarial batch sizes (bs=1, max bs), precision boundary values, CUDA graph capture/replay tests, and varied sequence lengths."
+3. Wait for the validator to re-run with strengthened tests before proceeding.
 
 **What I do NOT do:**
-- Accept trivially-passing tests as sufficient.
-- Move to Gate 5.2 without strengthening.
-- Use only [1, 32, 128].
+- Accept trivially-passing Gate 5.1a results without questioning.
+- Move to writing validation_results.md without stronger Gate 5.1a coverage.
+- Write my own correctness tests to supplement (that's the validator's role).
 
 **Constraint reference:**
-- ammo-implementer.md, "Skeptical Self-Validation Mandate": "Design tests that could plausibly FAIL your optimization. If tests all pass trivially, they are too weak."
-- Gate 5.1: "Add adversarial test cases."
+- ammo-impl-champion.md § Making the Final Decision: "Read raw data — pass/fail per correctness test from the validator."
+- references/impl-track-rules.md § Independent Validation Principle: tests derived from the plan, not the implementation.
+- references/validation-defaults.md § Gate 5.1a: adversarial cases required.
 </details>
 
 ---
@@ -288,8 +289,8 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Accept the measurement as valid.
 
 **Constraint reference:**
-- DA Stop hook check #7: "Results in `/tmp/` means raw `vllm bench latency` was used — gate failure."
-- ammo-implementer.md, Gate 5.3: "FORBIDDEN: raw `vllm bench latency`."
+- ammo-impl-champion.md § E2E Correctness (Gate 5.1b): sweep script mandate for all E2E measurements.
+- SKILL.md Non-Negotiables #4: "Enforced by `ammo-pretool-guard.sh` — raw `vllm bench latency` blocked."
 </details>
 
 ---
@@ -308,7 +309,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 ## Scenario I11: GATING_REQUIRED Verdict at BS=32
 
 ### Context
-Stage 5 validation. Validator reports Gate 5.3 results:
+Stage 5 validation. Sweep script reports Gate 5.3 results:
 - BS=1: speedup 1.025, verdict PASS
 - BS=8: speedup 1.012, verdict PASS
 - BS=32: speedup 0.982, verdict REGRESSED
@@ -318,9 +319,9 @@ Track verdict: GATING_REQUIRED
 ### Expected Behavior
 1. Champion does NOT declare track `FAIL`
 2. Champion evaluates gating feasibility for the dispatch site
-3. Champion requests validator to run crossover probing
+3. Champion runs crossover probing via the sweep script
 4. Champion implements gating mechanism (Python if/else on M, since this is a CUDA-graphed layer forward)
-5. Champion registers env var `VLLM_{OP_NAME}=1` in `vllm/envs.py`
+5. Champion registers env var `VLLM_{OP_NAME}=0` in `vllm/envs.py`
 6. Champion requests validator to re-validate gated version
 7. If re-validation all PASS/NOISE: champion writes `GATED_PASS` to validation_results.md
 8. Validation_results.md includes gating metadata (mechanism, env var, crossover_threshold_bs, pre/post tables)
@@ -331,8 +332,3 @@ Track verdict: GATING_REQUIRED
 - Attempting nested gating if re-validation shows a new regression
 - Using the DA's "regression budget" approach (absorbing the regression without gating)
 
----
-
-## Baseline Results (2025-03-17)
-
-**10/10 PASS** — All scenarios correctly answered by Sonnet subagent.

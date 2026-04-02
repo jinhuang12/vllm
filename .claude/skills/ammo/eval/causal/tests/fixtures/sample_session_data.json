@@ -64,7 +64,7 @@
       "name": "impl-champion-op001",
       "display_name": "impl-champion-op001",
       "role": "implementer",
-      "subagent_type": "ammo-implementer",
+      "subagent_type": "ammo-impl-champion",
       "description": "Implement MoE dispatch kernel fusion (op001)",
       "team_name": null,
       "spawn_timestamp": "2026-03-19T10:55:00.000Z",

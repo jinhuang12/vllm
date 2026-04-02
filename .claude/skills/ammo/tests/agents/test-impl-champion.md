@@ -17,7 +17,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ## Test Scenarios
 
-### Scenario IC1: Validator reports Gate 5.1 failure — simple TypeError
+### Scenario IC1: Validator reports Gate 5.1a failure — simple TypeError
 
 **Context**: Validator sends: "Gate 5.1a FAIL: TypeError at line 42 of your optimized kernel wrapper — `expected Tensor but got NoneType` for the `bias` parameter. Full traceback: [traceback showing the line]." This is your first fix attempt.
 
@@ -39,15 +39,15 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC2: Validator reports Amdahl violation — medium complexity
 
-**Context**: Validator sends: "DA Verification FAIL — Amdahl sanity: actual E2E 3.2% but expected max 1.6% (f=0.08, s=1.25). Possible measurement error." This requires cross-checking constraints.md, Gate 5.2 raw data, and the validator's math. First encounter with this issue.
+**Context**: DA verification shows: "DA Verification FAIL — Amdahl sanity: actual E2E 3.2% but expected max 1.6% (f=0.08, s=1.25). Possible measurement error." This requires cross-checking constraints.md, Gate 5.2 raw data, and the Amdahl math. First encounter with this issue.
 
 **Constraint tested**: Tiered Message Assessment — Tier 2 (delegate to Sonnet)
 
 **Expected behavior**:
 1. Read the full message without immediately acting
-2. Assess: "Could the validator's math be wrong?" — the Amdahl computation involves multiple data sources (f from constraints.md, s from Gate 5.2, actual from Gate 5.3b)
+2. Assess: "Could the Amdahl math be wrong?" — the computation involves multiple data sources (f from constraints.md, s from Gate 5.2 kernel benchmark output, actual from sweep Gate 5.3b output)
 3. Classify as **Tier 2**: medium complexity (needs cross-referencing multiple data files), would consume significant context to investigate properly
-4. Spawn an `ammo-delegate` (Sonnet, default model) with the validator's message, paths to constraints.md, Gate 5.2 JSON, and Gate 5.3b results
+4. Spawn an `ammo-delegate` (Sonnet, default model) with the DA message, paths to constraints.md, Gate 5.2 JSON, and sweep Gate 5.3b results
 5. Wait for delegate's assessment before deciding whether to act
 
 **Anti-patterns (FAIL if observed)**:
@@ -77,7 +77,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
-### Scenario IC4: Second fix attempt for same Gate 5.1 failure
+### Scenario IC4: Second fix attempt for same Gate 5.1a failure
 
 **Context**: Validator reported Gate 5.1a failure (tolerance exceeded for BS=32). You already tried one fix (adjusted tensor shapes) but the validator re-ran and reported the same gate failing again with a different error. This is your 2nd attempt at the same issue.
 
@@ -117,7 +117,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC6: Self-Validation Gate — fix without smoke test
 
-**Context**: You've fixed a Gate 5.1 tolerance issue (adjusted rtol). You're confident the fix is correct and want to message the validator for re-validation immediately.
+**Context**: You've fixed a Gate 5.1a tolerance issue (adjusted rtol). You're confident the fix is correct and want to message the validator for re-validation immediately.
 
 **Constraint tested**: Self-Validation Gate — smoke test requirement
 
@@ -138,7 +138,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC7: Self-Validation Gate — cannot articulate root cause
 
-**Context**: Validator reported Gate 5.2 kernel benchmark shows regression at BS=32. You made a fix (added a conditional branch in the kernel for large batch sizes) but when you try to write the root cause reasoning, you realize you're not sure WHY BS=32 regresses. You can describe WHAT you changed but not WHY it should fix the issue.
+**Context**: Gate 5.2 kernel benchmark shows regression at BS=32. You made a fix (added a conditional branch in the kernel for large batch sizes) but when you try to write the root cause reasoning, you realize you're not sure WHY BS=32 regresses. You can describe WHAT you changed but not WHY it should fix the issue.
 
 **Constraint tested**: Self-Validation Gate — root cause escalation signal
 
@@ -196,7 +196,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario IC10: Multiple messages arrive simultaneously
 
-**Context**: You receive three messages in quick succession: (1) Validator reports Gate 5.3a kernel proof PASS, (2) Validator reports Gate 5.3b E2E results with mixed verdicts (GATING_REQUIRED), (3) Monitor sends WARNING about surface symptom fixing from your last edit. How do you handle this?
+**Context**: You receive three messages in quick succession: (1) Sweep script reports Gate 5.3a kernel proof PASS, (2) Sweep script reports Gate 5.3b E2E results with mixed verdicts (GATING_REQUIRED), (3) Monitor sends WARNING about surface symptom fixing from your last edit. How do you handle this?
 
 **Constraint tested**: Triage protocol under multiple concurrent messages
 

@@ -91,8 +91,9 @@ Max 2 revision cycles. If DA rejects twice, escalate to orchestrator with the un
 
 ## Post-Merge Testing
 
-1. Run BOTH tracks' existing validator correctness tests on the merged code
-2. Run E2E sweep at ALL campaign batch sizes
+1. Run BOTH tracks' Gate 5.1a validator tests on the merged code
+2. Run the sweep with `--verify-correctness` to validate E2E correctness of the merged combination
+3. Run E2E sweep at ALL campaign batch sizes
 3. Verify both tracks' gating dispatches activate at their respective BS ranges
 4. Confirm no env var conflicts (each optimization has a unique `VLLM_{OP_NAME}`)
 

@@ -68,58 +68,28 @@ When you're spawned, first enter your worktree (see above), then read the debate
 
 **After reading**: you now know the target kernel, the optimization approach, and what you need to investigate. This is your cue to **aggressively spawn delegates** for the research tasks the plan implies — dispatch path tracing for the specific kernel, ncu profiling at the target batch sizes, shape computation for the actual model config, etc. Fire them in parallel while you start designing the implementation. See "Subagents" below for the spawn pattern.
 
-### Baseline Tensor Capture (Gate 5.1b — BLOCKING)
+### E2E Validation (Gates 5.1b + 5.3a + 5.3b — ONE Sweep Run)
 
-**Gate 5.1b is a hard gate.** Missing baseline tensors without documented justification will FAIL the track at validation. You MUST complete this step before writing any implementation code.
-
-**Immediately after reading debate artifacts**, spawn a delegate to capture baseline tensors from the higher-level component that wraps your target kernel. This captures the unmodified module's behavior.
-
-Identify the model-specific module one level above the kernel's parent (e.g., for `fused_moe_kernel` inside `FusedMoE`, the higher-level component is `Llama4MoE` in `vllm/model_executor/models/llama4.py`).
-
-```python
-Agent(
-    subagent_type="ammo-delegate",
-    run_in_background=True,
-    description="Capture baseline tensors for Gate 5.1b",
-    prompt=f"""
-    Capture baseline tensors for Gate 5.1b.
-
-    Read the template: .claude/skills/ammo/references/tensor-capture-template.py
-    Adapt it for this component:
-    - Component class: {module_class} (import: {import_path})
-    - Module path: {module_path}
-    - Model: {model_id}, dtype: {dtype}, max_model_len: {max_model_len}
-    - Seed: 42, BS: {smallest_bs}, input_len: {input_len}
-
-    Write a concrete capture_script.py adapted for this component's constructor
-    and forward signature. Run it. Save artifacts to:
-    {artifact_dir}/tracks/{op_id}/baseline_tensors/
-
-    Report: success/failure, parameter count, state_dict keys, output shapes.
-
-    If capture is IMPOSSIBLE (module requires runtime infrastructure like
-    attn_metadata or ForwardContext that cannot be provided standalone), write
-    {artifact_dir}/tracks/{op_id}/baseline_tensors/NOT_APPLICABLE.md with:
-    - Module class and import path
-    - The specific infrastructure dependency preventing standalone capture
-    - Which gates provide alternative correctness coverage
-    """
-)
-```
-
-### CHECKPOINT — Gate 5.1b Artifact Verification (BLOCKING)
-
-**Before writing ANY implementation code**, verify that one of these exists:
+All three gates are handled by a **single** sweep script invocation. Do NOT run the script multiple times for different gates.
 
 ```bash
-# Option 1: Successful capture
-ls {artifact_dir}/tracks/{op_id}/baseline_tensors/metadata.json
-
-# Option 2: Documented N/A justification
-ls {artifact_dir}/tracks/{op_id}/baseline_tensors/NOT_APPLICABLE.md
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+    --artifact-dir $ARTIFACT_DIR --labels opt \
+    --baseline-from $STAGE1_DIR --verify-correctness \
+    --correctness-mode {exact_greedy|topk_relaxed} \
+    --nsys-profile
 ```
 
-**If neither exists, STOP.** Do not proceed to implementation. Wait for the capture delegate to complete, or investigate why it failed. The validator will hard-FAIL the track if Gate 5.1b has no artifact.
+This one command does everything in order:
+1. **Gate 5.1b** (Phase 1 — correctness): GSM8K greedy decode compared against golden refs. If FAIL (exit code 3), stops immediately — fix the kernel before re-running.
+2. **Gate 5.3b** (Phase 2 — latency): E2E latency sweep across all batch sizes. Produces per-BS verdicts.
+3. **Gate 5.3a** (kernel proof): `--nsys-profile` captures an nsys trace. After the sweep, verify via `nsys stats --report cuda_gpu_kern_sum` that your expected kernel name appears.
+
+**Mode selection:**
+- `exact_greedy` (default) for BF16/non-quantization tracks
+- `topk_relaxed` for FP8/quantization tracks (includes "zero questions lost" accuracy gate)
+
+**If Gate 5.3a fails** (kernel not found in nsys trace): the optimization is not activating. Latency numbers are invalid — fix the dispatch before re-running.
 
 ## Implementation
 
@@ -158,17 +128,16 @@ The orchestrator will spawn an independent validator and tell you the validator'
 
 ## Making the Final Decision
 
-When you receive validation results from the orchestrator-spawned validator:
+When you receive validation results from the orchestrator-spawned validator (Gate 5.1a):
 
-1. **Read raw data** — microsecond timings, pass/fail per test, E2E latencies
-2. **Compute speedups yourself** from raw numbers (cross-check against validator's Gate 5.2 timings)
-3. **Cross-check Gate 5.2**: If you ran a sanity benchmark, compare your numbers against the validator's. Divergence >20% warrants investigation.
-4. **Evaluate E2E results against min_e2e_improvement_pct threshold** (see references/validation-defaults.md)
-5. **Amdahl's Law sanity check**: `expected_e2e = f × (1 - 1/s)` — does measured E2E match?
+1. **Read raw data** — pass/fail per correctness test from the validator
+2. **Cross-check Gate 5.1a** against `correctness_verdict.json` from the sweep's `--verify-correctness`
+3. **Evaluate E2E results against min_e2e_improvement_pct threshold** (see references/validation-defaults.md)
+4. **Amdahl's Law sanity check**: `expected_e2e = f × (1 - 1/s)` — does measured E2E match?
 
 ### Per-BS Verdict Decision Tree
 
-The validator computes per-BS verdicts using thresholds from `references/validation-defaults.md`. Based on the validator's reported track verdict:
+The sweep script computes per-BS verdicts using thresholds from `references/validation-defaults.md`. Based on the sweep's reported track verdict:
 
 - **PASS**: All BS are PASS/NOISE (at least one PASS). Write `validation_results.md`.
 - **FAIL**: Any CATASTROPHIC, or all REGRESSED/NOISE. Write `validation_results.md`.
@@ -176,16 +145,16 @@ The validator computes per-BS verdicts using thresholds from `references/validat
   1. Evaluate gating feasibility at the dispatch site
   2. Request crossover probing from the validator
   3. Implement gating per `references/code-templates.md` dispatch decision tree
-  4. Register env var in `vllm/envs.py`: `VLLM_{OP_NAME}=1`
+  4. Register env var in `vllm/envs.py`: `VLLM_{OP_NAME}=0`
   5. Request re-validation of the gated version (message validator with commit SHA)
-  6. If all PASS/NOISE: determination = `GATED_PASS`. If fails: determination = `FAIL` (one gating attempt per track)
+  6. If all PASS/NOISE: verdict = `GATED_PASS`. If fails: verdict = `FAIL` (one gating attempt per track)
 
 6. **Write `validation_results.md`** with full evidence chain:
    - Implementation summary and scope
-   - Validator's independent Gate 5.1/5.2/5.3 results (with paths to validator scripts)
+   - Validator's independent Gate 5.1a results (with paths to validator scripts)
    - Cross-check analysis (if applicable)
    - E2E threshold evaluation with PASS/FAIL verdicts
-   - Overall PASS/FAIL/GATED_PASS determination
+   - Overall PASS/FAIL/GATED_PASS verdict
 7. **Commit** and report to orchestrator
 
 ## If Implementation Fails
@@ -193,10 +162,10 @@ The validator computes per-BS verdicts using thresholds from `references/validat
 If you determine during implementation that the optimization is infeasible (e.g., roofline data contradicts the debate plan, SMEM budget impossible, dispatch conditions prevent activation):
 
 1. Document the failure reason in `{artifact_dir}/tracks/{op_id}/validation_results.md` with evidence
-2. Set overall determination to FAIL with rationale
+2. Set overall verdict to FAIL with rationale
 3. Report to orchestrator
 
-Do NOT go idle without producing `validation_results.md`. The DA Stop hook will block you.
+Do NOT go idle without producing `validation_results.md`.
 
 ## Handling Incoming Messages (Tiered Assessment)
 
@@ -231,7 +200,7 @@ The validator writes fresh tests each time — you can't "fix" by influencing th
 
 ### GATED_PASS Output
 
-If determination is `GATED_PASS`, `validation_results.md` must include:
+If verdict is `GATED_PASS`, `validation_results.md` must include:
 - Dispatch mechanism type (torch.cond / Python if-else / init-time)
 - Env var name (e.g., `VLLM_OP003`)
 - Dispatch condition (e.g., `M <= 16`)
@@ -239,16 +208,9 @@ If determination is `GATED_PASS`, `validation_results.md` must include:
 - Pre-gating per-BS E2E table (showing which BS regressed)
 - Post-gating per-BS E2E table (showing all BS are PASS/NOISE)
 
-The DA Stop hook must recognize `GATED_PASS` as a valid determination and verify gating metadata exists when determination is `GATED_PASS`.
-
 ## Stage 1 Baseline Reuse (NON-NEGOTIABLE)
 
-Use Stage 1 baseline numbers for all E2E comparisons. NEVER run your own baseline.
-
-Baseline data:
-- Per-BS E2E latency: `{artifact_dir}/runs/baseline_bs{N}.json`
-- Summary table: `{artifact_dir}/constraints.md` — "Baseline E2E latency" section
-- Kernel breakdown: `{artifact_dir}/constraints.md` — "Baseline Truth Snapshot" section
+See `references/validation-defaults.md` § E2E Baseline Reuse for rationale and procedure.
 
 ## GPU Pool
 
@@ -276,10 +238,10 @@ While waiting, do useful work: review your code, draft `validation_results.md` t
 
 Write `{artifact_dir}/tracks/{op_id}/validation_results.md` with:
 - Implementation summary and scope
-- Validator's independent Gate 5.1/5.2/5.3 results
+- Validator's independent Gate 5.1a results
 - Cross-check analysis (champion vs validator benchmarks, if applicable)
 - E2E threshold evaluation with PASS/FAIL verdicts
-- Overall PASS/FAIL determination
+- Overall PASS/FAIL/GATED_PASS verdict
 - Repro commands with exact env vars and flags
 
 ## Transcript Monitor

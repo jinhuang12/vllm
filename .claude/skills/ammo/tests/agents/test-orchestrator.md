@@ -59,7 +59,7 @@ Expected behavior: Launch overlapped debate IMMEDIATELY. Spawn debate champions 
 1. Immediately launch the overlapped round 3 debate by spawning 2-4 ammo-champion agents into the existing round team (`ammo-round-2-llama70b-h100`). Use the existing `bottleneck_analysis.md` from round 1. Set `debate.next_round_overlap.active: true` and `debate.next_round_overlap.phase: "phase_0"` in `state.json`.
 2. While the overlapped debate runs, actively monitor the two impl tracks (op001 and op002).
 3. Interleave debate moderation with impl monitoring: broadcast debate phase starts, then check for impl track completions, then wait for debate phase completions.
-4. As each impl-champion completes (DA Stop hook passed), run its compilation gate (T9) and update `state.json` `parallel_tracks.{op_id}` (T10).
+4. As each impl-champion completes (track complete), run its compilation gate (T9) and update `state.json` `parallel_tracks.{op_id}` (T10).
 5. When debate finishes: score winners, shut down debate champions via `shutdown_request`. Record winners in `debate.next_round_overlap.selected_winners`. Set `debate.next_round_overlap.phase: "selection_complete"`.
 6. Continue monitoring until all impl tracks have returned results AND the overlapped debate has completed.
 
@@ -103,7 +103,7 @@ Expected behavior: Do NOT launch overlapped debate (round 1). Monitor impl track
 
 **Next actions (in order):**
 1. Monitor the running impl track (op001) — watch for the impl-champion's return.
-2. When op001's impl-champion returns (DA Stop hook passed), run the compilation gate (T9) in its worktree.
+2. When op001's impl-champion returns (track complete), run the compilation gate (T9) in its worktree.
 3. Read `{artifact_dir}/tracks/op001/validation_results.md` and update `state.json` `parallel_tracks.op001` with structured status/metrics (T10).
 4. Proceed to T11 (all tracks have results), then TeamDelete the round team (`ammo-round-1-llama70b-h100`), and advance to Stage 6 integration.
 
@@ -146,7 +146,7 @@ Expected behavior: Continue moderating debate. Also gate any completed impl trac
 
 **Next actions (in order):**
 1. Continue actively monitoring both running impl tracks (op003 and op004).
-2. As each impl-champion returns (DA Stop hook passed), run its compilation gate (T9) in its respective worktree.
+2. As each impl-champion returns (track complete), run its compilation gate (T9) in its respective worktree.
 3. Update `state.json` `parallel_tracks.{op_id}` after each T9 passes (T10).
 4. Concurrently moderate the already-running overlapped debate — interleave debate phase broadcasts with impl completion checks.
 5. When the debate concludes, score winners, shut down debate champions via `shutdown_request`, and record winners in `debate.next_round_overlap.selected_winners`. Set `debate.next_round_overlap.phase: "selection_complete"`.
@@ -235,7 +235,7 @@ Expected behavior: Continue monitoring impl tracks. Winners are parked in `debat
 
 **Next actions (in order):**
 1. Continue actively monitoring impl track op001 — wait for the impl-champion to return.
-2. When op001's impl-champion returns (DA Stop hook passed), run the compilation gate (T9) in its worktree.
+2. When op001's impl-champion returns (track complete), run the compilation gate (T9) in its worktree.
 3. Update `state.json` `parallel_tracks.op001` with structured status/metrics (T10).
 4. Once all impl tracks have returned: satisfy T11, TeamDelete the round team (`ammo-round-2-llama70b-h100`), and advance to Stage 6 integration.
 5. The overlapped debate winners (`op003`, `op004`) remain parked in `debate.next_round_overlap.selected_winners` — they will be consumed during the next round's campaign evaluation (subject to lazy invalidation after re-profiling).

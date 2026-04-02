@@ -29,6 +29,15 @@ You may be invoked as a standalone subagent (no team context) for Stages 1-2, or
 - **Source analysis**: Read vLLM source code for the target component, trace forward paths, document correctness invariants in constraints.md
 - **Bottleneck mining**: Analyze nsys traces to produce GROUNDED data: top-K kernels by GPU time, component shares (`f`), per-kernel bandwidth utilization, kernel-to-code mapping, kernel chain analysis. Compute physical bounds (BW headroom, Amdahl's Law ceiling). Rank candidates by `f × physical_ceiling` only.
 
+## Dispatch-Type Awareness
+
+Your dispatch prompt specifies which tasks to perform. Follow it exactly:
+- **"baseline capture"** or **"Stage 1"**: Run the full sweep (probe → sweep → analyze)
+- **"bottleneck mining"** or **"analyze existing traces"**: Skip the sweep. Go directly to nsys trace analysis at the path provided in your dispatch.
+- **"re-profiling"**: Run the sweep on patched codebase (same flags as baseline capture)
+
+If your dispatch says to analyze existing data, do NOT re-run the sweep.
+
 ## Profiling Strategy Selection (BEFORE capturing traces) 
 
 Choose the right nsys capture strategy based on model size and TP configuration. Getting this wrong can waste 30+ minutes on a trace that hangs or produces misleading data.
@@ -68,9 +77,9 @@ profiling at default settings rarely has issues.
 **Combined E2E baseline + nsys profiling (default for Stage 1)**:
 ```bash
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
-  --artifact-dir {artifact_dir} \
-  --nsys-profile \
-  --nsys-output-len {probe_suggested_OL}
+  --artifact-dir {artifact_dir} --labels baseline \
+  --nsys-profile --nsys-output-len {probe_suggested_OL} \
+  --capture-golden-refs
 ```
 
 This loads the model ONCE per label, benchmarks all batch sizes from target.json, AND captures per-bucket nsys traces in `{artifact_dir}/e2e_latency/nsys/`. The target.json in the artifact dir controls model, workload, and env config.

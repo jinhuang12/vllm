@@ -23,7 +23,7 @@ Round Team: ammo-round-{round_id}-{model_short}-{hardware}
 
 Each track uses an **adversarial validation model**: the champion implements, an orchestrator-spawned independent validator validates. This separation prevents reward hacking (cherry-picked batch sizes, weakened assertions, inflated benchmarks, optimistic interpretation). Transcript monitors provide continuous DA oversight of champion work.
 
-**Why adversarial validation**: The AMMO pipeline has observed four types of reward hacking when the same agent both implements and validates. Separating implementation from validation into independent agents with differing goals catches issues in real-time. The existing DA Stop hook remains as a third verification layer.
+**Why adversarial validation**: The AMMO pipeline has observed four types of reward hacking when the same agent both implements and validates. Separating implementation from validation into independent agents with differing goals catches issues in real-time.
 
 **Why a single team**: The orchestrator can only lead ONE team at a time. Creating per-track teams (`ammo-impl-{op_id}`) is architecturally impossible — the orchestrator would lose contact with all but the last-created team. A single round-scoped team keeps all agents under one roof.
 
@@ -88,7 +88,8 @@ Agent(
     2. Implement the kernel optimization
     3. Commit implementation, send VALIDATION_REQUEST to orchestrator (team-lead)
     4. Receive validation results from orchestrator-spawned validator
-    5. Evaluate E2E results against min_e2e_improvement_pct threshold, write validation_results.md
+    5. Run E2E sweep: `run_vllm_bench_latency_sweep.py --verify-correctness --baseline-from {stage1_dir}`
+    6. Evaluate E2E results against min_e2e_improvement_pct threshold, write validation_results.md
     """
 )
 
@@ -137,11 +138,12 @@ Agent(
     E2E threshold: {min_e2e_improvement_pct}
     GPU pool: CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>
 
-    Write YOUR OWN independent tests and benchmarks (Gates 5.1, 5.2, 5.3).
+    Write YOUR OWN independent synthetic correctness tests (Gate 5.1a only).
+    Gates 5.1b and 5.3 are handled by the champion via the sweep script.
+    Gate 5.2 (isolated kernel benchmark) is champion-owned independently.
     DUAL-REPORT raw results to BOTH impl-champion-{op_id} AND team-lead.
 
     Key references:
-    - Benchmark template: .claude/skills/ammo/references/kernel-benchmark-template.py
     - Validation defaults: .claude/skills/ammo/references/validation-defaults.md
     - CUDA graph safety: .claude/skills/ammo/references/cudagraph-safety.md"""
 )
@@ -158,12 +160,13 @@ Champion-validator collaboration follows the fluid timeline in `references/impl-
 
 ```
 Layer 1: Independent Validator (Sonnet)
-  Writes OWN correctness tests, OWN benchmark scripts, runs E2E sweep
+  Writes OWN synthetic correctness tests (Gate 5.1a)
   Reports raw structured results — no interpretation
 
-Layer 2: Champion Review (Opus)
+Layer 2: Champion (Opus)
+  Runs sweep with --verify-correctness (Gates 5.1b/5.3)
   Evaluates E2E results against min_e2e_improvement_pct threshold
-  Cross-checks Gate 5.2 numbers against own smoke-test
+  Cross-checks Gate 5.1a against correctness_verdict.json
   Writes final validation_results.md with evidence chain
 ```
 
@@ -188,23 +191,14 @@ For `GATED_PASS` tracks, the `state.json` `parallel_tracks.{op_id}` entry includ
 
 ### Pass Criteria (Tiered Verdict System)
 
-Track verdicts are determined by the tiered verdict system. See `references/validation-defaults.md` §5.3 for threshold values and computation logic. Summary:
-
-| Track Verdict | Condition |
-|--------------|-----------|
-| `PASS` | All BS are PASS or NOISE, with at least one PASS |
-| `GATING_REQUIRED` | Some BS are PASS + some are REGRESSED |
-| `FAIL` | Any CATASTROPHIC, or all REGRESSED/NOISE (no PASS), or gating failed |
+See `references/validation-defaults.md` § Gate 5.3b for threshold values and per-BS verdict computation logic.
 
 A track **ships** if its final status is `PASS` or `GATED_PASS` (after successful gating).
 
 Additional requirements unchanged:
 - Gate 5.1: Correctness — both sub-gates must pass:
   - 5.1a: Validator's independent synthetic correctness tests pass
-  - 5.1b (HARD GATE): Baseline tensor comparison passes, OR champion provides documented N/A justification naming a specific infrastructure dependency. Missing 5.1b artifacts with no justification = track FAIL (validator blocks Gate 5.3b).
-- Gate 5.2: Validator's independent kernel benchmark shows measurable speedup (>1% over baseline) for at least one target bucket
-- Champion's DA Stop hook passed (Amdahl's check, baseline citation, parity, independent validation exists)
-- No unresolved benchmark divergence between champion and validator
+  - 5.1b: Sweep script `--verify-correctness` verdict is PASS in `correctness_verdict.json` (deterministic — no N/A escape)
 
 ### Track Status Machine
 
@@ -257,7 +251,7 @@ Debate champions and implementation agents MUST NOT communicate:
 The orchestrator manages both workstreams through the same team inbox:
 
 1. Broadcast debate Phase 0 start to debate champions.
-2. Check for any impl track completions (DA Stop hook notifications).
+2. Check for any impl track completions.
 3. If an impl track completed: run T9 gate, update state.json.
 4. Wait for debate Phase 0 completions from all champions.
 5. Run eligibility gate on proposals.

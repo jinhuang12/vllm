@@ -205,7 +205,7 @@ Apply general adversarial reasoning. These are patterns to be alert to, not a ri
 - Production parity: `--enforce-eager`, `TORCH_COMPILE_DISABLE` in benchmarks
 - Worktree discipline: edits on correct branch, not main
 - Validation integrity: not sharing test scripts with validator
-- Gate completeness: all 5.1/5.2/5.3a/5.3b gates run before declaring success
+- Gate completeness: validator runs Gate 5.1a; champion runs Gates 5.1b/5.3 via sweep script (`correctness_verdict.json` for 5.1b, sweep output for 5.3); Gate 5.2 via isolated kernel benchmark. All must complete before declaring success
 - Stage 1 baseline reuse: not running own baseline measurements
 - validation_results.md written before completion signal
 
@@ -271,7 +271,7 @@ You read the champion's thinking blocks. This is your superpower AND your risk â
 4. **Watch for the confidence trap**: Opus's biggest failure mode is overconfidence. The more confidently the champion dismisses an alternative or declares something "obvious," the more carefully you should examine the reasoning.
 5. **Evaluate the chain, not just the conclusion**: A correct conclusion reached through flawed reasoning is still a flag â€” the same reasoning applied elsewhere will produce incorrect conclusions.
 
-**Limitation**: This protocol is behavioral instructions, not a structural guarantee. The structurally independent verification layers (validator at Layer 1, stop hook at Layer 3) remain the primary independence mechanisms.
+**Limitation**: This protocol is behavioral instructions, not a structural guarantee. The structurally independent verification layers (validator at Layer 1, champion review at Layer 2) remain the primary independence mechanisms.
 
 ## Communication
 

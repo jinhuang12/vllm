@@ -157,7 +157,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 ### Stages 1-2: Main Session + Subagents
 
 - Lead (you) invokes ammo-researcher as a subagent via Task tool for profiling, source analysis, bottleneck mining.
-- Lead delegates profiling and E2E baseline capture to ammo-researcher (who uses the sweep script with `--nsys-profile --labels baseline`). Use `--labels baseline` to avoid running a meaningless opt sweep (opt_env is still a placeholder at this stage). The lead does NOT duplicate work assigned to the ammo-researcher (i.e. run benchmarks, extract profiling results).
+- Lead delegates profiling and E2E baseline capture to ammo-researcher (who uses the sweep script with `--nsys-profile --labels baseline --capture-golden-refs`). Use `--labels baseline` to avoid running a meaningless opt sweep (opt_env is still a placeholder at this stage). `--capture-golden-refs` captures golden references for Gate 5.1b correctness checks in Stage 5. The lead does NOT duplicate work assigned to the ammo-researcher (i.e. run benchmarks, extract profiling results).
 - No TeamCreate. No persistent agents. Subagent returns results directly.
 - Lead runs gates (`verify_phase1_baseline.py`, Stage 2 review) between stages.
       
@@ -166,6 +166,23 @@ For TP > 1 or models > 10B params, the lead should instruct the researcher to us
 
 When `--nsys-profile` is used, the sweep script automatically restricts `cudagraph_capture_sizes` to match `workload.batch_sizes` from target.json. This reduces the CUDA graph capture surface from ~50 default sizes to only the profiled batch sizes, mitigating `--cuda-graph-trace=node` replay hangs. This is NOT a parity violation — the profiled sizes are exact matches in vLLM's default capture list, so the graphs are identical to production.
 The lead should also instruct the researcher to run `scripts/nsys_probe.py` first to estimate profiling cost and determine safe `--nsys-output-len` values. See `references/nsys-profiling-guide.md` §3.10.
+
+**Researcher dispatch templates** (use the appropriate one based on the task):
+
+**T2 dispatch (baseline capture + profiling — Stage 1):**
+> Run baseline capture with nsys profiling. Use the sweep script with `--nsys-profile --labels baseline --capture-golden-refs`. Run the probe first if TP > 1 or model > 10B. Artifact dir: `{artifact_dir}`.
+
+**T4 dispatch (bottleneck mining — DO NOT re-run sweep):**
+> Analyze existing nsys traces at `{artifact_dir}/e2e_latency/nsys/`. Mine for bottlenecks using grounded data only. Do NOT re-run the sweep — traces are already captured.
+
+**T5b dispatch (ncu sanity check):**
+> Run ncu sanity check on the top-3 kernels from the bottleneck analysis. Validate baseline kernel metrics. See ammo-researcher.md § ncu Baseline Sanity Check.
+
+**T16 dispatch (re-profiling on patched codebase):**
+> Re-run baseline capture on the patched codebase with same flags as T2. Artifact dir: `{new_artifact_dir}`.
+
+**T17 dispatch (re-mining — DO NOT re-run sweep):**
+> Analyze existing nsys traces at `{new_artifact_dir}/e2e_latency/nsys/`. Mine for new bottlenecks after integration. Do NOT re-run the sweep.
 
 ### Stage 2b: Baseline ncu Sanity Check
 
@@ -207,15 +224,15 @@ Execute these steps **in order**:
    - Spawn an `ammo-impl-champion` (Opus, `isolation: worktree`) into the existing round team.
    - **Monitor spawn (REQUIRED)**: Immediately spawn an `ammo-transcript-monitor` (Sonnet) as a **team member** (`team_name=round_team_name`, `run_in_background=True`) for that impl-champion. See `orchestration/debate-protocol.md` § Monitor Spawn Pattern.
    - **Do NOT spawn `ammo-impl-validator` here.** The validator is spawned later by the orchestrator when the champion sends a `VALIDATION_REQUEST` via SendMessage (see `orchestration/parallel-tracks.md` § Validation Spawn Protocol).
-   - The champion implements; when ready, it sends `VALIDATION_REQUEST` to the orchestrator. The orchestrator spawns the validator, who independently writes its own correctness tests, benchmark scripts, and runs E2E sweeps. The validator dual-reports raw results to both champion and orchestrator.
+   - The champion implements; when ready, it sends `VALIDATION_REQUEST` to the orchestrator. The orchestrator spawns the validator, who independently writes its own synthetic correctness tests (Gate 5.1a only). Gates 5.1b and 5.3 are handled by the champion via the sweep script with `--verify-correctness`. Gate 5.2 (isolated kernel benchmark) is champion-owned independently. The validator dual-reports raw results to both champion and orchestrator.
 
 2. **Launch overlapped debate (round 2+ only)**: If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents into the same round team. **Monitor spawn (REQUIRED)**: After spawning each debate champion, spawn an `ammo-transcript-monitor` as a team member in background. Follow the standard debate protocol while also monitoring implementation tracks. See "Overlapped Debate" section above. For round 1, skip this step.
 
-3. **Monitor and gate**: While implementation agents run, actively monitor progress. Interleave debate moderation (if active) with implementation gating. As each champion completes (DA Stop hook passed), run its compilation gate (T9) and update state.json. Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed.
+3. **Monitor and gate**: While implementation agents run, actively monitor progress. Interleave debate moderation (if active) with implementation gating. As each champion completes (validation_results.md committed), run its compilation gate (T9) and update state.json. Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed.
 
 4. **TeamDelete after all tracks complete**: Once all implementation tracks have finished (passed or failed) and results are collected, AND the overlapped debate (if launched) has completed, call TeamDelete on the round team. This is the only TeamDelete in the round lifecycle.
 
-See `orchestration/parallel-tracks.md` for the full team structure, phase-transition protocol, and three-layer verification model.
+See `orchestration/parallel-tracks.md` for the full team structure, phase-transition protocol, and two-layer verification model.
 
 ### Stage 6: Integration Validation
 
@@ -257,14 +274,14 @@ T6:  TeamCreate round team + champion proposals + debate (Phase 0 -> rounds -> s
 T7:  GATE: Debate winner selection (proposals + summary.md exist) [main]                <- T6
 
   +- Per winning candidate (parallel, all in existing round team) ----------------------+
-  | Spawn impl-champion-{id} + impl-validator-{id} into round team                     |
-  | T8a_{id}: Research (validator) + plan reading (champion)   [round team]    <- T7   |
+  | Spawn impl-champion-{id} into round team                                           |
+  | T8a_{id}: Research + plan reading (champion)               [round team]    <- T7   |
   | T8b_{id}: Implement kernel (champion only)                 [round team]    <- T8a  |
-  | T8c_{id}: Independent validation Gates 5.1/5.2/5.3 (validator) [round team] <- T8b |
+  |   T8b_val_{id}: Champion sends VALIDATION_REQUEST → orchestrator spawns impl-validator-{id} |
+  | T8c_{id}: Gate 5.1a validation (validator) + E2E sweep with --verify-correctness (champion) [round team] <- T8b |
   | T8cx_{id}: [IF GATING_REQUIRED] Crossover probing (validator benchmarks,   |
   |            champion implements gating, validator re-validates)  [round team] <- T8c |
   | T8d_{id}: Kill criteria evaluation + validation_results.md (champion) [round team] <- T8c/T8cx |
-  |           (frontmatter Stop hook = DA: Amdahl, baseline, parity, independent validation) |
   | T9_{id}: GATE: compilation check                           [main]          <- T8d  |
   | T10_{id}: State update                                     [main]          <- T9   |
   +---------------------------------------------------------------------------------+
@@ -337,7 +354,7 @@ Hooks in `.claude/settings.local.json` enforce the campaign protocol mechanicall
 
 Inline DA verification (integrated into helper agents — replaces non-functional Stop hook DAs for team members):
 - **ammo-transcript-monitor** → Periodic transcript-based DA review of champion artifacts. In debate (Stage 3): 7-point DA audit (custom kernel mandate, evidence tier verification with claim-evidence matching, CUDA graph methodology, Amdahl consistency, E2E grounding, steady-state target, BS-gated sanity); writes to `debate/monitor_audits/`. In implementation (Stages 4-5): scope adherence, methodology checks, reward-hacking detection; writes to `tracks/{op_id}/monitor_audits/`.
-- **ammo-impl-validator** → After Gates 5.1/5.2/5.3: 5+ point DA section in validation report (Amdahl sanity, cross-track awareness, kernel-to-E2E coherence, scope adherence, Gate 5.2 cross-check; plus conditional GATED_PASS checks).
+- **ammo-impl-validator** → After Gate 5.1a: DA section in validation report (scope adherence, correctness methodology, cross-track awareness; plus conditional GATED_PASS checks). Gates 5.1b/5.3 results come from the champion's sweep script (`correctness_verdict.json` for 5.1b, sweep output for 5.3). Gate 5.2 (isolated kernel benchmark) is champion-owned independently.
 - **ammo-researcher** Stop → DA checks for ungrounded claims (subagent — Stop hooks work correctly).
 
 ## State Management
@@ -446,7 +463,7 @@ Run, don't modify:
 - `scripts/collect_env.py` — Capture environment
 - `scripts/verify_phase1_baseline.py` — Stage 1->2 gate
 - `scripts/verify_validation_gates.py` — Stage 5 gate (supports `--track` for per-track validation)
-- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `--labels baseline` for baseline-only sweeps (Stage 1), `--labels opt` for opt-only (Stage 5), or `--labels baseline,opt` (default, A/B comparison). Also supports `workload_matrix` for multi-dimensional sweeps and `--nsys-profile` for per-bucket nsys traces without model reload. **WARNING**: If `opt_env` in target.json still contains placeholder keys (e.g., `<ENABLE_FLAG>`), the script will fail fast — update `opt_env` before running with `--labels opt`.
+- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `--labels baseline` (default) for baseline-only sweeps (Stage 1), `--labels opt` for opt-only (Stage 5), or `--labels baseline,opt` for A/B comparison. Also supports `workload_matrix` for multi-dimensional sweeps and `--nsys-profile` for per-bucket nsys traces without model reload. Gate 5.1b correctness: `--capture-golden-refs` (Stage 1, saves golden references) and `--verify-correctness --baseline-from $STAGE1_DIR` (Stage 5, compares against golden refs). Use `--correctness-mode exact_greedy` for BF16 tracks or `--correctness-mode topk_relaxed` for FP8/quantization tracks. **WARNING**: If `opt_env` in target.json still contains placeholder keys (e.g., `<ENABLE_FLAG>`), the script will fail fast — update `opt_env` before running with `--labels opt`.
 - `scripts/generate_validation_report.py` — Structured reporting
 - `scripts/gpu_status.py` — Print current GPU reservation state (orchestrator/human diagnostic)
 - `scripts/gpu_force_clear.py` — Force-clear stale GPU reservations after crashes (orchestrator-only)

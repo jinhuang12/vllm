@@ -64,6 +64,14 @@ pytest tests/path/to/component_2_tests.py
 
 # Run combined E2E benchmark
 python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
+
+# Run combined correctness check (mandatory for multi-candidate integration)
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+    --artifact-dir {artifact_dir} --labels opt \
+    --baseline-from {stage1_dir} --verify-correctness \
+    --correctness-mode topk_relaxed --correctness-num-questions 50
+
+# If correctness fails: bisect — drop track with worst individual failure rate, re-run
 ```
 
 ### Combined Result Evaluation
@@ -73,6 +81,7 @@ python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
 | Combined E2E >= max(individual E2E results) | Ship the combined integration branch |
 | Combined E2E < max(individual E2E results) | Ship the single track with the best individual E2E |
 | Combined correctness fails | Fall back to shipping tracks individually (best E2E first) |
+| Combined correctness fails (topk or accuracy gate) | Bisect: drop worst track, re-validate smaller combination |
 
 If a cherry-pick produces a merge conflict, treat the candidates as overlapping (same-component) and pick the one with the best E2E speedup.
 
@@ -163,44 +172,13 @@ The integration section of `state.json` records all decisions and results:
 
 ## Campaign Loop Transition (Stage 7)
 
-After Stage 6 makes a SHIP or EXHAUSTED decision for the current round, the orchestrator runs the mechanical threshold check (`f` vs `min_e2e_improvement_pct`) per SKILL.md Campaign Stop Condition. See the Campaign Loop section in `SKILL.md` for the full protocol.
+See SKILL.md § Campaign Loop (T16-T17) for the re-profiling workflow and campaign stop condition.
 
-### If SHIP (one or more candidates passed)
+### Integration-Specific Addenda
 
-1. Record shipped candidates in `campaign.shipped_optimizations`.
-2. Update `campaign.cumulative_e2e_speedup` (multiplicative: `old x round_speedup`).
-
-For GATED_PASS tracks, use the **minimum post-gating speedup across all batch sizes** as the `e2e_speedup` value (conservative — avoids needing production BS distribution data).
-
-3. Record the round in `campaign.rounds` with all results.
-4. Trigger re-profiling: invoke `ammo-researcher` subagent for Stage 1 baseline capture on the patched codebase.
-5. After re-profile: run bottleneck mining (Stage 2) on the new baseline.
+**GATED_PASS speedup accounting**: For GATED_PASS tracks, use the **minimum post-gating speedup across all batch sizes** as the `e2e_speedup` value (conservative — avoids needing production BS distribution data).
 
 **Lazy invalidation with GATED_PASS**: When re-profiling after a GATED_PASS track ships, profile at ALL campaign batch sizes (not just one). The gated optimization's f-shift is BS-dependent — f changes only at gated-on batch sizes, not at gated-off batch sizes. Use the **maximum f-shift across all BS** for the lazy invalidation test to be conservative.
-
-5b. **Lazy invalidation of overlapped debate winners** (if `debate.next_round_overlap.selected_winners` is non-empty):
-   - For each winner in `debate.next_round_overlap.selected_winners`:
-     - Retrieve `f_old` from `debate.next_round_overlap.f_values_at_proposal[op_id]`.
-     - Compute `f_new` from the new bottleneck_analysis.md.
-     - If `f_old < 0.05`: skip invalidation for this candidate (kernel too small for reliable f-shift measurement).
-     - If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`: discard the candidate. Record as `{"event": "candidate_invalidated", "op_id": "...", "reason": "f_shift", "f_old": ..., "f_new": ...}`.
-     - Otherwise: retain the candidate.
-   - If any candidates survive invalidation: move them to `debate.selected_winners`. Clear `debate.next_round_overlap` to initial state. Skip Step 8 (debate) -- proceed directly to Stages 4-5.
-   - If all candidates are invalidated: clear `debate.next_round_overlap` to initial state. Proceed to Step 8 (fresh debate).
-6. Read the new top bottleneck's share of total decode latency.
-7. If `top_bottleneck_share < campaign.min_e2e_improvement_pct`: set `campaign.status = "campaign_complete"`. Done.
-8. Else: increment `campaign.current_round`, enter Stage 3 for the next round.
-
-### If EXHAUSTED (no candidates passed this round)
-
-1. Record the failed round in `campaign.rounds`.
-2. Mechanical threshold check against the CURRENT profiling data (no re-profile since nothing changed).
-   - If `top_bottleneck_share < threshold`: set `campaign.status = "campaign_exhausted"`. Done.
-   - Else: start a new debate round from existing bottleneck data (skip re-profiling, skip Stage 2).
-
-### Hook Enforcement
-
-The Stop hook (`ammo-stop-guard.sh`) blocks the session from ending while the campaign is active. The orchestrator must complete the current stage to allow the session to end. Setting `campaign.status` to `"paused"` is only permitted on explicit user request (see SKILL.md § Campaign State Transitions).
 
 ## Overlapped Debate and Implementation Interaction
 
