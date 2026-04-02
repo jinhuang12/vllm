@@ -501,3 +501,55 @@ class TestMaybeListStr:
     def test_invalid_type_raises(self):
         with pytest.raises(SystemExit, match="Expected list"):
             self._call({"a": "not_a_list"}, "a")
+
+
+# ---------------------------------------------------------------------------
+# _ensure_worktree_pythonpath: prepend CWD so worktree vllm is found first
+# ---------------------------------------------------------------------------
+
+class TestEnsureWorktreePythonpath:
+    """Verify _ensure_worktree_pythonpath correctly sets PYTHONPATH."""
+
+    def _call(self, env, cwd=None):
+        from run_vllm_bench_latency_sweep import _ensure_worktree_pythonpath
+        if cwd is not None:
+            with mock.patch("run_vllm_bench_latency_sweep.os.getcwd", return_value=cwd):
+                return _ensure_worktree_pythonpath(env)
+        return _ensure_worktree_pythonpath(env)
+
+    def test_no_existing_pythonpath(self):
+        """CWD is set as PYTHONPATH when none exists."""
+        env = {"FOO": "bar"}
+        result = self._call(env, cwd="/tmp/worktree")
+        assert result["PYTHONPATH"] == "/tmp/worktree"
+        assert result["FOO"] == "bar"
+
+    def test_existing_pythonpath_is_preserved(self):
+        """CWD is prepended to existing PYTHONPATH."""
+        env = {"PYTHONPATH": "/some/other/path"}
+        result = self._call(env, cwd="/tmp/worktree")
+        parts = result["PYTHONPATH"].split(":")
+        assert parts[0] == "/tmp/worktree"
+        assert "/some/other/path" in parts
+
+    def test_cwd_already_first_in_pythonpath(self):
+        """No duplication when CWD is already first entry."""
+        env = {"PYTHONPATH": "/tmp/worktree:/other"}
+        result = self._call(env, cwd="/tmp/worktree")
+        # Should not duplicate
+        parts = result["PYTHONPATH"].split(":")
+        assert parts.count("/tmp/worktree") == 1
+        assert parts[0] == "/tmp/worktree"
+
+    def test_does_not_mutate_input(self):
+        """Input dict is not modified in place."""
+        env = {"PYTHONPATH": "/old"}
+        result = self._call(env, cwd="/tmp/worktree")
+        assert env["PYTHONPATH"] == "/old"
+        assert result["PYTHONPATH"].startswith("/tmp/worktree")
+
+    def test_empty_pythonpath(self):
+        """Empty string PYTHONPATH is treated as absent."""
+        env = {"PYTHONPATH": ""}
+        result = self._call(env, cwd="/tmp/worktree")
+        assert result["PYTHONPATH"] == "/tmp/worktree"

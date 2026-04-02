@@ -120,6 +120,27 @@ def _is_placeholder(v: Any) -> bool:
     return isinstance(v, str) and (v.strip() == PLACEHOLDER or v.strip().startswith("<") and v.strip().endswith(">"))
 
 
+def _ensure_worktree_pythonpath(env: Dict[str, str]) -> Dict[str, str]:
+    """Prepend CWD to PYTHONPATH so worktree's ``vllm`` package is imported first.
+
+    When the sweep script runs inside a git worktree, the editable install
+    resolves to the main repo.  By prepending CWD (the worktree root) to
+    PYTHONPATH, child subprocesses will ``import vllm`` from the worktree's
+    modified code rather than the main repo's.
+    """
+    env = dict(env)  # shallow copy — don't mutate caller's dict
+    cwd = os.getcwd()
+    existing = env.get("PYTHONPATH", "")
+    if existing:
+        # Avoid duplicating if CWD is already the first entry.
+        parts = existing.split(":")
+        if parts[0] != cwd:
+            env["PYTHONPATH"] = f"{cwd}:{existing}"
+    else:
+        env["PYTHONPATH"] = cwd
+    return env
+
+
 def _sanitize_vllm_op_env(env: Dict[str, str]) -> Dict[str, str]:
     """Strip all VLLM_OP* env vars from *env* to prevent cross-track contamination.
 
@@ -2048,6 +2069,7 @@ def main() -> None:
 
         # Prepend nsys wrapper when profiling.
         child_env = dict(run.env) if run.env else dict(os.environ)
+        child_env = _ensure_worktree_pythonpath(child_env)
         if args.nsys_profile:
             assert nsys_dir is not None
             child_env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
