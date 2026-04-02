@@ -1,0 +1,19 @@
+version: 1.1.0
+
+## Changelog
+
+### 1.1.0 (2026-04-02)
+- feat: redesign Gate 5.1b as E2E correctness via GSM8K greedy decode (replaces token-level comparison with deterministic generation matching against golden references)
+- refactor: simplify Stage 5 — validator is now a champion-spawned sub-agent (not an orchestrator-spawned team member), handling Gates 5.1a + 5.2; champion owns Gates 5.1b + 5.3a + 5.3b via single sweep script invocation
+- feat: add accuracy-risk scoring for quantization-inclusive optimizations — lossy/lossless classification system with dtype boundary rule, separate speedup accounting (2x lossless / 4x lossy deflation), mandatory topk_relaxed + 100 GSM8K questions for lossy tracks, undisclosed precision reduction penalties, Phase 0 eligibility gate for classification
+- Updated agents: ammo-champion, ammo-impl-champion, ammo-impl-validator, ammo-transcript-monitor
+- Updated orchestration: debate-protocol, parallel-tracks, integration-logic
+- Updated references: debate-scoring-rubric, validation-defaults
+- Updated skill: SKILL.md (state.json schema, sweep script usage)
+- New test scenarios: test-impl-champion.md (IC1–IC10 conformance tests)
+
+### 1.0.0 (2026-03-31)
+- Initial versioned release of AMMO session config
+- Agents: ammo-champion, ammo-impl-champion, ammo-impl-validator, ammo-transcript-monitor, ammo-delegate, ammo-researcher
+- 7-stage campaign pipeline with adversarial debate, parallel worktree tracks, GPU pool management
+- References: debate-scoring-rubric, validation-defaults, impl-track-rules, gpu-pool, cudagraph-safety, gpu-configs, code-templates, kernel-benchmark-template
