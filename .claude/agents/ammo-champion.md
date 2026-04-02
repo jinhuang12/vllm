@@ -44,6 +44,7 @@ The debate has a proposal phase followed by debate rounds. The main session (mod
 
 **Phase 0 — Proposal** (before rounds begin): Write `{artifact_dir}/debate/proposals/{champion_id}_proposal.md` with:
 - Candidate specification: what kernel/component to optimize and how
+- **Precision Classification**: Declare `lossless` or `lossy` per the dtype boundary rule in `references/debate-scoring-rubric.md` § Lossy Classification Rule. This is a required field — proposals missing it will be rejected at the eligibility gate. If lossy, report separate lossless vs. quantization speedup projections (see rubric § Lossy E2E Impact Scoring).
 - Grounded data: cite measured timings, component share `f`, bandwidth utilization from bottleneck_analysis.md
 - Micro-experiment result: at least one empirical data point — see Evidence Tiers for what qualifies at each tier
 - Feasibility math: expected kernel speedup derived from YOUR micro-experiment, NOT from unverified estimates
@@ -67,6 +68,7 @@ Each debate round then has 3 phases:
 - Overlooked risks (CUDA graph safety, precision, regressions)
 - Incorrect assumptions about hardware capabilities
 - Alternative interpretations of their evidence
+- **Undisclosed precision reduction**: If the target's claimed speedup comes from a dtype change not classified as lossy, this is a material critique (see `references/debate-scoring-rubric.md` § Lossy Classification Rule). Flag it explicitly — undisclosed precision reduction carries a 2-point scoring deduction.
 
 **Phase C — Rebuttal**: Write `{artifact_dir}/debate/round_{N}/{op_id}_rebuttal.md` with:
 - Counter-evidence to the critique you received

@@ -211,10 +211,22 @@ Also require:
 
 | Mode | Default for | Gate logic |
 |------|-------------|------------|
-| `exact_greedy` | BF16/non-quantization tracks | Every token must match. `--max-divergent-positions 0` by default. |
-| `topk_relaxed` | FP8/quantization tracks | Bidirectional top-5 containment. `--max-topk-failures-pct 5.0` by default. Length mismatches count as failures. |
+| `exact_greedy` | Lossless tracks | Every token must match. `--max-divergent-positions 0` by default. |
+| `topk_relaxed` | Lossy tracks (precision reduction introduced) | Bidirectional top-5 containment. `--max-topk-failures-pct 5.0` by default. Length mismatches count as failures. |
 
-**GSM8K accuracy gate** (quantization tracks only): The optimized model cannot get ANY question wrong that the baseline got correct ("zero questions lost"). This is a superset check, not a percentage threshold. Enabled automatically when `--correctness-mode topk_relaxed`.
+**Mode selection is based on lossy classification from the debate summary** (see `debate-scoring-rubric.md` § Lossy Classification Rule), not on the model's existing dtype. A BF16 model with an optimization that introduces precision reduction (e.g., FP8, INT4, MXFP4) is lossy and uses `topk_relaxed`.
+
+**Lossy track parameter overrides:**
+
+| Parameter | Lossless tracks | Lossy tracks |
+|-----------|----------------|--------------|
+| `--correctness-mode` | `exact_greedy` | `topk_relaxed` (forced) |
+| `--correctness-num-questions` | 30 (script default) | **100** |
+| GSM8K accuracy gate | Off | On (implied by `topk_relaxed`) |
+
+These overrides apply to ALL sweep invocations for the track, including GATING_REQUIRED re-validation sweeps.
+
+**GSM8K accuracy gate** (lossy tracks): The optimized model cannot get ANY question wrong that the baseline got correct ("zero questions lost"). This is a superset check, not a percentage threshold. Enabled automatically when `--correctness-mode topk_relaxed`.
 
 **Self-consistency check** (Stage 1 only): Golden ref capture runs prompts twice to verify greedy decode is deterministic. If non-deterministic, metadata records `deterministic: false` and recommends `topk_relaxed` for Stage 5.
 

@@ -34,10 +34,9 @@ Round Team: ammo-round-{round_id}-{model_short}-{hardware}
 | ... implementation agents for round N (Stages 4-5) ...
 | +-- impl-champion-{op_id_1} (Opus)     [Stages 4-5]
 | |   +-- impl-monitor-1 (Sonnet)        [Stages 4-5]
-| +-- impl-validator-{op_id_1} (Sonnet)  [Stages 4-5]
 | +-- impl-champion-{op_id_2} (Opus)     [Stages 4-5]
 | |   +-- impl-monitor-2 (Sonnet)        [Stages 4-5]
-| +-- impl-validator-{op_id_2} (Sonnet)  [Stages 4-5]
+|     (kernel validation sub-agents spawned by champions as needed — NOT team members)
 | ... OVERLAPPED: debate champions for round N+1 (if round 2+) ...
 | +-- champion-r{N+1}-1 (Opus)           [next-round debate -- shut down after selection]
 | |   +-- monitor-r{N+1}-1 (Sonnet)      [next-round debate -- shut down after selection]
@@ -103,12 +102,17 @@ Champions write proposals per `references/debate-rules.md` (see Evidence Tiers f
 
 ### Proposal Eligibility Gate (Lead)
 
-After Phase 0 submissions, the lead checks each proposal against the **Custom Kernel Mandate** before any debate begins:
+After Phase 0 submissions, the lead checks each proposal against two gates before any debate begins:
 
+**Gate 1 — Custom Kernel Mandate:**
 - **Pass**: Proposal involves writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code.
 - **Reject**: Config-only changes, flag-flipping, parameter tuning, or no kernel code scope described.
 
-**Rejection action**: Message the champion to revise with a kernel-based proposal. If no compliant revision is submitted, the candidate is eliminated.
+**Gate 2 — Precision Classification:**
+- **Pass**: Proposal includes a `Precision Classification` field declaring `lossless` or `lossy`, citing the dtype boundary rule from `references/debate-scoring-rubric.md` § Lossy Classification Rule.
+- **Reject**: Classification field absent or does not cite the dtype boundary rule.
+
+**Rejection action**: Message the champion to revise. If no compliant revision is submitted, the candidate is eliminated.
 
 **Non-compliant proposals MUST NOT advance to Round 1.**
 

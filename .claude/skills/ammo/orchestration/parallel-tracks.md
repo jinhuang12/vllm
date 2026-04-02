@@ -73,6 +73,11 @@ Agent(
     - Summary table: {artifact_dir}/constraints.md ("Baseline E2E latency" section)
     - Kernel breakdown: {artifact_dir}/constraints.md ("Baseline Truth Snapshot" section)
 
+    ## Precision Classification (from debate summary)
+    Classification: {classification}  # "lossless" or "lossy" — determines correctness mode and question count
+    # Lossless: --correctness-mode exact_greedy --correctness-num-questions 30
+    # Lossy: --correctness-mode topk_relaxed --correctness-num-questions 100
+
     ## E2E Threshold
     E2E threshold: min_e2e_improvement_pct (from state.json)
 
@@ -108,6 +113,7 @@ Agent(
     - Stage: implementation
     - Artifact dir: {artifact_dir}
     - Projects dir: {projects_dir}
+    - Classification: {classification}  # "lossless" or "lossy" — for undisclosed precision reduction CRITICAL check
 
     Focus on IMPLEMENTATION-STAGE concerns: production parity, worktree discipline,
     validation integrity, gate completeness, baseline reuse, reasoning gaps.

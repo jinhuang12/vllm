@@ -30,10 +30,15 @@ Derive test methodology from:
 1. The optimization plan (`{artifact_dir}/debate/summary.md`)
 2. `{artifact_dir}/target.json` — `workload.batch_sizes`
 3. `references/validation-defaults.md` — tolerance starting points
+4. The `classification` field from the champion's spawn prompt (`lossless` or `lossy`)
+
+**Tolerance selection based on classification:**
+- **Lossless tracks**: Use tolerances matching the model's native dtype (BF16: `atol=1e-2, rtol=1e-2`)
+- **Lossy tracks**: Use tolerances appropriate for the reduced precision introduced by the optimization (e.g., FP8, INT4, MXFP4). Refer to validation-defaults.md § tolerance starting points for the target dtype, or copy from the model's existing tests if available
 
 Your correctness tests must:
 - Import vLLM's **production kernel** as baseline (not naive PyTorch)
-- Use `torch.allclose()` with appropriate tolerances per dtype
+- Use `torch.allclose()` with appropriate tolerances per classification and dtype
 - Test ALL batch sizes from target.json (no cherry-picking)
 - Include adversarial cases: edge batch sizes (1, max), precision boundary values
 - Check for NaNs/INFs in output

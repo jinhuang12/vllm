@@ -85,9 +85,12 @@ This one command does everything in order:
 2. **Gate 5.3b** (Phase 2 — latency): E2E latency sweep across all batch sizes. Produces per-BS verdicts.
 3. **Gate 5.3a** (kernel proof): `--nsys-profile` captures an nsys trace. After the sweep, verify via `nsys stats --report cuda_gpu_kern_sum` that your expected kernel name appears.
 
-**Mode selection:**
-- `exact_greedy` (default) for BF16/non-quantization tracks
-- `topk_relaxed` for FP8/quantization tracks (includes "zero questions lost" accuracy gate)
+**Mode selection** (based on `classification` field from `debate/summary.md`):
+- `exact_greedy --correctness-num-questions 30` for **lossless** tracks
+- `topk_relaxed --correctness-num-questions 100` for **lossy** tracks (includes "zero questions lost" accuracy gate)
+- **If `classification` is absent from the summary: treat as lossy** (safe default) and flag to orchestrator
+
+These parameters apply to ALL sweep invocations for your track, including GATING_REQUIRED re-validation sweeps.
 
 **If Gate 5.3a fails** (kernel not found in nsys trace): the optimization is not activating. Latency numbers are invalid — fix the dispatch before re-running.
 
