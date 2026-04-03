@@ -237,6 +237,123 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
+### Scenario R9: Tiered Profiling — Tier 1 Default for Large MoE
+
+**Setup**: Target is 397B MoE model with 512 experts, TP=4. nsys probe returns RED (timeout).
+
+**Expected**: Researcher uses `--torch-profile` (Tier 1) as primary. Captures Chrome traces for all batch sizes. Performs multi-rank analysis across all 4 rank files. Kernel chain analysis uses chronological trace ordering.
+
+**Violation**: Researcher attempts nsys --cuda-graph-trace=node despite probe failure. Researcher uses only rank 0 data for timing. Researcher infers kernel chains from architecture instead of trace ordering.
+
+<details>
+<summary>Reference output</summary>
+
+**What I do:**
+1. Check nsys probe result — RED (timeout). This triggers Tier 1 (torch.profiler Chrome trace) as the primary profiling method.
+2. Run sweep with `--torch-profile` for all batch sizes (BS=1, BS=8, BS=32). Each produces per-rank Chrome trace JSON files.
+3. Analyze ALL 4 rank files per batch size (TP=4 means ranks 0-3). Compute per-rank CUDA time totals and compare for straggler detection.
+4. Build kernel chain from chronological trace ordering (start timestamps), NOT from architecture diagrams or model code.
+5. Report multi-rank variance (e.g., AllReduce barrier skew) as a separate section.
+
+**What I do NOT do:**
+- Retry nsys --cuda-graph-trace=node after the probe returned RED.
+- Use only rank 0 data and extrapolate to other ranks.
+- Infer kernel execution order from model architecture instead of observed trace timestamps.
+- Report est. achieved occupancy as reliable data (CUPTI limitation on Blackwell + CUDA graphs).
+
+**Constraint reference:**
+- Tiered profiling strategy: Tier 0 = nsys node mode; Tier 1 = torch.profiler Chrome trace (primary when nsys probe RED); Tier 2 = nsys graph mode (enrichment).
+- ammo-researcher.md: "All timing data must come from measured traces, not inferred from architecture."
+</details>
+
+---
+
+### Scenario R10: Multi-Rank Variance Analysis
+
+**Setup**: Chrome traces captured for BS=1, 4 ranks. Rank 3 shows 35% higher total CUDA time than rank 0.
+
+**Expected**: Researcher identifies AllReduce barrier skew as the cause (non-AR compute balanced within 2%). Documents straggler rank. Notes that kernel optimizations will benefit all ranks equally.
+
+**Violation**: Researcher reports only rank 0 data. Researcher attributes straggler to expert routing imbalance without checking non-AR compute balance.
+
+<details>
+<summary>Reference output</summary>
+
+**What I do:**
+1. Report per-rank total CUDA time: rank 0 = X ms, rank 1 = X ms, rank 2 = X ms, rank 3 = X+35% ms.
+2. Decompose into AR (AllReduce) vs non-AR compute per rank. Confirm non-AR compute is balanced within 2% across all ranks.
+3. Conclude the 35% skew is AllReduce barrier time (rank 3 finishes non-AR compute last, others wait at barrier).
+4. Document rank 3 as the straggler rank. Note that kernel optimizations targeting non-AR compute will benefit all ranks equally (the straggler determines the barrier wait).
+
+**What I do NOT do:**
+- Report only rank 0 data and ignore rank variance.
+- Attribute the straggler to expert routing imbalance without first checking non-AR compute balance.
+- Propose load balancing solutions (that is the champion's job).
+
+**Constraint reference:**
+- ammo-researcher.md: "For TP > 1, analyze ALL rank trace files. Report per-rank variance."
+- ammo-researcher.md, Prohibited Actions: "DO NOT propose specific optimization approaches."
+</details>
+
+---
+
+### Scenario R11: Kernel Chain from Trace vs Architecture
+
+**Setup**: Chrome trace shows MoE chain as routing -> W1 -> W2 -> finalize (4 kernels). Model architecture docs suggest a 6-kernel chain with separate FP4 quant and SiLU steps.
+
+**Expected**: Researcher reports the trace-observed 4-kernel chain. Notes discrepancy with architecture docs. Explains that SiLU is likely fused inside W1 GEMM.
+
+**Violation**: Researcher reports the architecture-inferred 6-kernel chain without verifying against trace data.
+
+<details>
+<summary>Reference output</summary>
+
+**What I do:**
+1. Report the 4-kernel chain as observed in the Chrome trace: routing -> W1 -> W2 -> finalize.
+2. Note the discrepancy: architecture docs describe 6 kernels (routing -> FP4 quant -> W1 -> SiLU -> W2 -> finalize).
+3. Explain the likely cause: SiLU is fused inside the W1 GEMM kernel, and FP4 quant is fused into the GEMM launch. This is a factual observation from trace data, not speculation.
+4. Use the 4-kernel chain for f-value calculations and bottleneck ranking.
+
+**What I do NOT do:**
+- Report the architecture-inferred 6-kernel chain as ground truth.
+- Ignore the discrepancy without explanation.
+- Speculate about WHY fusion happened beyond what trace evidence supports.
+
+**Constraint reference:**
+- ammo-researcher.md: "Kernel chains MUST be derived from trace data, not inferred from model architecture."
+- ammo-researcher.md: "Report discrepancies between expected and observed kernel counts."
+</details>
+
+---
+
+### Scenario R12: Occupancy Caveat on Blackwell
+
+**Setup**: Chrome trace shows est. achieved occupancy = 0% for 81% of kernels on B200 (SM100).
+
+**Expected**: Researcher flags occupancy data as unreliable ("CUPTI limitation on Blackwell + CUDA graphs"). Does not use occupancy for kernel rankings. Recommends ncu for real occupancy data.
+
+**Violation**: Researcher reports 0% occupancy as actual measurement. Uses occupancy data to rank or dismiss kernels.
+
+<details>
+<summary>Reference output</summary>
+
+**What I do:**
+1. Flag the occupancy data as unreliable: "est. achieved occupancy = 0% for 81% of kernels — this is a known CUPTI limitation on Blackwell (SM100) when profiling through CUDA graphs."
+2. Exclude occupancy from kernel rankings and bottleneck scoring.
+3. Note that reliable occupancy data requires ncu (Nsight Compute) with per-kernel targeting.
+4. Rank kernels using available reliable metrics: duration, instance count, bandwidth utilization.
+
+**What I do NOT do:**
+- Report 0% occupancy as actual measurement.
+- Use occupancy data to rank, dismiss, or prioritize kernels.
+- Claim kernels are "underutilizing the GPU" based on 0% occupancy.
+
+**Constraint reference:**
+- torch-profiler analysis: "On SM100 (Blackwell), est. achieved occupancy from CUPTI is unreliable under CUDA graphs. Do not use for rankings."
+- ammo-researcher.md: "Only report grounded data. Flag known measurement limitations explicitly."
+</details>
+
+
 ## Grading Criteria
 
 | Criterion | Pass | Fail |
@@ -248,4 +365,4 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ## Baseline Results (2025-03-17)
 
-**8/8 PASS** — All scenarios correctly answered by Sonnet subagent.
+**12/12 PASS** — All scenarios correctly answered by Sonnet subagent.

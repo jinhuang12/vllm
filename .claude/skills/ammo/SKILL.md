@@ -140,7 +140,7 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 - Debate champions MUST NOT message implementation agents. Implementation agents MUST NOT message debate champions.
 - The orchestrator enforces this by not providing cross-workstream agent names in spawn prompts.
 
-**Lazy invalidation**: After re-profiling in the next round, the orchestrator checks each overlapped-debate winner's f-value against the new profiling data. If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`, the candidate is discarded (the target kernel's share shifted too much). If `f_old < 0.05`, skip invalidation for that candidate (the kernel is too small to measure f-shift reliably). Otherwise, the candidate proceeds to implementation. This replaces the old eager re-scoring protocol.
+**Lazy invalidation**: After re-profiling in the next round, the orchestrator checks each overlapped-debate winner's f-value against the new profiling data. If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`, the candidate is discarded (the target kernel's share shifted too much). If `f_old < 0.05`, skip invalidation for that candidate (the kernel is too small to measure f-shift reliably). Otherwise, the candidate proceeds to implementation.
 
 **GPU allocation**: Debate champions may run brief GPU micro-benchmarks using the pool (`--num-gpus 1`).
 
@@ -157,23 +157,36 @@ During Stages 4-5 of round N (N >= 2), the orchestrator launches the next round'
 ### Stages 1-2: Main Session + Subagents
 
 - Lead (you) invokes ammo-researcher as a subagent via Task tool for profiling, source analysis, bottleneck mining.
-- Lead delegates profiling and E2E baseline capture to ammo-researcher (who uses the sweep script with `--nsys-profile --labels baseline --capture-golden-refs`). Use `--labels baseline` to avoid running a meaningless opt sweep (opt_env is still a placeholder at this stage). `--capture-golden-refs` captures golden references for Gate 5.1b correctness checks in Stage 5. The lead does NOT duplicate work assigned to the ammo-researcher (i.e. run benchmarks, extract profiling results).
+- Lead delegates profiling and E2E baseline capture to ammo-researcher. The researcher
+  runs the nsys probe first, then uses the sweep script with the appropriate profiling
+  tier:
+  - Probe PASS -> `--nsys-profile --labels baseline --capture-golden-refs` (Tier 0)
+  - Probe FAIL -> `--torch-profile --labels baseline --capture-golden-refs` (Tier 1)
+  - Optionally add `--nsys-profile --nsys-mode graph` for Tier 2 enrichment
+
+  Use `--labels baseline` to avoid running a meaningless opt sweep (opt_env is still a placeholder at this stage). `--capture-golden-refs` captures golden references for Gate 5.1b correctness checks in Stage 5. The lead does NOT duplicate work assigned to the ammo-researcher (i.e. run benchmarks, extract profiling results).
 - No TeamCreate. No persistent agents. Subagent returns results directly.
 - Lead runs gates (`verify_phase1_baseline.py`, Stage 2 review) between stages.
       
 **Profiling strategy selection (lead decides BEFORE dispatching researcher)**:
-For TP > 1 or models > 10B params, the lead should instruct the researcher to use two-step delimited capture. The researcher handles this automatically when using the sweep script with `--nsys-profile` (it sets `VLLM_WORKER_MULTIPROC_METHOD=spawn`, `--trace-fork-before-exec=true`, and `--capture-range=cudaProfilerApi`). See `references/nsys-profiling-guide.md` §3.1B for background on why full-run capture hangs on multi-GPU models.
+The researcher uses a tiered profiling strategy. The nsys probe determines the tier:
+- **Tier 0** (nsys node mode): Preferred when probe passes (GREEN/YELLOW)
+- **Tier 1** (torch.profiler): Default when probe fails (RED/timeout)
+- **Tier 2** (nsys graph enrichment): Optional, for SM100 cluster dims or NVLink analysis
+
+The researcher handles tier selection automatically based on probe results.
+See `references/nsys-profiling-guide.md` §3.10 for the decision tree and
+`references/torch-profiler-guide.md` for Chrome trace analysis methodology.
 
 When `--nsys-profile` is used, the sweep script automatically restricts `cudagraph_capture_sizes` to match `workload.batch_sizes` from target.json. This reduces the CUDA graph capture surface from ~50 default sizes to only the profiled batch sizes, mitigating `--cuda-graph-trace=node` replay hangs. This is NOT a parity violation — the profiled sizes are exact matches in vLLM's default capture list, so the graphs are identical to production.
-The lead should also instruct the researcher to run `scripts/nsys_probe.py` first to estimate profiling cost and determine safe `--nsys-output-len` values. See `references/nsys-profiling-guide.md` §3.10.
 
 **Researcher dispatch templates** (use the appropriate one based on the task):
 
 **T2 dispatch (baseline capture + profiling — Stage 1):**
-> Run baseline capture with nsys profiling. Use the sweep script with `--nsys-profile --labels baseline --capture-golden-refs`. Run the probe first if TP > 1 or model > 10B. Artifact dir: `{artifact_dir}`.
+> Run baseline capture with profiling. Run the nsys probe first to determine the profiling tier. Use the sweep script with the probe-recommended flags (`--nsys-profile` for Tier 0, `--torch-profile` for Tier 1) plus `--labels baseline --capture-golden-refs`. Artifact dir: `{artifact_dir}`.
 
 **T4 dispatch (bottleneck mining — DO NOT re-run sweep):**
-> Analyze existing nsys traces at `{artifact_dir}/e2e_latency/nsys/`. Mine for bottlenecks using grounded data only. Do NOT re-run the sweep — traces are already captured.
+> Analyze existing profiling traces at `{artifact_dir}/e2e_latency/` (nsys traces in `nsys/`, Chrome traces in `torch_profile/`). Mine for bottlenecks using grounded data only. Do NOT re-run the sweep — traces are already captured.
 
 **T5b dispatch (ncu sanity check):**
 > Run ncu sanity check on the top-3 kernels from the bottleneck analysis. Validate baseline kernel metrics. See ammo-researcher.md § ncu Baseline Sanity Check.
@@ -182,7 +195,7 @@ The lead should also instruct the researcher to run `scripts/nsys_probe.py` firs
 > Re-run baseline capture on the patched codebase with same flags as T2. Artifact dir: `{new_artifact_dir}`.
 
 **T17 dispatch (re-mining — DO NOT re-run sweep):**
-> Analyze existing nsys traces at `{new_artifact_dir}/e2e_latency/nsys/`. Mine for new bottlenecks after integration. Do NOT re-run the sweep.
+> Analyze existing profiling traces at `{new_artifact_dir}/e2e_latency/` (nsys traces in `nsys/`, Chrome traces in `torch_profile/`). Mine for new bottlenecks after integration. Do NOT re-run the sweep.
 
 ### Stage 2b: Baseline ncu Sanity Check
 
@@ -462,7 +475,7 @@ Run, don't modify:
 - `scripts/collect_env.py` — Capture environment
 - `scripts/verify_phase1_baseline.py` — Stage 1->2 gate
 - `scripts/verify_validation_gates.py` — Stage 5 gate (supports `--track` for per-track validation)
-- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `--labels baseline` (default) for baseline-only sweeps (Stage 1), `--labels opt` for opt-only (Stage 5), or `--labels baseline,opt` for A/B comparison. Also supports `workload_matrix` for multi-dimensional sweeps and `--nsys-profile` for per-bucket nsys traces without model reload. Gate 5.1b correctness: `--capture-golden-refs` (Stage 1, saves golden references) and `--verify-correctness --baseline-from $STAGE1_DIR` (Stage 5, compares GSM8K accuracy against golden refs; `opt_accuracy >= baseline_accuracy` at n=200 by default). **WARNING**: If `opt_env` in target.json still contains placeholder keys (e.g., `<ENABLE_FLAG>`), the script will fail fast — update `opt_env` before running with `--labels opt`.
+- `scripts/run_vllm_bench_latency_sweep.py` — Batch E2E benchmark runner (GPU-locked). Supports `--labels baseline` (default) for baseline-only sweeps (Stage 1), `--labels opt` for opt-only (Stage 5), or `--labels baseline,opt` for A/B comparison. Also supports `workload_matrix` for multi-dimensional sweeps, `--nsys-profile` for per-bucket nsys traces without model reload, `--torch-profile` for per-bucket torch.profiler Chrome traces (production-representative timing, multi-rank), and `--nsys-mode {node|graph}` for selecting nsys capture mode. Gate 5.1b correctness: `--capture-golden-refs` (Stage 1, saves golden references) and `--verify-correctness --baseline-from $STAGE1_DIR` (Stage 5, compares GSM8K accuracy against golden refs; `opt_accuracy >= baseline_accuracy` at n=200 by default). **WARNING**: If `opt_env` in target.json still contains placeholder keys (e.g., `<ENABLE_FLAG>`), the script will fail fast — update `opt_env` before running with `--labels opt`.
 - `scripts/generate_validation_report.py` — Structured reporting
 - `scripts/gpu_status.py` — Print current GPU reservation state (orchestrator/human diagnostic)
 - `scripts/gpu_force_clear.py` — Force-clear stale GPU reservations after crashes (orchestrator-only)
@@ -472,6 +485,7 @@ Run, don't modify:
 | Topic | File |
 |-------|------|
 | Nsys profiling | `references/nsys-profiling-guide.md` |
+| Chrome trace analysis | `references/torch-profiler-guide.md` |
 | Validation gates | `references/validation-defaults.md` |
 | CUDA graph safety | `references/cudagraph-safety.md` |
 | E2E latency | `references/e2e-latency-guide.md` |

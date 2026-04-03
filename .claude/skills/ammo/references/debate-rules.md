@@ -10,11 +10,11 @@ Every claim in a proposal or argument requires evidence. The type of evidence re
 |------|-----------|----------|-------------------|-----------------|
 | **Tier 1 — Analysis** | Theoretical bounds | Roofline calc, Amdahl projection, working-set analysis, ISA inspection | `.py` script using only `import math`/`numpy` — no GPU calls | **3/10** |
 | **Tier 2 — Kernel execution** | Kernel speedup numbers | "Measured 1.34x at BS=8", kernel timing claims | `.py` script with `torch.cuda` calls + `.log` with GPU device name on line 1 (`torch.cuda.get_device_name()`) and `torch.cuda.Event` timing output | **7/10** |
-| **Tier 3 — Hardware profiling** | Hardware utilization metrics | "85% occupancy", "400 GB/s achieved BW", register count | ncu CSV or nsys stats export with GPU hardware fingerprint | No cap |
+| **Tier 3 — Hardware profiling** | Hardware utilization metrics | "85% occupancy", "400 GB/s achieved BW", register count | ncu CSV, nsys stats export, or torch.profiler Chrome trace JSON analysis with GPU hardware fingerprint | No cap |
 
 **Rules**:
 - Claiming a specific kernel speedup NUMBER (e.g., "1.5x faster") requires **Tier 2 or higher**. A roofline calculation showing "up to 2x theoretical" is Tier 1 — acceptable as a bound, but feasibility capped.
-- Claiming specific hardware utilization metrics (occupancy %, achieved BW, register count) requires **Tier 3**. If a metric is cited, it must come from ncu/nsys measurement, not a roofline estimate.
+- Claiming specific hardware utilization metrics (occupancy %, achieved BW, register count) requires **Tier 3**. If a metric is cited, it must come from ncu/nsys measurement or torch.profiler Chrome trace analysis, not a roofline estimate. Chrome trace provides per-kernel timing, grid/block dims, registers, and shared memory — sufficient for BW utilization and launch config claims. Occupancy claims still require ncu.
 - The `.log` file is the proof of execution. Missing log = Tier 1 regardless of script contents.
 - Tier 1 is valid for architectural insight proposals (cache regime analysis, working-set estimation). These can advance but are scored conservatively.
 - Strongly prefer providing Tier 3 level evidence. Running `ncu` on your baseline kernel (~60s) preempts all 4 NCU Triggers and unlocks uncapped Tier 3 scoring.
@@ -29,6 +29,7 @@ Every claim in a proposal or argument requires evidence. The type of evidence re
 | ISA inspection | `cuobjdump`, `ncu` |
 | Tiny kernel prototypes | <100 lines of code, <2 min wall-clock execution |
 | nsys/ncu single-kernel traces | One kernel invocation, existing binary only |
+| torch.profiler Chrome trace analysis | Parse `.pt.trace.json.gz` with Python gzip+json for timing, launch config, multi-rank variance |
 | Memory layout analysis | Static analysis of tensor shapes and strides |
 | Kernel-level benchmarks | **MUST use CUDA graph capture** for both baseline and candidate kernels. Raw CUDA event timing without graph capture is INVALID for kernel speedup claims. |
 
@@ -74,7 +75,7 @@ Every kernel benchmark must produce:
 
 1. A `.py` script in `debate/micro_experiments/` that is independently runnable
 2. A `.log` file with: GPU device name on line 1 (`torch.cuda.get_device_name()`), kernel timing in microseconds, iteration count
-3. For hardware utilization claims: an ncu CSV or nsys stats export
+3. For hardware utilization claims: an ncu CSV, nsys stats export, or torch.profiler Chrome trace JSON analysis
 
 The `.log` file is the proof of execution. Missing log = Tier 1 (theoretical) regardless of script contents, and feasibility is capped at 3/10.
 
@@ -91,7 +92,7 @@ The micro-benchmark baseline must invoke the target kernel via the **same code p
    - CUDA launch grid dimensions
    - Achieved DRAM bandwidth
 
-   Cross-reference against Stage 2 nsys trace and ncu sanity check for the same shape. If the kernel name matches but grid dimensions differ, investigate and explain the discrepancy before the proposal advances to scoring. Kernel name alone is insufficient — the same kernel template can be launched with different grid/block configs that produce different performance.
+   Cross-reference against Stage 2 profiling data (nsys trace or Chrome trace) and ncu sanity check for the same shape. If the kernel name matches but grid dimensions differ, investigate and explain the discrepancy before the proposal advances to scoring. Kernel name alone is insufficient — the same kernel template can be launched with different grid/block configs that produce different performance.
 
 3. **Statement in proposal**: State the exact baseline invocation (API call, tensor layouts, shape) in the proposal's "Micro-Experiment Result" section.
 

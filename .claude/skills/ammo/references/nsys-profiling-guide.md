@@ -1,5 +1,11 @@
 # Profiling vLLM with Nsight Systems (nsys) and Nsight Compute (ncu)
 
+This guide covers nsys (Nsight Systems) profiling for vLLM kernel optimization.
+nsys is the PREFERRED tool when `--cuda-graph-trace=node` is feasible (Tier 0).
+For large models where node mode is infeasible, see `torch-profiler-guide.md`
+for the primary profiling methodology (Tier 1), with nsys graph mode as
+optional enrichment (Tier 2). See §3.10 for the tier selection decision tree.
+
 This is a practical guide for profiling vLLM to:
 - Use **Nsight Systems (nsys)** for **end-to-end** timelines: identify fusion opportunities, launch overhead, sync/memcpy gaps, and system-level bottlenecks.
 - Use **Nsight Compute (ncu)** for **kernel-level** analysis: identify device bottlenecks (memory vs compute, occupancy limits, stall reasons).
@@ -281,7 +287,9 @@ If `--cuda-graph-trace=node` is omitted (or the trace hangs and you fall back to
                                                                                                                                                                                                                                                                                                                    
 3. **Piecewise graph kernel times overestimate decode costs.** Kernels visible in piecewise graph regions have different scheduling behavior than those in FULL graph replay. In one measured case, MoE routing overhead was 75.9 us/call in piecewise regions but only 14.8 us/call under FULL CUDA graph replay — a 5.1x overestimate.                                                                                                                                                                                                                                                                                      
                                                                                                                                                                                                                                                                                                                    
-**If you must work with a non-expanded trace**, document these caveats prominently in `bottleneck_analysis.md` and flag all `f_decode` estimates as approximate with explicit uncertainty bounds. Prefer CUDA-graph micro-experiments (like those in Stage 3 debate) to validate nsys-extrapolated timings before committing to optimization targets.                                                                                                                                                                                                                                                                         
+**If you must work with a non-expanded trace**, document these caveats prominently in `bottleneck_analysis.md` and flag all `f_decode` estimates as approximate with explicit uncertainty bounds. Prefer CUDA-graph micro-experiments (like those in Stage 3 debate) to validate nsys-extrapolated timings before committing to optimization targets.
+
+NOTE: When using nsys `--cuda-graph-trace=graph` as Tier 2 enrichment alongside torch.profiler (Tier 1), the timing limitation above applies only to nsys data. The primary timing data comes from torch.profiler Chrome trace, which captures production-representative per-kernel timing via CUPTI activity tracing. Use nsys graph mode ONLY for its exclusive fields (cluster dims, NVLink traffic, smem split), NOT for kernel timing or rankings.                                                                                                                                                                                                                                                                         
                                                                                                                                                                                                                                                                                                                    
 ### 3.7 Export the minimum useful CSV reports                                                                                                                                                                                                                                                                      
     
@@ -409,7 +417,7 @@ Then apply the formula to choose `--nsys-output-len` for the real capture. The e
 | `--cuda-graph-trace=graph` | When you only need aggregate graph timing, not per-kernel (see section 3.6 for major caveats — kernel-level data is lost) |
 | Two-pass: nsys survey (OL=8) → targeted ncu on top 3 kernels | When device-level roofline data is needed for Stage 2 |
 
-### 3.10 Profiling Decision Tree
+### 3.10 Profiling Decision Tree (Tiered Strategy)
 
 Before attempting nsys profiling on models with TP > 1 or > 10B params, run the probe script to estimate cost:
 
@@ -417,19 +425,27 @@ Before attempting nsys profiling on models with TP > 1 or > 10B params, run the 
 python scripts/nsys_probe.py --artifact-dir {artifact_dir}
 ```
 
-Decision tree based on probe results:
+Tier selection (automatic via nsys probe):
 
 ```
-Probe succeeds?
-├── YES: All BS green/yellow?
-│   ├── YES → Run --nsys-profile with suggested --nsys-output-len
-│   └── NO (some BS red) →
-│       ├── Use suggested --nsys-output-len (auto-reduces OL for expensive BS)
-│       └── OR skip nsys for red BS, document the gap
-└── NO: Probe timed out at OL=2?
-    ├── Restrict --cudagraph-capture-sizes to [1] only, retry probe
-    ├── If still fails → use torch.profiler for kernel identification
-    └── Document all caveats in bottleneck_analysis.md
+1. Run nsys_probe.py → probe_results.json
+2. IF probe PASS (GREEN/YELLOW, <15 min estimated):
+   → Tier 0: nsys --cuda-graph-trace=node (single source of truth)
+   → All data in one tool. No torch.profiler needed.
+3. IF probe FAIL (RED/timeout):
+   → Tier 1: torch.profiler (PRIMARY) — see torch-profiler-guide.md
+     - Production-representative timing via CUPTI activity tracing
+     - Multi-rank analysis (all rank files)
+     - Kernel chain analysis via chronological ordering
+   → Tier 2 (optional): nsys --cuda-graph-trace=graph (ENRICHMENT)
+     - SM100 cluster dimensions (nsys-exclusive, HIGH value for Blackwell)
+     - NVLink peer-to-peer traffic (nsys-exclusive, MEDIUM)
+     - Static vs dynamic shared memory split (nsys-exclusive, LOW-MED)
+     - WARNING: Tier 2 kernel timings are from capture phase, NOT production
+4. IF communication optimization needed:
+   → Always add Tier 2 (NVLink traffic invisible in Chrome trace)
+5. IF SM100 kernel optimization (CGA cluster tuning):
+   → Always add Tier 2 (cluster dims nsys-exclusive)
 ```
 
 For small TP=1 models (< 10B params), the probe is optional — proceed directly to `--nsys-profile` with default settings.
@@ -467,6 +483,33 @@ cuBLAS uses architecture-specific kernel implementations. On SM89/SM90, kernels 
    ```bash
    ncu --kernel-name-base demangled --kernel-name "regex:gemm.*bf16" ...
    ```
+
+### 3.12 Torch Profiler (Tier 1)
+
+When nsys `--cuda-graph-trace=node` is infeasible (large MoE models, >~50B params, or probe timeout), torch.profiler is the PRIMARY profiling tool.
+
+See `torch-profiler-guide.md` for:
+- Chrome trace JSON format and parsing
+- Multi-rank analysis methodology
+- Kernel chain extraction from chronological ordering
+- Bandwidth utilization estimation
+- Occupancy caveats on Blackwell + CUDA graphs
+
+torch.profiler captures per-kernel timing during CUDA graph REPLAY (production conditions), unlike nsys `--cuda-graph-trace=graph` which captures timing during graph CAPTURE (non-production). This makes torch.profiler the authoritative source for kernel rankings when node mode is unavailable.
+
+### 3.13 nsys-Exclusive Capabilities
+
+The following data is ONLY available from nsys and cannot be obtained from torch.profiler Chrome traces:
+
+| Capability | nsys Table/Field | Use Case |
+|---|---|---|
+| SM100 cluster dimensions | CUPTI_ACTIVITY_KIND_KERNEL.clusterX/Y/Z | CGA optimization on Blackwell |
+| Static vs dynamic smem | staticSharedMemory, dynamicSharedMemory | Determine if smem is tunable |
+| NVLink peer traffic | CUPTI_ACTIVITY_KIND_MEMCPY (copyKind=PtoP) | Communication optimization |
+| Full CUDA runtime API | CUPTI_ACTIVITY_KIND_RUNTIME (19K+ events) | CPU-side overhead analysis |
+| CUDA graph topology | CUDA_GRAPH_NODE_EVENTS | Graph structure validation |
+| sharedMemoryExecuted | Actual vs requested smem allocation | L1 partition analysis |
+| localMemoryPerThread | Per-thread local (spill) memory | Register spilling detection |
 
 ## 4) Nsight Compute (ncu): targeted kernel profiling (device bottlenecks)
 

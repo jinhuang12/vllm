@@ -858,6 +858,7 @@ def _run_inproc_latency_sweep_child(
     out_root: Path,
     timeout_s_per_bucket: int,
     nsys_profile: bool = False,
+    torch_profile: bool = False,
     capture_golden_refs: bool = False,
     verify_correctness: bool = False,
     correctness_num_questions: int = 200,
@@ -947,9 +948,9 @@ def _run_inproc_latency_sweep_child(
     )
     args = parser.parse_args(seed_argv)
 
-    if getattr(args, "profile", False) and not nsys_profile:
+    if getattr(args, "profile", False) and not nsys_profile and not torch_profile:
         # vllm bench latency --profile is a single-run action; sweeping doesn't make sense.
-        # (When nsys_profile is active, we handle profiler start/stop per-bucket ourselves.)
+        # (When nsys_profile or torch_profile is active, we handle profiler start/stop per-bucket ourselves.)
         _write_text(out_root / f"child_{label}_error.log", "Refusing to sweep with --profile enabled.\n")
         _update_status("error", extra={"error": "Refusing to sweep with --profile enabled."})
         return 2
@@ -964,6 +965,14 @@ def _run_inproc_latency_sweep_child(
                       "structured_outputs_config"):
         if isinstance(ea_dict.get(_cfg_key), dict):
             ea_dict[_cfg_key] = {k: v for k, v in ea_dict[_cfg_key].items() if v is not None}
+    # Configure torch profiler on the engine when --torch-profile is active.
+    if torch_profile:
+        torch_profile_base = str(out_root / "torch_profile")
+        Path(torch_profile_base).mkdir(parents=True, exist_ok=True)
+        ea_dict["profiler_config"] = {
+            "profiler": "torch",
+            "torch_profiler_dir": torch_profile_base,
+        }
     llm = LLM(**ea_dict)
     _update_status("model_loaded")
 
@@ -1227,6 +1236,15 @@ def _run_inproc_latency_sweep_child(
                     _torch_prof.cuda.cudart().cudaProfilerStart()
                     _log(f"[nsys] cudaProfilerStart for {tag}")
 
+                # Start torch profiler capture for this bucket (if enabled).
+                if torch_profile:
+                    bucket_profile_dir = str(out_root / "torch_profile" / f"{label}_{tag}")
+                    Path(bucket_profile_dir).mkdir(parents=True, exist_ok=True)
+                    if hasattr(llm, 'llm_engine') and hasattr(llm.llm_engine, 'vllm_config'):
+                        llm.llm_engine.vllm_config.profiler_config.torch_profiler_dir = bucket_profile_dir
+                    llm.start_profile()
+                    _log(f"[torch_profile] started for {tag} -> {bucket_profile_dir}")
+
                 try:
                     for i in range(num_iters_eff):
                         if _time.monotonic() > deadline:
@@ -1243,6 +1261,9 @@ def _run_inproc_latency_sweep_child(
                         _torch_prof.cuda.synchronize()
                         _torch_prof.cuda.cudart().cudaProfilerStop()
                         _log(f"[nsys] cudaProfilerStop for {tag}")
+                    if torch_profile:
+                        llm.stop_profile()
+                        _log(f"[torch_profile] stopped for {tag}")
 
                 # Match vLLM bench JSON schema.
                 arr = np.array(latencies, dtype=np.float64)
@@ -1372,6 +1393,12 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--nsys-mode",
+        choices=["node", "graph"],
+        default="node",
+        help="nsys cuda-graph-trace mode. 'node' for Tier 0, 'graph' for Tier 2 enrichment.",
+    )
+    p.add_argument(
         "--nsys-extra-flags",
         type=str,
         default="",
@@ -1407,6 +1434,16 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--torch-profile",
+        action="store_true",
+        default=False,
+        help=(
+            "Capture torch.profiler Chrome traces per batch size via "
+            "vLLM's built-in profiler. Produces per-bucket trace directories "
+            "in {out}/torch_profile/."
+        ),
+    )
+    p.add_argument(
         "--baseline-from",
         type=str,
         default=None,
@@ -1429,6 +1466,7 @@ def main() -> None:
     p.add_argument("--_cudagraph-capture-sizes", nargs="+", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-output-len", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-num-iters", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_torch-profile", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_capture-golden-refs", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_verify-correctness", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_correctness-num-questions", type=int, default=200, help=argparse.SUPPRESS)
@@ -1681,6 +1719,14 @@ def main() -> None:
             "should not be used for performance comparison.",
             file=sys.stderr,
         )
+    if args.torch_profile:
+        print("torch_profile: enabled (per-bucket Chrome traces in torch_profile/)")
+        if not args.nsys_profile:
+            print(
+                "WARNING: torch profiler adds overhead — latency results from this run "
+                "should not be used for performance comparison.",
+                file=sys.stderr,
+            )
 
     if ep != 1:
         print(
@@ -1881,6 +1927,7 @@ def main() -> None:
             out_root=out_root,
             timeout_s_per_bucket=args.timeout_s,
             nsys_profile=getattr(args, "_nsys_profile", False),
+            torch_profile=getattr(args, "_torch_profile", False),
             capture_golden_refs=getattr(args, "_capture_golden_refs", False),
             verify_correctness=getattr(args, "_verify_correctness", False),
             correctness_num_questions=getattr(args, "_correctness_num_questions", 200),
@@ -1968,6 +2015,8 @@ def main() -> None:
                 child_cmd.extend(["--_nsys-output-len", str(nsys_ol)])
             if nsys_ni is not None:
                 child_cmd.extend(["--_nsys-num-iters", str(nsys_ni)])
+        if args.torch_profile:
+            child_cmd.append("--_torch-profile")
 
         # Forward correctness flags to child.
         if args.capture_golden_refs:
@@ -1989,7 +2038,7 @@ def main() -> None:
                 "--sample=none",
                 "--capture-range=cudaProfilerApi",
                 f"--capture-range-end=repeat:{len(buckets)}",
-                "--cuda-graph-trace=node",
+                f"--cuda-graph-trace={args.nsys_mode}",
                 "--trace-fork-before-exec=true",
                 "--force-overwrite=true",
                 "-o", str(nsys_dir / f"{run.label}_profile"),

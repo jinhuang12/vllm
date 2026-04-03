@@ -11,7 +11,7 @@ This file focuses on **how to run and interpret** E2E benchmarks. Default gates 
 
 | Stage | Tool | Why |
 |-------|------|-----|
-| Stage 1 (profiling) | `run_vllm_bench_latency_sweep.py --nsys-profile` | E2E baseline + per-bucket nsys traces in one pass |
+| Stage 1 (profiling) | `run_vllm_bench_latency_sweep.py --torch-profile` (Tier 1) or `--nsys-profile` (Tier 0) | E2E baseline + per-bucket profiling traces. Use `--torch-profile` when nsys probe fails; `--nsys-profile` when probe passes. See `nsys-profiling-guide.md` §3.10. |
 | Stages 5-6 (validation) | `run_vllm_bench_latency_sweep.py` | GPU-locked A/B comparison with fastpath evidence |
 | Development | `vllm bench latency` directly | Quick single-BS checks only (GPU must be idle, not for validation_results.md) |
 
@@ -218,7 +218,7 @@ If your measured E2E improvement is small, sanity-check the component share usin
 - Verify your bucket guard matches the validated envelope.
 - Use Nsight Systems to confirm which kernels run under the captured graph.
 
-### “No E2E win” even though microbench is faster
+### "No E2E win" even though microbench is faster
 Common causes:
 - Target component is a small fraction of end-to-end (`f` small) → expected E2E gain is bounded (see `references/e2e-delta-math.md`).
 - Graph breaks or unexpected fallbacks (different kernels between baseline and optimized runs).

@@ -75,7 +75,8 @@ Read as needed from `.claude/skills/ammo/references/`. Your spawning champion wi
 | `code-templates.md` | C++ kernel patterns, MMA templates, tile configs |
 | `e2e-delta-math.md` | E2E improvement = f x kernel_speedup |
 | `cudagraph-safety.md` | CUDA graph capture checklist |
-| `nsys-profiling-guide.md` | nsys commands, report exports, multi-GPU capture |
+| `nsys-profiling-guide.md` | nsys commands, report exports, multi-GPU capture, tiered profiling decision tree |
+| `torch-profiler-guide.md` | Chrome trace analysis: parsing, multi-rank, kernel chains, BW estimation |
 | `impl-track-rules.md` | Worktree build rules, verdict thresholds, track status machine |
 | `validation-defaults.md` | Tolerances, gate definitions, production parity requirements |
 | `e2e-latency-guide.md` | E2E latency methodology |

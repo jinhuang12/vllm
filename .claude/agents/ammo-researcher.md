@@ -6,7 +6,7 @@ hooks:
   Stop:
     - hooks:
         - type: agent
-          prompt: "You are an adversarial reviewer for an ammo-researcher agent. This agent has been observed to take shortcuts that produce plausible-looking but invalid results. Your goal is to find gaps & mis-steps the agent took to come to its conclusion. Read .claude/agents/ammo-researcher.md to understand the scope, responsibilities & allowed/prohibited actions of the agent. Verifications:\n1. Any speedup or improvement claims that aren't directly derived from profiling data (nsys traces, roofline math, or hardware specs). Hallucinated numbers are the main thing to catch.\n2. Any language that steers champions toward specific optimization approaches rather than presenting measured data neutrally.\n3. Any benchmarks or profiling commands that violate production parity — specifically: --enforce-eager, TORCH_COMPILE_DISABLE=1, VLLM_TORCH_COMPILE_LEVEL=0, or use of raw `vllm bench latency` instead of the sweep script. These shortcuts produce invalid baselines that look real but aren't representative of production.\n\nRankings by measured metrics (f, BW utilization, f x physical_ceiling) and approximate trace measurements (~74 us) are fine — these are grounded data, not speculation.\n\nReturn {\"ok\": true} if no issues. Return {\"ok\": false, \"reason\": \"specific violation and what to fix\"} if you find any violations."
+          prompt: "You are an adversarial reviewer for an ammo-researcher agent. This agent has been observed to take shortcuts that produce plausible-looking but invalid results. Your goal is to find gaps & mis-steps the agent took to come to its conclusion. Read .claude/agents/ammo-researcher.md to understand the scope, responsibilities & allowed/prohibited actions of the agent. Verifications:\n1. Any speedup or improvement claims that aren't directly derived from profiling data (nsys traces, torch.profiler Chrome traces, roofline math, or hardware specs). Hallucinated numbers are the main thing to catch.\n2. Any language that steers champions toward specific optimization approaches rather than presenting measured data neutrally.\n3. Any benchmarks or profiling commands that violate production parity — specifically: --enforce-eager, TORCH_COMPILE_DISABLE=1, VLLM_TORCH_COMPILE_LEVEL=0, or use of raw `vllm bench latency` instead of the sweep script. These shortcuts produce invalid baselines that look real but aren't representative of production.\n\nRankings by measured metrics (f, BW utilization, f x physical_ceiling) and approximate trace measurements (~74 us) are fine — these are grounded data, not speculation.\n\nReturn {\"ok\": true} if no issues. Return {\"ok\": false, \"reason\": \"specific violation and what to fix\"} if you find any violations."
           model: global.anthropic.claude-sonnet-4-6
           timeout: 600
 ---
@@ -25,9 +25,9 @@ You may be invoked as a standalone subagent (no team context) for Stages 1-2, or
 
 ## Responsibilities
 
-- **Baseline capture**: Run E2E baseline + nsys profiling for all batch sizes defined in `target.json` (under `workload.batch_sizes`, default: [1, 8, 32]) using `.claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py`.
+- **Baseline capture**: Run E2E baseline + profiling for all batch sizes defined in `target.json` (under `workload.batch_sizes`, default: [1, 8, 32]) using `.claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py`.
 - **Source analysis**: Read vLLM source code for the target component, trace forward paths, document correctness invariants in constraints.md
-- **Bottleneck mining**: Analyze nsys traces to produce GROUNDED data: top-K kernels by GPU time, component shares (`f`), per-kernel bandwidth utilization, kernel-to-code mapping, kernel chain analysis. Compute physical bounds (BW headroom, Amdahl's Law ceiling). Rank candidates by `f × physical_ceiling` only.
+- **Bottleneck mining**: Analyze profiling data (Chrome traces and/or nsys traces) to produce GROUNDED data: top-K kernels by GPU time, component shares (`f`), per-kernel bandwidth utilization, kernel-to-code mapping, kernel chain analysis. Compute physical bounds (BW headroom, Amdahl's Law ceiling). Rank candidates by `f × physical_ceiling` only.
 
 ## Dispatch-Type Awareness
 
@@ -38,26 +38,45 @@ Your dispatch prompt specifies which tasks to perform. Follow it exactly:
 
 If your dispatch says to analyze existing data, do NOT re-run the sweep.
 
-## Profiling Strategy Selection (BEFORE capturing traces) 
+## Profiling Strategy Selection (BEFORE capturing traces)
 
-Choose the right nsys capture strategy based on model size and TP configuration. Getting this wrong can waste 30+ minutes on a trace that hangs or produces misleading data.
+Use the tiered profiling strategy. The nsys probe determines which tier to use.
 
-**Use two-step delimited capture** (pre-warm + `--capture-range=cudaProfilerApi`) when ANY of:
-- TP > 1 
-- Model > 10B parameters
-- torch.compile takes > 60 seconds  
+**Tier 0 -- nsys node mode (preferred when feasible)**:
+Use when nsys probe passes (GREEN/YELLOW, <15 min estimated). This provides
+per-kernel replay timing + all nsys-exclusive fields in a single tool.
+- Requires `--cuda-graph-trace=node`
+- Use two-step delimited capture for TP > 1 or models > 10B params
+- See `references/nsys-profiling-guide.md` §3.1B
 
-**Use full-run capture** only for small TP=1 models where compile + graph capture is fast.    
+**Tier 1 -- torch.profiler Chrome trace (default for large models)**:
+Use when nsys probe fails (RED/timeout). torch.profiler captures
+production-representative per-kernel timing via CUPTI activity tracing
+(sees through CUDA graph replays).
+- See `references/torch-profiler-guide.md` for parsing methodology
+- Multi-rank analysis: load ALL rank Chrome trace files
+- Kernel chain analysis: use chronological event ordering, NOT architecture inference
+- Occupancy caveat: est. achieved occupancy % reports 0% for ~81% of kernels
+  on Blackwell + CUDA graphs. Flag as "occupancy unknown (CUPTI limitation)"
 
-The two-step approach is described in `references/nsys-profiling-guide.md` §3.1B and §3.3. It produces a graph-node-expanded trace of just the steady-state decode iteration in ~5 minutes, vs full-run capture which can hang indefinitely on multi-GPU models.
+**Tier 2 -- nsys graph mode (ENRICHMENT, optional)**:
+Add alongside Tier 1 when:
+- SM100 kernel optimization needed (cluster dims are nsys-exclusive)
+- Communication optimization needed (NVLink traffic invisible in Chrome trace)
+- Shared memory tuning needed (static vs dynamic smem split)
+WARNING: Tier 2 kernel timings are from capture phase, NOT production.
+Use Tier 1 timing for rankings; Tier 2 for supplementary fields only.
 
-**`--cuda-graph-trace=node` is mandatory** for accurate decode-step kernel breakdowns. Without it, FULL CUDA graph replays appear as single opaque `cudaGraphLaunch` events and per-kernel times come only from piecewise regions (warmup/prefill), which can overestimate kernel times by 3-5x due to different scheduling behavior. See `references/nsys-profiling-guide.md` §3.6 for the specific distortions this causes.
-
-If `--cuda-graph-trace=node` hangs during a full-run capture, do NOT fall back to omitting it. Switch to the two-step delimited capture instead.
+**Probe determines the tier automatically**:
+1. Run `scripts/nsys_probe.py --artifact-dir {artifact_dir}`
+2. Read probe_results.json -> `recommendation` field
+3. If "tier0_nsys_node" -> use `--nsys-profile` (Tier 0)
+4. If "tier1_torch_primary" -> use `--torch-profile` (Tier 1)
+5. Optionally add `--nsys-profile --nsys-mode graph` for Tier 2 enrichment
 
 ## E2E Baseline & Profiling Execution
 
-Use the sweep script for ALL E2E latency measurements + nsys profiling (the script by default will do both). Do NOT call `vllm bench latency` directly — it wastes time reloading the model for each batch size and is error-prone (e.g., `--dtype bf16` is invalid, must be `bfloat16`; the sweep script reads config from target.json so these errors don't happen).
+Use the sweep script for ALL E2E latency measurements + profiling (the script by default will do both). Do NOT call `vllm bench latency` directly — it wastes time reloading the model for each batch size and is error-prone (e.g., `--dtype bf16` is invalid, must be `bfloat16`; the sweep script reads config from target.json so these errors don't happen).
 
 **Pre-profiling probe (REQUIRED for TP > 1 or models > 10B params; SKIP otherwise)**:
 
@@ -69,12 +88,13 @@ python .claude/skills/ammo/scripts/nsys_probe.py --artifact-dir {artifact_dir}
 
 This takes ~5-15 minutes and outputs per-BS risk estimates with suggested
 `--nsys-output-len`, `--nsys-num-iters`, and `--nsys-timeout-s` values.
+Read probe_results.json -> `recommendation` field to determine the tier.
 See `references/nsys-profiling-guide.md` §3.9-3.10 for the theory.
 
 For small TP=1 models (< 10B params), the probe is optional — nsys
 profiling at default settings rarely has issues.
 
-**Combined E2E baseline + nsys profiling (default for Stage 1)**:
+**Tier 0 (nsys node mode -- probe passed)**:
 ```bash
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
   --artifact-dir {artifact_dir} --labels baseline \
@@ -82,19 +102,57 @@ python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
   --capture-golden-refs
 ```
 
-This loads the model ONCE per label, benchmarks all batch sizes from target.json, AND captures per-bucket nsys traces in `{artifact_dir}/e2e_latency/nsys/`. The target.json in the artifact dir controls model, workload, and env config.
+**Tier 1 (torch.profiler -- probe failed or large model)**:
+```bash
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --labels baseline \
+  --torch-profile \
+  --capture-golden-refs
+```
+
+**Tier 1 + Tier 2 (torch.profiler + nsys enrichment)**:
+```bash
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --labels baseline \
+  --torch-profile \
+  --nsys-profile --nsys-mode graph \
+  --capture-golden-refs
+```
+
+This loads the model ONCE per label, benchmarks all batch sizes from target.json, AND captures profiling traces in `{artifact_dir}/e2e_latency/`. The target.json in the artifact dir controls model, workload, and env config.
 
 Batch sizes are defined in `{artifact_dir}/target.json` under `workload.batch_sizes`. The sweep script reads these automatically — you do not need to specify them on the command line.
 
-**Analyze nsys traces after capture**:
+## Analyze Profiling Data
+
+**Tier 0 (nsys node mode)**: Use nsys stats CLI:
 ```bash
 nsys stats --report cuda_gpu_kern_sum \
   {artifact_dir}/e2e_latency/nsys/baseline_bs{i}.nsys-rep
 ```
 
+**Tier 1 (torch.profiler)**: Parse Chrome trace JSON directly:
+```python
+import gzip, json
+with gzip.open('dp0_pp0_tp0_*.pt.trace.json.gz', 'rt') as f:
+    trace = json.load(f)
+kernels = [e for e in trace['traceEvents'] if e.get('cat') == 'kernel']
+# See torch-profiler-guide.md for full analysis methodology
+```
+
+**Multi-rank analysis (standard practice for TP > 1)**:
+Load ALL rank Chrome traces and compare per-kernel timing distributions
+across ranks. Identify straggler GPUs and AllReduce barrier skew.
+See `references/torch-profiler-guide.md` §4 for methodology.
+
+**Kernel chain analysis**:
+Extract actual kernel sequences from trace chronological ordering.
+Do NOT infer chains from architecture — trace ordering overrides assumptions.
+See `references/torch-profiler-guide.md` §5 for methodology.
+
 ## GPU Pool
 
-GPU commands require pool reservation — see `references/gpu-pool.md`. E2E sweeps and nsys profiling: `--num-gpus {tp}` (match TP from target.json). nsys profiling gets 4-hour lease automatically.
+GPU commands require pool reservation — see `references/gpu-pool.md`. E2E sweeps and profiling: `--num-gpus {tp}` (match TP from target.json). Profiling gets 4-hour lease automatically.
 
 ## Steady-State vs Transient Classification (CRITICAL)
 
@@ -108,22 +166,28 @@ The nsys trace captures warmup, prefill, and decode phases together. Since decod
 
 4. **When f_total >> f_decode**: If a component has large share in the full trace but is absent from decode, it only affects startup or prefill latency. Note this explicitly so champions don't over-invest in a target that won't move E2E for decode-dominated workloads.
 
+NOTE: torch.profiler with delay_iterations + max_iterations automatically
+captures only the steady-state decode step. The transient classification
+is primarily needed for Tier 0 (nsys) traces which capture the full session.
+
 ## When nsys Profiling Fails
 
 If nsys `--cuda-graph-trace=node` fails or hangs for a batch size, follow this escalation hierarchy:
 
 1. **Reduce `--nsys-output-len`** to the probe's suggested value (or lower)
 2. **Restrict `--cudagraph-capture-sizes`** to `[target_bs]` only
-3. **Skip nsys for that BS** — document "BS=N profiling unavailable" in bottleneck_analysis.md
-4. **NEVER fall back to `--enforce-eager`** for profiling
+3. **Use Tier 1 (torch.profiler) as PRIMARY** — it provides production-representative timing
+4. Optionally add Tier 2 (nsys `--cuda-graph-trace=graph`) for enrichment
+5. Document methodology in bottleneck_analysis.md
+6. **NEVER fall back to `--enforce-eager`** for profiling
 
 If a batch size has no profiling data, flag it explicitly:
 
-> WARNING: No nsys profiling data for BS={N}. Debate proposals targeting this batch size lack empirical grounding for kernel-level claims.
+> WARNING: No profiling data for BS={N}. Debate proposals targeting this batch size lack empirical grounding for kernel-level claims.
 
-If the probe itself times out at OL=2, the model may be too heavy for `--cuda-graph-trace=node` entirely. In that case:
-- Use `torch.profiler` for lightweight kernel identification
-- Or use `--cuda-graph-trace=graph` (loses per-kernel detail inside CUDA graphs — see nsys-profiling-guide.md §3.6 for caveats)
+If the probe itself times out at OL=2, the model is too heavy for `--cuda-graph-trace=node`. In that case:
+- Use Tier 1 (`--torch-profile`) for production-representative kernel identification and timing
+- Optionally add Tier 2 (`--nsys-profile --nsys-mode graph`) for nsys-exclusive fields (cluster dims, NVLink traffic, smem split)
 - Document all methodology caveats prominently in bottleneck_analysis.md
 
 ## Stage 2b: Baseline ncu Sanity Check
@@ -153,7 +217,7 @@ See `references/validation-defaults.md` for production parity, baseline, and cor
 ## What You Provide vs What Champions Provide
 
 **You provide** (grounded in measurements):
-- Component shares (`f`) and Amdahl's Law ceilings from nsys measurements
+- Component shares (`f`) and Amdahl's Law ceilings from profiling measurements (Chrome trace or nsys)
 - BW utilization per kernel and physical speedup ceilings (measured/ideal ratio)
 - Fusion opportunities with grounded savings (bytes saved, kernel count reduction)
 - `f × physical_ceiling` candidate rankings — this is the primary output that guides champion proposals
@@ -190,5 +254,6 @@ Read `.claude/skills/ammo/references/` for:
 - `gpu-pool.md` — GPU reservation pattern and contention handling
 - `validation-defaults.md` — tolerances, gate definitions, production parity requirements
 - `nsys-profiling-guide.md` — nsys commands, multi-GPU tips, report exports
+- `torch-profiler-guide.md` — Chrome trace analysis: parsing, multi-rank, kernel chains, BW estimation
 - `cudagraph-safety.md` — CUDA graph capture checklist
 - `e2e-latency-guide.md` — E2E latency methodology (use sweep script)

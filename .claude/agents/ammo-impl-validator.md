@@ -110,3 +110,5 @@ Read as needed from `.claude/skills/ammo/references/`:
 - `cudagraph-safety.md` — CUDA graph capture checklist
 - `gpu-configs.md` — hardware specs
 - `kernel-benchmark-template.py` — Gate 5.2 benchmark template
+- `nsys-profiling-guide.md` — nsys commands, tiered profiling decision tree
+- `torch-profiler-guide.md` — Chrome trace analysis for kernel execution proof

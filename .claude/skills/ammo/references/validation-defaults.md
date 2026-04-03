@@ -123,8 +123,9 @@ os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "3"  # Explicit production parity
 - Before starting any benchmark, verify GPU is idle: `nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader`
 - **Validation (Stages 5-6)**: Use `scripts/run_vllm_bench_latency_sweep.py` for all
   E2E measurements — it holds a system-wide GPU lock to prevent concurrent runs
-- **Profiling (Stage 1)**: Use `run_vllm_bench_latency_sweep.py --nsys-profile`
-  for combined E2E baseline + nsys traces (see `nsys-profiling-guide.md` §3.5)
+- **Profiling (Stage 1)**: Use `run_vllm_bench_latency_sweep.py` with tiered profiling:
+  `--nsys-profile` (Tier 0, preferred) or `--torch-profile` (Tier 1, when nsys probe fails).
+  See `nsys-profiling-guide.md` §3.10 for the decision tree.
 - If contention is detected mid-benchmark: STOP, report to lead, and re-run after GPU is clear
 
 **Why**: During the OLMo-3-7B verification run, concurrent GPU benchmarks inflated latencies
@@ -188,7 +189,7 @@ These are *starting points*, not universal truths.
 - **BF16/FP16**: `atol=1e-2`, `rtol=1e-2`
 - **FP8 / block-quant**: **must be model-specific**.
   - As a placeholder, you may start with something like `atol=300`, `rtol=0.5` (see Qwen3 example),
-  - but you should copy tolerances from the model’s actual tests whenever possible.
+  - but you should copy tolerances from the model's actual tests whenever possible.
 
 Also require:
 - no NaNs/Infs
@@ -201,7 +202,7 @@ Also require:
 
 **Owner**: Champion via sweep script (deterministic — no validator involvement).
 
-**Mechanism**: The sweep script’s Phase 1 runs GSM8K greedy decode with `logprobs=5`, comparing optimized outputs against golden refs captured in Stage 1.
+**Mechanism**: The sweep script's Phase 1 runs GSM8K greedy decode with `logprobs=5`, comparing optimized outputs against golden refs captured in Stage 1.
 
 **Invocation**:
 - Stage 1 (capture): `--capture-golden-refs` → saves `json/golden_refs.json`
@@ -242,18 +243,39 @@ Reporting requirements:
 
 ### Gate 5.3a: Kernel Execution Proof (NON-NEGOTIABLE)
 
-Gate 5.3a is verified as part of the **same sweep run** as Gates 5.1b and 5.3b — add `--nsys-profile` to the main sweep command. Do NOT run a separate sweep for kernel proof.
+Gate 5.3a confirms the optimized kernel actually dispatches under production conditions (CUDA graphs + torch.compile). Two methods are available:
 
-After the sweep completes, verify via `nsys stats --report cuda_gpu_kern_sum` that the expected kernel name appears in the GPU trace at `{artifact_dir}/e2e_latency/nsys/`.
+**Method A (nsys)**: Add `--nsys-profile` to the sweep command.
 
-- **If kernel found**: PASS.
-- **If kernel NOT found**: FAIL. The optimization is not activating — latency numbers are inadmissible.
+```bash
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --labels opt \
+  --nsys-profile --nsys-output-len 2 --nsys-num-iters 1 \
+  --out-name kernel_proof
+```
+
+Verify via `nsys stats --report cuda_gpu_kern_sum` that the expected kernel name appears in the GPU trace.
+
+**Method B (Chrome trace)**: Add `--torch-profile` to the sweep command.
+
+```bash
+python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --labels opt \
+  --torch-profile \
+  --out-name kernel_proof
+```
+
+Verify via Chrome trace JSON parsing that the expected kernel name appears in the `cat: "kernel"` events.
+
+- **If kernel found**: PASS. Proceed to Gate 5.3b.
+- **If kernel NOT found**: FAIL. Do NOT run Gate 5.3b. E2E results would be inadmissible — the optimization is not activating.
+- **Latency numbers from profiled runs are INVALID** (profiler overhead). Only the trace data matters.
 
 Cost: ~85s (4B/L40S), ~4.5 min (70B/8xH100).
 
 ### Gate 5.3b: E2E Measurement Sweep
 
-Run E2E under identical knobs and capture/compile settings. **Gate 5.3b latency results are only VALID if Gate 5.3a passes** — if the optimized kernel is not found in the nsys trace, E2E numbers are inadmissible.
+Run E2E under identical knobs and capture/compile settings. **Only runs after Gate 5.3a passes.**
 
 Default iteration counts:
 - **Profiling** (Stage 1): `--num-iters 1` (keep traces small)

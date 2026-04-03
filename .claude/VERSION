@@ -9,6 +9,13 @@ version: 1.2.0
 - Increased default n from 30 to 200
 - Added metadata mismatch detection (num_questions + max_tokens)
 - Added baseline_accuracy=0 infrastructure error check
+- Tiered profiling strategy: probe-driven Tier 0 (nsys node) / Tier 1 (torch.profiler Chrome traces) / Tier 2 (nsys graph enrichment)
+- New reference: torch-profiler-guide.md (Chrome trace parsing, multi-rank analysis, kernel chains, BW estimation, occupancy caveats)
+- Sweep script: --torch-profile and --nsys-mode flags with per-bucket profiler lifecycle
+- nsys_probe.py: compute_tier_recommendation() with SM100 detection, probe failure handling
+- verify_phase1_baseline.py: accepts Chrome traces alongside nsys-rep files
+- Evidence rules: Chrome trace accepted as Tier 3 evidence (debate-rules.md, validation-defaults.md)
+- 9 new conformance test scenarios (R9-R12, O21) + 5 probe failure tests
 
 ### 1.1.0 (2026-04-02)
 - feat: redesign Gate 5.1b as E2E correctness via GSM8K greedy decode (replaces token-level comparison with deterministic generation matching against golden references)

@@ -5,7 +5,7 @@ This script performs BLOCKING verification for Phase 1 completion.
 Phase 2 MUST NOT proceed if this script returns non-zero exit code.
 
 Checks:
-1. nsys profile files exist in {artifact_dir}/runs/
+1. Profiling data exists (nsys profiles OR Chrome traces from torch.profiler)
 2. constraints.md contains "Baseline Truth Snapshot" section
 3. constraints.md documents baseline kernel timings (not just commands)
 
@@ -64,24 +64,45 @@ class VerificationReport:
         }
 
 
-def check_nsys_profiles(artifact_dir: Path) -> GateResult:
-    """Gate 1.1: Check that nsys profile files exist.
+def check_profiling_data(artifact_dir: Path) -> GateResult:
+    """Gate 1.1: Check that profiling data exists (nsys OR Chrome traces).
 
-    Searches multiple directories for backward compatibility:
+    Supports tiered profiling strategy:
+      - Tier 0: nsys node mode -> *.nsys-rep / *.sqlite files
+      - Tier 1: torch.profiler Chrome traces -> *.pt.trace.json.gz files
+      - Tier 2: nsys graph mode -> *.nsys-rep / *.sqlite files
+
+    Searches multiple directories:
       - {artifact_dir}/runs/
       - {artifact_dir}/nsys/
       - {artifact_dir}/e2e_latency/nsys/
+      - {artifact_dir}/e2e_latency/traces/
+      - {artifact_dir}/traces/
       - {artifact_dir}/ (root)
     """
     search_dirs = []
-    for subdir_name in ("runs", "nsys", "e2e_latency/nsys"):
+    for subdir_name in ("runs", "nsys", "e2e_latency/nsys", "e2e_latency/traces", "traces"):
         subdir = artifact_dir / subdir_name
         if subdir.exists():
             search_dirs.append(subdir)
+    # Include torch_profile subdirectories (sweep script writes to e2e_latency/torch_profile/{label}_{tag}/)
+    for torch_parent in ("e2e_latency/torch_profile", "torch_profile"):
+        tp_dir = artifact_dir / torch_parent
+        if tp_dir.exists():
+            search_dirs.append(tp_dir)
+            for child in tp_dir.iterdir():
+                if child.is_dir():
+                    search_dirs.append(child)
+    # Also check nsys/torch_profile_bs* dirs (layout from manual profiling)
+    nsys_dir = artifact_dir / "nsys"
+    if nsys_dir.exists():
+        for child in nsys_dir.iterdir():
+            if child.is_dir() and child.name.startswith("torch_profile"):
+                search_dirs.append(child)
     # Always include artifact root as fallback
     search_dirs.append(artifact_dir)
 
-    # Collect nsys files from all search directories, deduplicating by resolved path
+    # Collect nsys files (Tier 0 / Tier 2)
     seen: set = set()
     nsys_files: List[Path] = []
     for d in search_dirs:
@@ -91,26 +112,70 @@ def check_nsys_profiles(artifact_dir: Path) -> GateResult:
                 seen.add(resolved)
                 nsys_files.append(f)
 
-    if not nsys_files:
+    # Collect Chrome trace files (Tier 1 -- torch.profiler)
+    chrome_trace_files: List[Path] = []
+    for d in search_dirs:
+        for f in list(d.glob("*.pt.trace.json.gz")) + list(d.glob("*.pt.trace.json")):
+            resolved = f.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                chrome_trace_files.append(f)
+
+    has_nsys = len(nsys_files) > 0
+    has_chrome = len(chrome_trace_files) > 0
+
+    if not has_nsys and not has_chrome:
         searched_list = ", ".join(
-            str(d) for d in [artifact_dir / "runs", artifact_dir / "nsys", artifact_dir / "e2e_latency/nsys", artifact_dir]
+            str(d) for d in [
+                artifact_dir / "runs", artifact_dir / "nsys",
+                artifact_dir / "e2e_latency/nsys",
+                artifact_dir / "e2e_latency/traces",
+                artifact_dir / "traces", artifact_dir,
+            ]
         )
         return GateResult(
-            name="nsys_profiles_exist",
+            name="profiling_data_exist",
             status="FAIL",
-            message="No nsys profile files found",
+            message="No profiling data found (neither nsys profiles nor Chrome traces)",
             evidence=[
                 f"Searched directories: {searched_list}",
-                "Expected patterns: *.nsys-rep, *.sqlite",
-                "Run: python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir} --nsys-profile",
+                "Expected patterns: *.nsys-rep, *.sqlite (Tier 0/2 nsys), "
+                "*.pt.trace.json.gz (Tier 1 torch.profiler)",
+                "Run one of:",
+                "  Tier 0: python scripts/run_vllm_bench_latency_sweep.py "
+                "--artifact-dir {artifact_dir} --nsys-profile",
+                "  Tier 1: python scripts/run_vllm_bench_latency_sweep.py "
+                "--artifact-dir {artifact_dir} --torch-profile",
             ],
         )
 
+    # Build evidence summary
+    evidence: List[str] = []
+    profiling_methods: List[str] = []
+
+    if has_nsys:
+        profiling_methods.append(f"nsys ({len(nsys_files)} file(s))")
+        evidence.extend(str(f.name) for f in nsys_files[:3])
+
+    if has_chrome:
+        # Validate Chrome trace files are non-empty
+        valid_chrome = [f for f in chrome_trace_files if f.stat().st_size > 0]
+        empty_chrome = len(chrome_trace_files) - len(valid_chrome)
+        profiling_methods.append(
+            f"Chrome trace ({len(valid_chrome)} file(s))"
+        )
+        evidence.extend(str(f.name) for f in valid_chrome[:3])
+        if empty_chrome > 0:
+            evidence.append(
+                f"WARNING: {empty_chrome} Chrome trace file(s) are empty (0 bytes)"
+            )
+
+    total_files = len(nsys_files) + len(chrome_trace_files)
     return GateResult(
-        name="nsys_profiles_exist",
+        name="profiling_data_exist",
         status="PASS",
-        message=f"Found {len(nsys_files)} nsys profile file(s)",
-        evidence=[str(f.name) for f in nsys_files[:5]],  # Show first 5
+        message=f"Found {total_files} profiling file(s): {', '.join(profiling_methods)}",
+        evidence=evidence[:5],  # Show first 5
     )
 
 
@@ -282,7 +347,7 @@ def verify_phase1(artifact_dir: Path) -> VerificationReport:
 
     # Run all gates
     gates = [
-        check_nsys_profiles(artifact_dir),
+        check_profiling_data(artifact_dir),
         check_baseline_snapshot_section(artifact_dir),
         check_baseline_kernel_data(artifact_dir),
         check_production_parity_env(artifact_dir),
@@ -303,7 +368,7 @@ def verify_phase1(artifact_dir: Path) -> VerificationReport:
         report.recommendation = (
             "Phase 1 INCOMPLETE. Do NOT proceed to Phase 2. "
             "Fix all blockers listed above. "
-            "Run nsys profiling and document baseline kernel timings."
+            "Run profiling (nsys or torch.profiler) and document baseline kernel timings."
         )
     elif report.warnings:
         report.overall_status = "WARN"

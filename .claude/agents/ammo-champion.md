@@ -179,4 +179,5 @@ Read as needed from `.claude/skills/ammo/references/`:
 - `code-templates.md` — C++ kernel patterns, MMA templates, tile configs
 - `e2e-delta-math.md` — E2E improvement = f × kernel_speedup
 - `cudagraph-safety.md` — CUDA graph capture checklist
-- `nsys-profiling-guide.md` — nsys commands, report exports
+- `nsys-profiling-guide.md` — nsys commands, report exports, tiered profiling decision tree
+- `torch-profiler-guide.md` — Chrome trace analysis: parsing, multi-rank, kernel chains, BW estimation

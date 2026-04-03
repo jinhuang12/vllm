@@ -163,6 +163,7 @@ def load_target(artifact_dir: Path) -> Dict[str, Any]:
         "extra_args": extra_args + baseline_extra_args,
         "num_layers": target.get("num_layers"),  # optional, for heuristic
         "architecture": target.get("architecture"),  # optional
+        "gpu_arch": target.get("gpu_arch"),  # optional, for tier recommendation
     }
 
 
@@ -437,12 +438,106 @@ def compute_estimates(
     }
 
 
+def _is_sm100_gpu(gpu_arch: Optional[str]) -> bool:
+    """Check if the GPU architecture is SM100 or SM120 (Blackwell family)."""
+    if not gpu_arch:
+        return False
+    arch_lower = gpu_arch.lower().strip()
+    # Match sm_100, sm_120, sm100, sm120, etc.
+    return bool(re.match(r"sm[_]?1[02]0", arch_lower))
+
+
+def compute_tier_recommendation(
+    *,
+    estimates: Dict[str, Any],
+    tp: int,
+    gpu_arch: Optional[str],
+    probe_exit_code: Optional[int],
+) -> Dict[str, str]:
+    """Compute the tiered profiling recommendation based on probe results.
+
+    Returns a dict with 'recommendation' and 'tier_explanation' keys.
+
+    Tier strategy:
+      - Tier 0 (nsys node mode): preferred when probe PASSES (GREEN/YELLOW risk)
+      - Tier 1 (torch.profiler): primary default for large/risky models (RED risk or probe failure)
+      - Tier 1+2 (torch.profiler + nsys graph): when SM100 kernels or TP>1 with RED risk
+    """
+    # If probe failed (timeout or error), recommend Tier 1
+    if probe_exit_code is not None and probe_exit_code != 0:
+        is_sm100 = _is_sm100_gpu(gpu_arch)
+        if is_sm100 or tp > 1:
+            return {
+                "recommendation": "tier1_plus_tier2",
+                "tier_explanation": (
+                    f"nsys probe failed (exit code {probe_exit_code}). "
+                    f"{'SM100/SM120 GPU detected. ' if is_sm100 else ''}"
+                    f"{'TP=' + str(tp) + ' (multi-GPU). ' if tp > 1 else ''}"
+                    "Use torch.profiler as primary (Tier 1). "
+                    "Add --nsys-profile --nsys-mode graph for Tier 2 enrichment "
+                    "(graph-level timing without per-kernel node overhead)."
+                ),
+            }
+        return {
+            "recommendation": "tier1_torch_primary",
+            "tier_explanation": (
+                f"nsys probe failed (exit code {probe_exit_code}). "
+                "Use torch.profiler as primary (Tier 1). "
+                "nsys --cuda-graph-trace=node is infeasible for this model."
+            ),
+        }
+
+    # Probe succeeded -- check risk levels
+    sweep_risk = estimates.get("total_sweep", {}).get("risk_level", "RED")
+    any_red = any(
+        info.get("risk_level") == "RED"
+        for info in estimates.get("per_bucket", {}).values()
+    )
+
+    if sweep_risk == "RED" or any_red:
+        # RED risk -- recommend Tier 1 (possibly with Tier 2 enrichment)
+        is_sm100 = _is_sm100_gpu(gpu_arch)
+        est_time = estimates.get("total_sweep", {}).get("estimated_time_min", "?")
+
+        if is_sm100 or tp > 1:
+            return {
+                "recommendation": "tier1_plus_tier2",
+                "tier_explanation": (
+                    f"nsys --cuda-graph-trace=node estimated ~{est_time} min (RED). "
+                    f"{'SM100/SM120 GPU detected. ' if is_sm100 else ''}"
+                    f"{'TP=' + str(tp) + ' (multi-GPU). ' if tp > 1 else ''}"
+                    "Use torch.profiler as primary (Tier 1). "
+                    "Consider adding --nsys-profile --nsys-mode graph for Tier 2 enrichment."
+                ),
+            }
+        return {
+            "recommendation": "tier1_torch_primary",
+            "tier_explanation": (
+                f"nsys --cuda-graph-trace=node estimated ~{est_time} min (RED). "
+                "Use torch.profiler as primary (Tier 1). "
+                "Consider adding --nsys-profile --nsys-mode graph for Tier 2 "
+                "enrichment if graph-level timing is needed."
+            ),
+        }
+
+    # GREEN or YELLOW -- nsys node mode is feasible
+    est_time = estimates.get("total_sweep", {}).get("estimated_time_min", "?")
+    return {
+        "recommendation": "tier0_nsys_node",
+        "tier_explanation": (
+            f"nsys --cuda-graph-trace=node estimated ~{est_time} min "
+            f"({sweep_risk}). nsys node mode is feasible as primary profiler (Tier 0)."
+        ),
+    }
+
+
 def format_output(
     *,
     model_id: str,
     tp: int,
     probe_bs: int,
     estimates: Dict[str, Any],
+    tier_rec: Optional[Dict[str, str]] = None,
 ) -> str:
     """Format the probe results as a human-readable table."""
     lines = []
@@ -501,6 +596,12 @@ def format_output(
             "for those batch sizes and documenting the gap in bottleneck_analysis.md."
         )
 
+    # Print tier recommendation if available
+    if tier_rec:
+        lines.append("")
+        lines.append(f"Tier recommendation: {tier_rec['recommendation']}")
+        lines.append(f"  {tier_rec['tier_explanation']}")
+
     return "\n".join(lines)
 
 
@@ -549,28 +650,43 @@ def main() -> None:
         timeout_s=args.prewarm_timeout_s,
     )
 
-    nsys_rep = run_nsys_probe(
-        cfg=cfg,
-        probe_bs=probe_bs,
-        artifact_dir=artifact_dir,
-        timeout_s=args.probe_timeout_s,
-    )
+    probe_exit_code = 0
+    estimates = None
+    try:
+        nsys_rep = run_nsys_probe(
+            cfg=cfg,
+            probe_bs=probe_bs,
+            artifact_dir=artifact_dir,
+            timeout_s=args.probe_timeout_s,
+        )
 
-    kernels_per_step = parse_kernel_count(nsys_rep)
+        kernels_per_step = parse_kernel_count(nsys_rep)
 
-    estimates = compute_estimates(
-        kernels_per_step=kernels_per_step,
+        estimates = compute_estimates(
+            kernels_per_step=kernels_per_step,
+            tp=cfg["tp"],
+            batch_sizes=cfg["batch_sizes"],
+            num_layers=cfg.get("num_layers"),
+            architecture=cfg.get("architecture"),
+        )
+    except SystemExit as e:
+        probe_exit_code = e.code if isinstance(e.code, int) else 3
+        print(f"\nProbe failed (exit code {probe_exit_code}). "
+              "Computing tier recommendation based on failure.")
+
+    tier_rec = compute_tier_recommendation(
+        estimates=estimates,
         tp=cfg["tp"],
-        batch_sizes=cfg["batch_sizes"],
-        num_layers=cfg.get("num_layers"),
-        architecture=cfg.get("architecture"),
+        gpu_arch=cfg.get("gpu_arch"),
+        probe_exit_code=probe_exit_code,
     )
 
     output = format_output(
         model_id=cfg["model_id"],
         tp=cfg["tp"],
         probe_bs=probe_bs,
-        estimates=estimates,
+        estimates=estimates or {},
+        tier_rec=tier_rec,
     )
     print(output)
 
@@ -579,11 +695,17 @@ def main() -> None:
         "model_id": cfg["model_id"],
         "tp": cfg["tp"],
         "probe_bs": probe_bs,
-        **estimates,
+        "probe_exit_code": probe_exit_code,
+        "recommendation": tier_rec["recommendation"],
+        "tier_explanation": tier_rec["tier_explanation"],
+        **(estimates or {}),
     }
     out_path = artifact_dir / "nsys" / "probe_results.json"
     _write_json(out_path, result)
     print(f"\nWrote: {out_path}")
+
+    if probe_exit_code != 0:
+        raise SystemExit(probe_exit_code)
 
 
 if __name__ == "__main__":

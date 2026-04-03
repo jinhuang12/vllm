@@ -125,7 +125,8 @@ A Claude Code skill for GPU kernel optimization in vLLM. Given a deployment targ
 │   ├── e2e-latency-guide.md              # vllm bench latency methodology
 │   ├── validation-defaults.md            # Correctness tolerances, gate thresholds
 │   ├── validator-troubleshooting.md      # Investigation playbook (max 3 hypothesis cycles)
-│   ├── nsys-profiling-guide.md           # nsys/ncu capture and CSV export
+│   ├── nsys-profiling-guide.md           # nsys/ncu capture and CSV export, tiered profiling decision tree
+│   ├── torch-profiler-guide.md          # Chrome trace analysis: parsing, multi-rank, kernel chains, BW estimation
 │   ├── fusion-feasibility-heuristics.md  # ROI math for fusion candidates
 │   ├── gpu-configs.md                    # Hardware specs (SMEM, registers, TMA availability)
 │   ├── optimization-techniques.md        # Technique catalog T1-T14
@@ -176,6 +177,7 @@ The **lead** (main Claude session) orchestrates all stages, manages `state.json`
 6. **E2E delta math** - `improvement = f x kernel_speedup` (small `f` = small E2E, not a bug)
 7. **Custom kernel mandate** - Stage 3 proposals MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code. Config-only, flag-flipping, and parameter-tuning proposals are rejected at Phase 0.
 8. **Autonomous campaign loop** — The orchestrator MUST NOT ask the user whether to continue. Stop condition is mechanical: `f < min_e2e_improvement_pct` → stop, else continue. No qualitative judgment overrides this.
+9. **Tiered profiling strategy** -- Profiling tool selection follows a tiered strategy based on nsys probe results: **Tier 0** (nsys `--cuda-graph-trace=node`) when probe is GREEN/YELLOW; **Tier 1** (`torch.profiler` Chrome trace) as primary when probe is RED/timeout -- supports multi-rank analysis and kernel chain extraction; **Tier 2** (nsys `--cuda-graph-trace=graph`) for optional timeline enrichment alongside Tier 1.
 
 ## Hook Enforcement
 
@@ -192,12 +194,12 @@ The **lead** (main Claude session) orchestrates all stages, manages `state.json`
 
 ## Conformance Test Suite
 
-48 scenarios across 4 test files verify that the orchestrator and all subagents correctly understand and follow the AMMO workflow.
+53 scenarios across 4 test files verify that the orchestrator and all subagents correctly understand and follow the AMMO workflow.
 
 | Test File | Agent | Scenarios | Count |
 |-----------|-------|-----------|-------|
-| [`tests/agents/test-orchestrator.md`](tests/agents/test-orchestrator.md) | Lead orchestrator | 20 (overlapped debate, resume, campaign eval, integration, violations) | 20 |
-| [`tests/agents/test-researcher.md`](tests/agents/test-researcher.md) | ammo-researcher | 8 (grounded data, profiling strategy, production parity, steady-state) | 8 |
+| [`tests/agents/test-orchestrator.md`](tests/agents/test-orchestrator.md) | Lead orchestrator | 21 (overlapped debate, resume, campaign eval, integration, violations, tiered profiling) | 21 |
+| [`tests/agents/test-researcher.md`](tests/agents/test-researcher.md) | ammo-researcher | 12 (grounded data, profiling strategy, production parity, steady-state, tiered profiling, multi-rank analysis) | 12 |
 | [`tests/agents/test-champion.md`](tests/agents/test-champion.md) | ammo-champion | 10 (kernel mandate, micro-experiments, CUDA graphs, cache, subagent spawning, debate) | 10 |
 | [`tests/agents/test-implementer.md`](tests/agents/test-implementer.md) | ammo-impl-champion + ammo-impl-validator | 10 (baseline reuse, sweep script, parity, scope, Amdahl, build, contamination) | 10 |
 
@@ -242,6 +244,7 @@ The `ammo-researcher` profiled with nsys under production parity (CUDA graphs + 
 - **Top kernels by GPU time**: `w8a8_block_fp8_triton_block_scaled_mm` (f=0.231), `fused_moe_triton` (f=0.250), attention (f=0.141)
 - **Hardware**: 4x L40S (sm_89), 44.4 GiB each, 142 SMs
 - **Missing Triton configs**: 7 shape/dtype combos had no L40S-specific tuned configs
+- **Profiling method**: nsys with `--cuda-graph-trace=node` (Tier 0 -- probe returned GREEN)
 
 ### Stage 3: Adversarial Debate
 
