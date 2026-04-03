@@ -3,6 +3,7 @@ version: 1.2.0
 ## Changelog
 
 ### 1.2.0 (2026-04-03)
+- PreToolUse hook: ammo-msg-check.sh — gates champion agents mid-turn when undelivered teammate messages exist (forces turn end so messages get delivered)
 - Gate 5.1b v2: unified accuracy gate (opt_accuracy >= baseline_accuracy)
 - Removed 3-mode token-level comparator (exact_greedy, topk_relaxed, first_divergence_topk)
 - Increased max_tokens from 256 to 1024
