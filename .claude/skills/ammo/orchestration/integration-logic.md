@@ -66,13 +66,9 @@ pytest tests/path/to/component_2_tests.py
 python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
 
 # Run combined correctness check (mandatory for multi-candidate integration)
-# Mode selection: if ANY integrated track is classified as lossy → topk_relaxed + 100 questions
-#                 if ALL integrated tracks are lossless → first_divergence_topk + 30 questions
-# Read classification from state.json parallel_tracks.{op_id}.classification
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
     --artifact-dir {artifact_dir} --labels opt \
-    --baseline-from {stage1_dir} --verify-correctness \
-    --correctness-mode {first_divergence_topk|topk_relaxed} --correctness-num-questions {30|100}
+    --baseline-from {stage1_dir} --verify-correctness
 
 # If correctness fails: bisect — drop track with worst individual failure rate, re-run
 ```
@@ -84,7 +80,7 @@ python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
 | Combined E2E >= max(individual E2E results) | Ship the combined integration branch |
 | Combined E2E < max(individual E2E results) | Ship the single track with the best individual E2E |
 | Combined correctness fails | Fall back to shipping tracks individually (best E2E first) |
-| Combined correctness fails (topk or accuracy gate) | Bisect: drop worst track, re-validate smaller combination |
+| Combined correctness fails (accuracy gate) | Bisect: drop worst track, re-validate smaller combination |
 
 If a cherry-pick produces a merge conflict, treat the candidates as overlapping (same-component) and pick the one with the best E2E speedup.
 

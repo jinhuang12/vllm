@@ -207,7 +207,7 @@ Apply general adversarial reasoning. These are patterns to be alert to, not a ri
 - Validation integrity: not sharing test scripts with kernel validation sub-agent
 - Gate completeness: champion spawns sub-agent for Gates 5.1a + 5.2; champion runs Gates 5.1b/5.3a/5.3b via sweep script. All must complete before declaring success
 - **Missing sub-agent spawn**: champion runs sweep without prior `Agent(subagent_type="ammo-impl-validator")` call → CRITICAL (kernel correctness never independently verified)
-- **Undisclosed precision reduction**: If the track's debate classification (provided in your spawn prompt as `classification: {lossless|lossy}`) is `lossless`, but the implementation introduces reduced-precision casts (FP8, INT4, MXFP4, INT8), quantization scales, or dtype reductions not present in the baseline → **CRITICAL**. The champion may be introducing accuracy risk that bypasses the lossy validation gates.
+- **Undisclosed precision reduction**: If the track's debate classification (provided in your spawn prompt as `classification: {lossless|lossy}`) is `lossless`, but the implementation introduces reduced-precision casts (FP8, INT4, MXFP4, INT8), quantization scales, or dtype reductions not present in the baseline → **CRITICAL**. The champion may be introducing accuracy risk that bypasses the accuracy gate (opt_accuracy >= baseline_accuracy).
 - Stage 1 baseline reuse: not running own baseline measurements
 - validation_results.md written before completion signal
 

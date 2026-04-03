@@ -74,9 +74,7 @@ Agent(
     - Kernel breakdown: {artifact_dir}/constraints.md ("Baseline Truth Snapshot" section)
 
     ## Precision Classification (from debate summary)
-    Classification: {classification}  # "lossless" or "lossy" — determines correctness mode and question count
-    # Lossless: --correctness-mode first_divergence_topk --correctness-num-questions 30
-    # Lossy: --correctness-mode topk_relaxed --correctness-num-questions 100
+    Classification: {classification}  # "lossless" or "lossy" — determines Gate 5.1a tolerances and debate scoring deflation
 
     ## E2E Threshold
     E2E threshold: min_e2e_improvement_pct (from state.json)

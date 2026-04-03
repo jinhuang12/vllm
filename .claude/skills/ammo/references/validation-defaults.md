@@ -207,33 +207,23 @@ Also require:
 - Stage 1 (capture): `--capture-golden-refs` → saves `json/golden_refs.json`
 - Stage 5 (verify): `--verify-correctness --baseline-from $STAGE1_DIR` → writes `json/correctness_verdict.json`
 
-**Three modes** (selected via `--correctness-mode`):
+**Gate logic**: `opt_gsm8k_accuracy >= baseline_gsm8k_accuracy`
 
-| Mode | Default for | Gate logic |
-|------|-------------|------------|
-| `first_divergence_topk` | Lossless tracks | Checks bidirectional top-5 containment only at the **first divergent position** per question, then stops (ignores autoregressive cascade). `--max-topk-failures-pct 5.0` = max % of **questions** (not positions) that can fail first-divergence containment. GSM8K accuracy superset check always enabled. |
-| `topk_relaxed` | Lossy tracks (precision reduction introduced) | Bidirectional top-5 containment at **every position**. `--max-topk-failures-pct 5.0` by default. Length mismatches count as failures. GSM8K accuracy superset check always enabled. |
-| `exact_greedy` | (manual opt-in only) | Every token must match. `--max-divergent-positions 0` by default. Not used by default — available for optimizations known to be bit-identical. |
+- **n = 200** questions by default (configurable via `--correctness-num-questions`)
+- **Percentage comparison** — allows question-level churn (different questions correct) as long as aggregate accuracy is maintained
+- Token-level data is computed and logged as diagnostics only
+- Single gate for all tracks regardless of lossless/lossy classification
+- **max_tokens = 1024**
 
-**Why `first_divergence_topk` for lossless**: Most kernel optimizations (GEMM fusions, merges, tiling changes) alter CUTLASS tile selection, producing different FP32 accumulation order. The first token flip is a legitimate near-tie, but autoregressive generation cascades it into widespread divergence. Checking only the first-divergence point catches real bugs (shifted probability distributions) while ignoring cascade noise.
+**Metadata mismatch check**: If golden refs `num_questions` or `max_tokens` differs from the verification run, exit code 4 (infrastructure error).
 
-**Mode selection is based on lossy classification from the debate summary** (see `debate-scoring-rubric.md` § Lossy Classification Rule), not on the model's existing dtype. A BF16 model with an optimization that introduces precision reduction (e.g., FP8, INT4, MXFP4) is lossy and uses `topk_relaxed`.
-
-**Parameter table by classification:**
-
-| Parameter | Lossless tracks | Lossy tracks |
-|-----------|----------------|--------------|
-| `--correctness-mode` | `first_divergence_topk` | `topk_relaxed` |
-| `--correctness-num-questions` | 30 (script default) | **100** |
-| GSM8K accuracy gate | On (zero questions lost) | On (zero questions lost) |
-
-These overrides apply to ALL sweep invocations for the track, including GATING_REQUIRED re-validation sweeps.
-
-**GSM8K accuracy gate**: The optimized model cannot get ANY question wrong that the baseline got correct ("zero questions lost"). This is a superset check, not a percentage threshold. Enabled as a hard gate for `first_divergence_topk` and `topk_relaxed` modes. For `exact_greedy` (manual opt-in), accuracy is reported but not enforced.
+**Baseline accuracy floor**: If `baseline_correct_count == 0` and `num_questions > 0`, exit code 4 (infrastructure error — model cannot solve any GSM8K questions).
 
 **Self-consistency check** (Stage 1 only): Golden ref capture runs prompts twice to verify greedy decode is deterministic. If non-deterministic, metadata records `deterministic: false`.
 
-**Exit codes**: 3 = correctness FAIL (real divergence), 4 = infrastructure error (retry).
+**Exit codes**: 3 = correctness FAIL (opt_accuracy < baseline_accuracy), 4 = infrastructure error (retry).
+
+**Classification scope**: Lossless/lossy classification does NOT affect Gate 5.1b. Classification still determines Gate 5.1a tolerances (BF16 vs FP8) and debate scoring deflation (2x vs 4x).
 
 ## Default kernel perf gate (Stage 5.2)
 

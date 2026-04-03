@@ -1,6 +1,14 @@
-version: 1.1.0
+version: 1.2.0
 
 ## Changelog
+
+### 1.2.0 (2026-04-03)
+- Gate 5.1b v2: unified accuracy gate (opt_accuracy >= baseline_accuracy)
+- Removed 3-mode token-level comparator (exact_greedy, topk_relaxed, first_divergence_topk)
+- Increased max_tokens from 256 to 1024
+- Increased default n from 30 to 200
+- Added metadata mismatch detection (num_questions + max_tokens)
+- Added baseline_accuracy=0 infrastructure error check
 
 ### 1.1.0 (2026-04-02)
 - feat: redesign Gate 5.1b as E2E correctness via GSM8K greedy decode (replaces token-level comparison with deterministic generation matching against golden references)

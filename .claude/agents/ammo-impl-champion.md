@@ -76,22 +76,14 @@ All three gates are handled by a **single** sweep script invocation. Do NOT run 
 python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
     --artifact-dir $ARTIFACT_DIR --labels opt \
     --baseline-from $STAGE1_DIR --verify-correctness \
-    --correctness-mode {first_divergence_topk|topk_relaxed} \
-    --correctness-num-questions {30|100} \
     --nsys-profile
 ```
 
 This one command does everything in order:
-1. **Gate 5.1b** (Phase 1 — correctness): GSM8K greedy decode compared against golden refs. If FAIL (exit code 3), stops immediately — fix the kernel before re-running.
+1. **Gate 5.1b** (Phase 1 — correctness): GSM8K greedy decode accuracy compared against golden refs. If FAIL (exit code 3), stops immediately — fix the kernel before re-running.
 2. **Gate 5.3b** (Phase 2 — latency): E2E latency sweep across all batch sizes. Produces per-BS verdicts.
 3. **Gate 5.3a** (kernel proof): `--nsys-profile` captures an nsys trace. After the sweep, verify via `nsys stats --report cuda_gpu_kern_sum` that your expected kernel name appears.
 
-**Mode selection** (based on `classification` field from `debate/summary.md`):
-- `first_divergence_topk --correctness-num-questions 30` for **lossless** tracks (first-divergence top-5 containment + zero questions lost accuracy gate)
-- `topk_relaxed --correctness-num-questions 100` for **lossy** tracks (per-position top-5 containment + zero questions lost accuracy gate)
-- **If `classification` is absent from the summary: treat as lossy** (safe default) and flag to orchestrator
-
-These parameters apply to ALL sweep invocations for your track, including GATING_REQUIRED re-validation sweeps.
 
 **If Gate 5.3a fails** (kernel not found in nsys trace): the optimization is not activating. Latency numbers are invalid — fix the dispatch before re-running.
 

@@ -96,4 +96,3 @@ Write selection rationale to `{artifact_dir}/debate/summary.md` with:
 - classification: {lossless|lossy}
 ```
 
-The impl-champion derives `correctness_mode` and `correctness_num_questions` from the classification (see `ammo-impl-champion.md` § Mode selection). Lossless tracks use `first_divergence_topk` (first-divergence top-5 containment + accuracy gate); lossy tracks use `topk_relaxed` (per-position containment + accuracy gate).

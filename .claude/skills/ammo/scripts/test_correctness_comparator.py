@@ -1,426 +1,246 @@
-"""Unit tests for Gate 5.1b correctness comparator functions.
+"""Unit tests for Gate 5.1b v2 accuracy-based correctness comparator.
 
-Tests use synthetic golden/opt data (JSON-safe dicts, not vLLM objects).
-No model or GPU required.
+Tests use synthetic data (no model or GPU required).
 """
 import pytest
 
-
-# ---- exact_greedy tests ----
-
-def test_exact_greedy_identical_pass():
-    """Identical token sequences → PASS."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10, 20, 30], "logprobs": [], "text": "a b c", "num_tokens": 3, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 20, 30], "logprobs": [], "text": "a b c", "num_tokens": 3, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="exact_greedy",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "PASS"
-    assert result["divergent_positions"] == 0
+from run_vllm_bench_latency_sweep import _compare_correctness
 
 
-def test_exact_greedy_one_divergent_fail():
-    """One divergent position with threshold=0 → FAIL."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10, 20, 30], "logprobs": [], "text": "", "num_tokens": 3, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 99, 30], "logprobs": [], "text": "", "num_tokens": 3, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="exact_greedy",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "FAIL"
-    assert result["divergent_positions"] == 1
-    assert "diagnostics" in result
-    assert "first_divergence" in result["diagnostics"]
-    assert result["diagnostics"]["first_divergence"]["question_idx"] == 0
-    assert result["diagnostics"]["first_divergence"]["position"] == 1
+def _make_question(token_ids, logprobs=None):
+    """Helper to build a synthetic question dict."""
+    if logprobs is None:
+        logprobs = []
+    return {"token_ids": token_ids, "logprobs": logprobs, "text": "", "num_tokens": len(token_ids), "prompt_index": 0}
 
 
-def test_exact_greedy_one_divergent_with_tolerance_pass():
-    """One divergent position with threshold=1 → PASS."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10, 20, 30], "logprobs": [], "text": "", "num_tokens": 3, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 99, 30], "logprobs": [], "text": "", "num_tokens": 3, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="exact_greedy",
-                                   max_divergent_positions=1, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "PASS"
+# ---- Test 1: opt_accuracy == baseline_accuracy → PASS ----
 
-
-def test_exact_greedy_length_mismatch_counts_as_divergence():
-    """Opt shorter than baseline → extra baseline positions count as divergent."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10, 20, 30, 40, 50], "logprobs": [], "text": "", "num_tokens": 5, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 20, 30], "logprobs": [], "text": "", "num_tokens": 3, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="exact_greedy",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "FAIL"
-    assert result["divergent_positions"] == 2  # 2 extra positions in baseline
-
-
-# ---- topk_relaxed tests ----
-
-def test_topk_relaxed_token_in_topk_pass():
-    """Bidirectional containment succeeds → PASS."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-               "text": "", "num_tokens": 1, "prompt_index": 0}]
-    opt = [{"token_ids": [20], "logprobs": [{"top_logprobs": {"20": -0.1, "10": -1.5, "30": -3.0, "40": -4.0, "50": -5.0}}],
-            "text": "", "num_tokens": 1, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "PASS"
-    assert result["containment_failures"] == 0
-
-
-def test_topk_relaxed_token_not_in_topk_fail():
-    """Token NOT in other's top-K → containment failure. With 1 position, 100% failure → FAIL."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-               "text": "", "num_tokens": 1, "prompt_index": 0}]
-    opt = [{"token_ids": [99], "logprobs": [{"top_logprobs": {"99": -0.1, "88": -1.5, "77": -3.0, "66": -4.0, "55": -5.0}}],
-            "text": "", "num_tokens": 1, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "FAIL"
-    assert result["containment_failures"] == 1
-
-
-def test_topk_relaxed_length_mismatch_penalty():
-    """Opt shorter → extra positions count as containment failures."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10, 20, 30], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "10": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"30": -0.1, "10": -2.0, "20": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 3, "prompt_index": 0}]
-    opt = [{"token_ids": [10], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 1, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=50.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    # 1 matched position + 2 length penalty = 3 total, 2 failures = 66.7%
-    assert result["total_positions"] == 3
-    assert result["containment_failures"] == 2
-    assert result["verdict"] == "FAIL"  # 66.7% > 50%
-
-
-def test_topk_relaxed_empty_outputs_all_fail():
-    """All questions produce 0 tokens → total_positions=0 → FAIL."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [], "logprobs": [], "text": "", "num_tokens": 0, "prompt_index": 0}]
-    opt = [{"token_ids": [], "logprobs": [], "text": "", "num_tokens": 0, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "FAIL"
-
-
-# ---- accuracy gate tests ----
-
-def test_accuracy_gate_zero_lost_pass():
-    """Optimized gets all baseline-correct questions right → PASS."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-               "text": "", "num_tokens": 1, "prompt_index": 0}]
-    opt = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-            "text": "", "num_tokens": 1, "prompt_index": 0}]
-    labels = [42]
-    baseline_preds = [42]  # correct
-    opt_preds = [42]  # also correct
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=100.0,
-                                   labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds)
-    assert result["gsm8k_accuracy_gate"]["verdict"] == "PASS"
-    assert result["gsm8k_accuracy_gate"]["lost_questions"] == []
-
-
-def test_accuracy_gate_lost_question_fail():
-    """Baseline got Q0 right, optimized got it wrong → FAIL."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-               "text": "", "num_tokens": 1, "prompt_index": 0}]
-    opt = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-            "text": "", "num_tokens": 1, "prompt_index": 0}]
-    labels = [42]
-    baseline_preds = [42]  # correct
-    opt_preds = [99]  # wrong
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=100.0,
-                                   labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds)
-    assert result["verdict"] == "FAIL"  # overall verdict overridden by accuracy gate
-    assert result["gsm8k_accuracy_gate"]["verdict"] == "FAIL"
-    assert result["gsm8k_accuracy_gate"]["lost_questions"] == [0]
-
-
-def test_accuracy_gate_override_token_pass_but_accuracy_fail():
-    """Token-level passes but accuracy gate loses a question → overall FAIL."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    # Tokens match perfectly (containment will pass trivially)
-    golden = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-               "text": "", "num_tokens": 1, "prompt_index": 0},
-              {"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-               "text": "", "num_tokens": 1, "prompt_index": 1}]
-    opt = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-            "text": "", "num_tokens": 1, "prompt_index": 0},
-           {"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-            "text": "", "num_tokens": 1, "prompt_index": 1}]
+def test_equal_accuracy_pass():
+    """Both get the same questions right → PASS."""
+    golden = [_make_question([10, 20]), _make_question([30, 40])]
+    opt = [_make_question([10, 20]), _make_question([30, 40])]
     labels = [42, 99]
     baseline_preds = [42, 99]  # both correct
-    opt_preds = [42, 0]  # Q1 wrong
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=100.0,
-                                   labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds)
-    assert result["containment_failures"] == 0  # token-level passes
-    assert result["gsm8k_accuracy_gate"]["verdict"] == "FAIL"
-    assert result["gsm8k_accuracy_gate"]["lost_questions"] == [1]
-    assert result["verdict"] == "FAIL"  # accuracy gate overrides to FAIL
-
-
-def test_accuracy_gate_mismatched_question_counts():
-    """Baseline had more questions than opt → truncate, don't false-fail."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-               "text": "", "num_tokens": 1, "prompt_index": 0}]
-    opt = [{"token_ids": [10], "logprobs": [{"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}}],
-            "text": "", "num_tokens": 1, "prompt_index": 0}]
-    # Baseline had 3 questions, opt only answered 1
-    labels = [42, 99, 77]
-    baseline_preds = [42, 99, 77]  # all correct
-    opt_preds = [42]  # correct for the one question it answered
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="topk_relaxed",
-                                   max_divergent_positions=0, max_topk_failures_pct=100.0,
-                                   labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds)
-    # Should only compare the 1 overlapping question, not false-fail on indices 1-2
-    assert result["gsm8k_accuracy_gate"]["verdict"] == "PASS"
-    assert result["gsm8k_accuracy_gate"]["lost_questions"] == []
-
-
-def test_accuracy_gate_not_applied_exact_greedy():
-    """Accuracy gate is informational-only for exact_greedy mode."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10], "logprobs": [], "text": "", "num_tokens": 1, "prompt_index": 0}]
-    opt = [{"token_ids": [10], "logprobs": [], "text": "", "num_tokens": 1, "prompt_index": 0}]
-    labels = [42]
-    baseline_preds = [42]
-    opt_preds = [99]  # wrong, but exact_greedy doesn't gate on accuracy
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="exact_greedy",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds)
-    assert result["verdict"] == "PASS"  # token match passes
-    assert result["gsm8k_accuracy_gate"]["verdict"] == "INFO"  # informational, not gating
-
-
-# ---- first_divergence_topk tests ----
-
-def test_first_div_topk_identical_pass():
-    """Identical outputs → no divergence → PASS."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10, 20, 30], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "10": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"30": -0.1, "10": -2.0, "20": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "a b c", "num_tokens": 3, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 20, 30], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "10": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"30": -0.1, "10": -2.0, "20": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "a b c", "num_tokens": 3, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
+    opt_preds = [42, 99]       # both correct
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
     assert result["verdict"] == "PASS"
-    assert result["mode"] == "first_divergence_topk"
-    assert result["questions_with_divergence"] == 0
-    assert result["first_divergence_failures"] == 0
-    # per-question summary: no divergence
-    assert result["per_question_summary"][0]["first_divergence_pos"] == -1
-    assert result["per_question_summary"][0]["containment_pass"] is None
+    assert result["baseline_accuracy"] == result["optimized_accuracy"]
+    assert result["accuracy_delta"] == 0.0
 
 
-def test_first_div_topk_divergent_in_topk_pass():
-    """First divergence token is in other's top-5 → PASS."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    # Tokens: baseline=[10, 20], opt=[10, 30]. Divergence at pos 1.
-    # baseline top5 at pos1 includes 30, opt top5 at pos1 includes 20 → bidirectional pass.
-    golden = [{"token_ids": [10, 20], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "30": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 30], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"30": -0.1, "20": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
+# ---- Test 2: opt_accuracy > baseline_accuracy → PASS ----
+
+def test_higher_opt_accuracy_pass():
+    """Optimized gets more questions right than baseline → PASS."""
+    golden = [_make_question([10]), _make_question([20])]
+    opt = [_make_question([10]), _make_question([20])]
+    labels = [42, 99]
+    baseline_preds = [42, 0]   # 1 correct
+    opt_preds = [42, 99]       # 2 correct
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
     assert result["verdict"] == "PASS"
-    assert result["questions_with_divergence"] == 1
-    assert result["first_divergence_failures"] == 0
-    assert result["per_question_summary"][0]["first_divergence_pos"] == 1
-    assert result["per_question_summary"][0]["containment_pass"] is True
+    assert result["optimized_accuracy"] > result["baseline_accuracy"]
+    assert result["accuracy_delta"] > 0
 
 
-def test_first_div_topk_divergent_not_in_topk_fail():
-    """First divergence token NOT in other's top-5 → FAIL."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    # Tokens: baseline=[10, 20], opt=[10, 99]. Divergence at pos 1.
-    # 99 not in baseline top5, 20 not in opt top5 → containment fail.
-    golden = [{"token_ids": [10, 20], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "30": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 99], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"99": -0.1, "88": -1.5, "77": -2.0, "66": -4.0, "55": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
+# ---- Test 3: opt_accuracy < baseline_accuracy by 1 question → FAIL ----
+
+def test_one_question_accuracy_drop_fail():
+    """Optimized loses 1 question → FAIL."""
+    golden = [_make_question([10]), _make_question([20])]
+    opt = [_make_question([10]), _make_question([20])]
+    labels = [42, 99]
+    baseline_preds = [42, 99]  # 2 correct
+    opt_preds = [42, 0]        # 1 correct
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
     assert result["verdict"] == "FAIL"
-    assert result["first_divergence_failures"] == 1
-    assert result["per_question_summary"][0]["containment_pass"] is False
+    assert result["accuracy_delta"] < 0
 
 
-def test_first_div_topk_cascade_ignored():
-    """Many positions diverge after first, but first-div passes containment → PASS."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    # Tokens: baseline=[10, 20, 30, 40], opt=[10, 25, 99, 88]
-    # First divergence at pos 1: 25 in baseline top5, 20 in opt top5 → pass.
-    # Pos 2-3 diverge wildly but are ignored (cascade).
-    golden = [{"token_ids": [10, 20, 30, 40], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "25": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"30": -0.1, "10": -2.0, "20": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"40": -0.1, "10": -2.0, "20": -3.0, "30": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 4, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 25, 99, 88], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"25": -0.1, "20": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"99": -0.1, "88": -2.0, "77": -3.0, "66": -4.0, "55": -5.0}},
-        {"top_logprobs": {"88": -0.1, "77": -2.0, "66": -3.0, "55": -4.0, "44": -5.0}},
-    ], "text": "", "num_tokens": 4, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "PASS"
-    assert result["questions_with_divergence"] == 1
-    assert result["first_divergence_failures"] == 0
-    assert result["per_question_summary"][0]["first_divergence_pos"] == 1
-    assert result["per_question_summary"][0]["containment_pass"] is True
+# ---- Test 4: opt_accuracy < baseline_accuracy by N questions, verify questions_lost ----
 
-
-def test_first_div_topk_length_mismatch():
-    """Different output lengths → first divergence from length diff."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    # Baseline has 3 tokens, opt has 2 identical tokens then stops.
-    # First divergence is at pos 2 (opt has no token there).
-    # No logprobs at that position for opt → failure.
-    golden = [{"token_ids": [10, 20, 30], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "10": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"30": -0.1, "10": -2.0, "20": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 3, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 20], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "10": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
+def test_multiple_questions_lost_fail():
+    """Optimized loses multiple questions → FAIL with correct questions_lost."""
+    n = 5
+    golden = [_make_question([i]) for i in range(n)]
+    opt = [_make_question([i]) for i in range(n)]
+    labels = list(range(n))
+    baseline_preds = list(range(n))        # all 5 correct
+    opt_preds = [0, 1, 999, 999, 999]      # Q2, Q3, Q4 wrong
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
     assert result["verdict"] == "FAIL"
-    assert result["first_divergence_failures"] == 1
-    assert result["per_question_summary"][0]["first_divergence_pos"] == 2
-    assert result["per_question_summary"][0]["containment_pass"] is False
+    assert result["questions_lost"] == [2, 3, 4]
+    assert result["baseline_correct_count"] == 5
+    assert result["optimized_correct_count"] == 2
 
 
-def test_first_div_topk_accuracy_gate_overrides():
-    """First-div containment passes but accuracy check fails → FAIL."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    # Identical tokens (no divergence), but accuracy gate loses a question.
-    golden = [{"token_ids": [10], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 1, "prompt_index": 0}]
-    opt = [{"token_ids": [10], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 1, "prompt_index": 0}]
-    labels = [42]
-    baseline_preds = [42]  # correct
-    opt_preds = [99]  # wrong
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds)
-    assert result["first_divergence_failures"] == 0  # token-level fine
-    assert result["gsm8k_accuracy_gate"]["verdict"] == "FAIL"
-    assert result["verdict"] == "FAIL"  # accuracy gate overrides
+# ---- Test 5: Question churn — lost 2, gained 2, same accuracy → PASS ----
 
-
-def test_first_div_topk_accuracy_gate_not_applied_without_labels():
-    """Without labels/preds, accuracy gate is disabled."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [10, 20], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "30": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}]
-    opt = [{"token_ids": [10, 30], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"30": -0.1, "20": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
+def test_question_churn_same_accuracy_pass():
+    """Lost 2, gained 2 → same accuracy → PASS."""
+    n = 10
+    golden = [_make_question([i]) for i in range(n)]
+    opt = [_make_question([i]) for i in range(n)]
+    labels = list(range(n))
+    # Baseline gets Q0-Q6 correct (7 total)
+    baseline_preds = [0, 1, 2, 3, 4, 5, 6, 999, 999, 999]
+    # Opt gets Q0-Q4, Q7, Q8 correct (7 total) — lost Q5,Q6 gained Q7,Q8
+    opt_preds = [0, 1, 2, 3, 4, 999, 999, 7, 8, 999]
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
     assert result["verdict"] == "PASS"
-    assert result["gsm8k_accuracy_gate"]["enabled"] is False
+    assert result["questions_lost"] == [5, 6]
+    assert result["questions_gained"] == [7, 8]
+    assert result["baseline_accuracy"] == result["optimized_accuracy"]
 
 
-def test_first_div_topk_threshold_allows_some_failures():
-    """With max_topk_failures_pct=50, 1/4 questions failing → PASS (25% < 50%)."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    # 4 questions: Q0 has divergence that fails containment, Q1-Q3 are identical.
-    # Baseline Q0: tokens [10, 20], Opt Q0: tokens [10, 99] (divergence at pos 1, not in top5).
-    golden_q0 = {"token_ids": [10, 20], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "30": -1.5, "10": -2.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}
-    opt_q0 = {"token_ids": [10, 99], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"99": -0.1, "88": -1.5, "77": -2.0, "66": -4.0, "55": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 0}
-    q_pass = {"token_ids": [10, 20], "logprobs": [
-        {"top_logprobs": {"10": -0.1, "20": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-        {"top_logprobs": {"20": -0.1, "10": -2.0, "30": -3.0, "40": -4.0, "50": -5.0}},
-    ], "text": "", "num_tokens": 2, "prompt_index": 1}
-    golden = [
-        golden_q0,
-        {**q_pass, "prompt_index": 1},
-        {**q_pass, "prompt_index": 2},
-        {**q_pass, "prompt_index": 3},
-    ]
-    opt = [
-        opt_q0,
-        {**q_pass, "prompt_index": 1},
-        {**q_pass, "prompt_index": 2},
-        {**q_pass, "prompt_index": 3},
-    ]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=50.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
-    assert result["verdict"] == "PASS"
-    assert result["first_divergence_failures"] == 1
-    assert result["failure_rate_pct"] == 25.0  # 1/4 = 25%
-    assert result["num_questions"] == 4
+# ---- Test 6: baseline_accuracy = 0 → infrastructure_error ----
 
-
-def test_first_div_topk_empty_outputs_fail():
-    """Both outputs empty → FAIL (no meaningful comparison possible)."""
-    from run_vllm_bench_latency_sweep import _compare_correctness
-    golden = [{"token_ids": [], "logprobs": [], "text": "", "num_tokens": 0, "prompt_index": 0}]
-    opt = [{"token_ids": [], "logprobs": [], "text": "", "num_tokens": 0, "prompt_index": 0}]
-    result = _compare_correctness(golden_refs=golden, opt_outputs=opt, mode="first_divergence_topk",
-                                   max_divergent_positions=0, max_topk_failures_pct=5.0,
-                                   labels=None, baseline_preds=None, opt_preds=None)
+def test_baseline_accuracy_zero_infrastructure_error():
+    """Baseline gets 0 questions right → infrastructure_error flag."""
+    golden = [_make_question([10]), _make_question([20])]
+    opt = [_make_question([10]), _make_question([20])]
+    labels = [42, 99]
+    baseline_preds = [0, 0]    # 0 correct
+    opt_preds = [42, 99]       # 2 correct
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
+    assert result.get("infrastructure_error") is True
     assert result["verdict"] == "FAIL"
+    assert result["baseline_correct_count"] == 0
+
+
+# ---- Test 7: n = 0 (empty question list) → FAIL ----
+
+def test_empty_questions_fail():
+    """Zero questions → FAIL."""
+    result = _compare_correctness(
+        golden_refs=[], opt_outputs=[],
+        labels=[], baseline_preds=[], opt_preds=[],
+    )
+    assert result["verdict"] == "FAIL"
+    assert result["num_questions"] == 0
+
+
+# ---- Test 8: All outputs empty (0 tokens) → FAIL ----
+
+def test_all_empty_outputs_fail():
+    """All questions produce 0 tokens → FAIL."""
+    golden = [_make_question([]), _make_question([])]
+    opt = [_make_question([]), _make_question([])]
+    labels = [42, 99]
+    baseline_preds = [42, 99]  # correct (from external scoring)
+    opt_preds = [42, 99]       # correct (from external scoring)
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
+    assert result["verdict"] == "FAIL"
+
+
+# ---- Test 9: questions_lost and questions_gained mutually exclusive ----
+
+def test_lost_gained_mutually_exclusive():
+    """questions_lost and questions_gained have no overlap."""
+    n = 6
+    golden = [_make_question([i]) for i in range(n)]
+    opt = [_make_question([i]) for i in range(n)]
+    labels = list(range(n))
+    # Baseline: Q0,Q1,Q2,Q3 correct
+    baseline_preds = [0, 1, 2, 3, 999, 999]
+    # Opt: Q0,Q1,Q4,Q5 correct (lost Q2,Q3; gained Q4,Q5)
+    opt_preds = [0, 1, 999, 999, 4, 5]
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
+    assert result["verdict"] == "PASS"
+    lost_set = set(result["questions_lost"])
+    gained_set = set(result["questions_gained"])
+    assert lost_set & gained_set == set(), "questions_lost and questions_gained must be disjoint"
+    assert result["questions_lost"] == [2, 3]
+    assert result["questions_gained"] == [4, 5]
+
+
+# ---- Test 10: Diagnostics populated but don't affect verdict → PASS ----
+
+def test_diagnostics_dont_affect_verdict():
+    """Token divergence in diagnostics but accuracy equal → PASS."""
+    golden = [_make_question([10, 20, 30]), _make_question([40, 50, 60])]
+    # Different tokens at every position
+    opt = [_make_question([10, 99, 88]), _make_question([40, 50, 60])]
+    labels = [42, 99]
+    baseline_preds = [42, 99]
+    opt_preds = [42, 99]
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
+    assert result["verdict"] == "PASS"
+    diag = result["diagnostics"]
+    assert diag["divergent_questions"] == 1
+    assert diag["first_divergence_positions_p50"] >= 0
+    assert diag["first_divergence_positions_p95"] >= 0
+    assert "churn_rate" in diag
+    assert "note" in diag
+
+
+# ---- Test 11: accuracy_delta math correct ----
+
+def test_accuracy_delta_math():
+    """Verify accuracy_delta = optimized_accuracy - baseline_accuracy."""
+    n = 4
+    golden = [_make_question([i]) for i in range(n)]
+    opt = [_make_question([i]) for i in range(n)]
+    labels = [0, 1, 2, 3]
+    baseline_preds = [0, 1, 2, 3]  # 4/4 = 1.0
+    opt_preds = [0, 1, 2, 999]     # 3/4 = 0.75
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
+    assert result["baseline_accuracy"] == 1.0
+    assert result["optimized_accuracy"] == 0.75
+    assert result["accuracy_delta"] == -0.25
+    assert result["verdict"] == "FAIL"
+
+
+# ---- Test 12: Large n (200 questions) with 1-question accuracy drop → FAIL ----
+
+def test_large_n_one_question_drop_fail():
+    """200 questions, optimized loses exactly 1 → FAIL."""
+    n = 200
+    golden = [_make_question([i]) for i in range(n)]
+    opt = [_make_question([i]) for i in range(n)]
+    labels = list(range(n))
+    baseline_preds = list(range(n))  # all 200 correct
+    opt_preds = list(range(n))
+    opt_preds[99] = -1  # Q99 wrong
+    result = _compare_correctness(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
+    assert result["verdict"] == "FAIL"
+    assert result["num_questions"] == 200
+    assert result["baseline_correct_count"] == 200
+    assert result["optimized_correct_count"] == 199
+    assert result["questions_lost"] == [99]
+    assert result["questions_gained"] == []
+    assert result["accuracy_delta"] < 0

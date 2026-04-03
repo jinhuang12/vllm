@@ -599,7 +599,7 @@ _INVALID_ANSWER = -9999999
 
 
 def _download_and_cache_file(url: str, filename: str | None = None) -> str:
-    import requests as _requests_mod  # Lazy: only needed for >30 question fallback
+    import requests as _requests_mod  # Lazy: only needed for >200 question fallback
     if filename is None:
         filename = os.path.join("/tmp", url.split("/")[-1])
     if os.path.exists(filename):
@@ -622,7 +622,7 @@ def _read_jsonl(filename: str):
 
 def _load_gsm8k_data(num_questions: int) -> Tuple[List[dict], List[dict]]:
     """Load GSM8K data — bundled subset first, GitHub fallback if needed."""
-    if num_questions <= 30 and _GSM8K_SUBSET_PATH.exists():
+    if num_questions <= 200 and _GSM8K_SUBSET_PATH.exists():
         with open(_GSM8K_SUBSET_PATH) as f:
             data = json.load(f)
         return data["train"], data["test"][:num_questions]
@@ -646,7 +646,7 @@ def _get_answer_value(answer_str: str) -> int:
 
 
 def _build_gsm8k_prompts(
-    num_questions: int = 30, num_shots: int = 5
+    num_questions: int = 200, num_shots: int = 5
 ) -> Tuple[List[str], List[int]]:
     """Build few-shot GSM8K prompts and ground-truth labels."""
     if num_questions == 0:
@@ -703,236 +703,147 @@ def _compare_correctness(
     *,
     golden_refs: List[Dict[str, Any]],
     opt_outputs: List[Dict[str, Any]],
-    mode: str,
-    max_divergent_positions: int,
-    max_topk_failures_pct: float,
     labels: Optional[List[int]],
     baseline_preds: Optional[List[int]],
     opt_preds: Optional[List[int]],
 ) -> Dict[str, Any]:
-    """Compare optimized outputs against golden references."""
+    """Compare optimized outputs against golden references (Gate 5.1b v2).
+
+    Single accuracy gate: ``opt_accuracy >= baseline_accuracy``.
+    Token-level data is computed as diagnostics only (never affects verdict).
+    """
     num_questions = min(len(golden_refs), len(opt_outputs))
-    per_question = []
 
-    # ---- Accuracy gate (computed for both modes) ----
-    accuracy_gate: Dict[str, Any] = {"enabled": False}
-    if labels is not None and baseline_preds is not None and opt_preds is not None:
-        # Truncate to shortest list to avoid false failures from mismatched question counts.
-        n = min(len(labels), len(baseline_preds), len(opt_preds))
-        labels_t, baseline_preds_t, opt_preds_t = labels[:n], baseline_preds[:n], opt_preds[:n]
-        baseline_correct = {i for i, (p, l) in enumerate(zip(baseline_preds_t, labels_t)) if p == l}
-        opt_correct = {i for i, (p, l) in enumerate(zip(opt_preds_t, labels_t)) if p == l}
-        lost = sorted(baseline_correct - opt_correct)
-        gained = sorted(opt_correct - baseline_correct)
-        bl_acc = len(baseline_correct) / n if n else 0.0
-        op_acc = len(opt_correct) / n if n else 0.0
-        is_hard_gate = mode in ("topk_relaxed", "first_divergence_topk")
-        accuracy_gate = {
-            "enabled": True,
-            "baseline_accuracy": round(bl_acc, 4),
-            "baseline_correct_indices": sorted(baseline_correct),
-            "optimized_accuracy": round(op_acc, 4),
-            "optimized_correct_indices": sorted(opt_correct),
-            "lost_questions": lost,
-            "gained_questions": gained,
-            "verdict": "FAIL" if (is_hard_gate and len(lost) > 0) else ("PASS" if is_hard_gate else "INFO"),
-        }
-
-    if mode == "exact_greedy":
-        total_divergent = 0
-        total_positions = 0
-        first_divergence = None
-        for q in range(num_questions):
-            b_ids = golden_refs[q]["token_ids"]
-            o_ids = opt_outputs[q]["token_ids"]
-            min_len = min(len(b_ids), len(o_ids))
-            divergent = sum(1 for p in range(min_len) if b_ids[p] != o_ids[p])
-            first_div = next((p for p in range(min_len) if b_ids[p] != o_ids[p]), -1)
-            divergent += abs(len(b_ids) - len(o_ids))
-            total_divergent += divergent
-            total_positions += max(len(b_ids), len(o_ids))
-            per_question.append({
-                "idx": q, "baseline_tokens": len(b_ids), "opt_tokens": len(o_ids),
-                "divergent": divergent, "first_divergence_pos": first_div,
-            })
-            if first_divergence is None and first_div >= 0:
-                first_divergence = {"question_idx": q, "position": first_div,
-                                     "baseline_token": b_ids[first_div], "opt_token": o_ids[first_div]}
-        if total_positions == 0:
-            verdict = "FAIL"  # All questions produced empty output
-        else:
-            verdict = "PASS" if total_divergent <= max_divergent_positions else "FAIL"
-        result = {
-            "gate": "5.1b", "verdict": verdict, "mode": "exact_greedy",
-            "num_questions": num_questions, "total_positions": total_positions,
-            "divergent_positions": total_divergent, "threshold": max_divergent_positions,
-            "per_question_summary": per_question, "gsm8k_accuracy_gate": accuracy_gate,
-        }
-        if verdict == "FAIL" and first_divergence:
-            result["diagnostics"] = {"first_divergence": first_divergence,
-                                      "divergence_summary": f"{sum(1 for pq in per_question if pq['divergent'] > 0)} of {num_questions} questions diverged"}
-        return result
-
-    elif mode == "topk_relaxed":
-        total_positions = 0
-        containment_failures = 0
-        empty_output_count = 0
-        first_failure = None
-        for q in range(num_questions):
-            b = golden_refs[q]
-            o = opt_outputs[q]
-            b_len = len(b["token_ids"])
-            o_len = len(o["token_ids"])
-            if b_len == 0 and o_len == 0:
-                empty_output_count += 1
-                per_question.append({"idx": q, "baseline_tokens": 0, "opt_tokens": 0, "containment_failures": 0})
-                continue
-            min_len = min(b_len, o_len)
-            max_len = max(b_len, o_len)
-            q_failures = 0
-            for pos in range(min_len):
-                total_positions += 1
-                b_topk = {int(k) for k in b["logprobs"][pos]["top_logprobs"]}
-                o_topk = {int(k) for k in o["logprobs"][pos]["top_logprobs"]}
-                b_token = b["token_ids"][pos]
-                o_token = o["token_ids"][pos]
-                if o_token not in b_topk or b_token not in o_topk:
-                    containment_failures += 1
-                    q_failures += 1
-                    if first_failure is None:
-                        first_failure = {"question_idx": q, "position": pos,
-                                          "baseline_token": b_token, "opt_token": o_token,
-                                          "baseline_top5": dict(b["logprobs"][pos]["top_logprobs"]),
-                                          "opt_top5": dict(o["logprobs"][pos]["top_logprobs"])}
-            length_penalty = max_len - min_len
-            total_positions += length_penalty
-            containment_failures += length_penalty
-            per_question.append({"idx": q, "baseline_tokens": b_len, "opt_tokens": o_len, "containment_failures": q_failures + length_penalty})
-
-        if empty_output_count > num_questions * 0.1:
-            print(f"[correctness] WARNING: {empty_output_count}/{num_questions} questions produced empty output")
-        if total_positions == 0:
-            verdict = "FAIL"
-            failure_rate = 0.0
-        else:
-            failure_rate = containment_failures / total_positions * 100
-            verdict = "PASS" if failure_rate <= max_topk_failures_pct else "FAIL"
-
-        # Accuracy gate can override to FAIL even if token-level passes
-        if verdict == "PASS" and accuracy_gate.get("verdict") == "FAIL":
-            verdict = "FAIL"
-
-        result = {
-            "gate": "5.1b", "verdict": verdict, "mode": "topk_relaxed",
-            "num_questions": num_questions, "total_positions": total_positions,
-            "containment_failures": containment_failures,
-            "failure_rate_pct": round(failure_rate, 4), "threshold_pct": max_topk_failures_pct,
-            "empty_output_count": empty_output_count,
-            "per_question_summary": per_question, "gsm8k_accuracy_gate": accuracy_gate,
-        }
-        if verdict == "FAIL" and first_failure:
-            result["diagnostics"] = {"first_divergence": first_failure,
-                                      "divergence_summary": f"{containment_failures} containment failures across {total_positions} positions ({failure_rate:.1f}%)",
-                                      "length_mismatches": sum(1 for pq in per_question if pq.get("baseline_tokens", 0) != pq.get("opt_tokens", 0)),
-                                      "empty_outputs": empty_output_count}
-        return result
-    elif mode == "first_divergence_topk":
-        questions_with_divergence = 0
-        first_divergence_failures = 0
-        empty_output_count = 0
-        for q in range(num_questions):
-            b = golden_refs[q]
-            o = opt_outputs[q]
-            b_ids = b["token_ids"]
-            o_ids = o["token_ids"]
-            b_len = len(b_ids)
-            o_len = len(o_ids)
-
-            if b_len == 0 and o_len == 0:
-                empty_output_count += 1
-                per_question.append({
-                    "idx": q, "baseline_tokens": 0, "opt_tokens": 0,
-                    "first_divergence_pos": -1, "containment_pass": None,
-                    "baseline_token_at_div": None, "opt_token_at_div": None,
-                })
-                continue
-
-            # Walk token positions to find the first divergence.
-            min_len = min(b_len, o_len)
-            first_div_pos = -1
-            for pos in range(min_len):
-                if b_ids[pos] != o_ids[pos]:
-                    first_div_pos = pos
-                    break
-
-            # Length mismatch: if all shared positions match but lengths differ,
-            # the first divergence is at the end of the shorter output.
-            if first_div_pos == -1 and b_len != o_len:
-                first_div_pos = min_len
-
-            if first_div_pos == -1:
-                # No divergence at all — question passes.
-                per_question.append({
-                    "idx": q, "baseline_tokens": b_len, "opt_tokens": o_len,
-                    "first_divergence_pos": -1, "containment_pass": None,
-                    "baseline_token_at_div": None, "opt_token_at_div": None,
-                })
-                continue
-
-            questions_with_divergence += 1
-
-            # Check bidirectional top-5 containment at first_div_pos.
-            # If the divergence is from a length mismatch (one output is shorter),
-            # we cannot do top-5 containment — count as failure.
-            if first_div_pos >= b_len or first_div_pos >= o_len:
-                # Length-induced divergence: no logprobs to compare at this position.
-                containment_pass = False
-                b_token_at_div = b_ids[first_div_pos] if first_div_pos < b_len else None
-                o_token_at_div = o_ids[first_div_pos] if first_div_pos < o_len else None
-            else:
-                b_token_at_div = b_ids[first_div_pos]
-                o_token_at_div = o_ids[first_div_pos]
-                b_topk = {int(k) for k in b["logprobs"][first_div_pos]["top_logprobs"]}
-                o_topk = {int(k) for k in o["logprobs"][first_div_pos]["top_logprobs"]}
-                containment_pass = (o_token_at_div in b_topk) and (b_token_at_div in o_topk)
-
-            if not containment_pass:
-                first_divergence_failures += 1
-
-            per_question.append({
-                "idx": q, "baseline_tokens": b_len, "opt_tokens": o_len,
-                "first_divergence_pos": first_div_pos, "containment_pass": containment_pass,
-                "baseline_token_at_div": b_token_at_div, "opt_token_at_div": o_token_at_div,
-            })
-
-        if empty_output_count > num_questions * 0.1:
-            print(f"[correctness] WARNING: {empty_output_count}/{num_questions} questions produced empty output")
-
-        # All questions empty → FAIL (no meaningful comparison).
-        if num_questions == 0 or (empty_output_count == num_questions):
-            verdict = "FAIL"
-            failure_rate = 0.0
-        else:
-            failure_rate = first_divergence_failures / num_questions * 100
-            verdict = "PASS" if failure_rate <= max_topk_failures_pct else "FAIL"
-
-        # Accuracy gate can override to FAIL even if first-divergence containment passes.
-        if verdict == "PASS" and accuracy_gate.get("verdict") == "FAIL":
-            verdict = "FAIL"
-
+    # ---- Edge case: empty question set ----
+    if num_questions == 0:
         return {
-            "gate": "5.1b", "verdict": verdict, "mode": "first_divergence_topk",
-            "num_questions": num_questions,
-            "questions_with_divergence": questions_with_divergence,
-            "first_divergence_failures": first_divergence_failures,
-            "failure_rate_pct": round(failure_rate, 4),
-            "threshold_pct": max_topk_failures_pct,
-            "per_question_summary": per_question,
-            "gsm8k_accuracy_gate": accuracy_gate,
+            "gate": "5.1b", "verdict": "FAIL",
+            "num_questions": 0,
+            "baseline_accuracy": 0.0, "optimized_accuracy": 0.0,
+            "accuracy_delta": 0.0,
+            "baseline_correct_count": 0, "optimized_correct_count": 0,
+            "questions_lost": [], "questions_gained": [],
+            "diagnostics": {
+                "divergent_questions": 0,
+                "first_divergence_positions_p50": -1,
+                "first_divergence_positions_p95": -1,
+                "churn_rate": 0.0,
+                "note": "Token-level data is informational only and does not affect the verdict.",
+            },
         }
 
+    # ---- Edge case: accuracy gate requires labels + preds ----
+    if labels is None or baseline_preds is None or opt_preds is None:
+        return {
+            "gate": "5.1b", "verdict": "FAIL",
+            "num_questions": num_questions,
+            "baseline_accuracy": 0.0, "optimized_accuracy": 0.0,
+            "accuracy_delta": 0.0,
+            "baseline_correct_count": 0, "optimized_correct_count": 0,
+            "questions_lost": [], "questions_gained": [],
+            "diagnostics": {
+                "divergent_questions": 0,
+                "first_divergence_positions_p50": -1,
+                "first_divergence_positions_p95": -1,
+                "churn_rate": 0.0,
+                "note": "Token-level data is informational only and does not affect the verdict.",
+            },
+            "_error": "Accuracy gate requires labels, baseline_preds, and opt_preds.",
+        }
+
+    # ---- Accuracy computation ----
+    n = min(len(labels), len(baseline_preds), len(opt_preds), num_questions)
+    labels_t = labels[:n]
+    baseline_preds_t = baseline_preds[:n]
+    opt_preds_t = opt_preds[:n]
+
+    baseline_correct = {i for i, (p, l) in enumerate(zip(baseline_preds_t, labels_t)) if p == l}
+    opt_correct = {i for i, (p, l) in enumerate(zip(opt_preds_t, labels_t)) if p == l}
+    questions_lost = sorted(baseline_correct - opt_correct)
+    questions_gained = sorted(opt_correct - baseline_correct)
+
+    baseline_acc = len(baseline_correct) / n
+    opt_acc = len(opt_correct) / n
+
+    # ---- Baseline accuracy floor ----
+    if len(baseline_correct) == 0:
+        return {
+            "gate": "5.1b", "verdict": "FAIL",
+            "num_questions": n,
+            "baseline_accuracy": 0.0, "optimized_accuracy": round(opt_acc, 4),
+            "accuracy_delta": round(opt_acc, 4),
+            "baseline_correct_count": 0,
+            "optimized_correct_count": len(opt_correct),
+            "questions_lost": [], "questions_gained": questions_gained,
+            "infrastructure_error": True,
+            "infrastructure_message": "Baseline accuracy is 0% — model cannot solve any GSM8K questions; environment suspect.",
+            "diagnostics": {
+                "divergent_questions": 0,
+                "first_divergence_positions_p50": -1,
+                "first_divergence_positions_p95": -1,
+                "churn_rate": 0.0,
+                "note": "Token-level data is informational only and does not affect the verdict.",
+            },
+        }
+
+    # ---- Verdict: opt_accuracy >= baseline_accuracy ----
+    verdict = "PASS" if opt_acc >= baseline_acc else "FAIL"
+
+    # ---- Token-level diagnostics (informational only) ----
+    first_divergence_positions: List[int] = []
+    divergent_questions = 0
+    all_empty = True
+
+    for q in range(n):
+        b_ids = golden_refs[q]["token_ids"]
+        o_ids = opt_outputs[q]["token_ids"]
+        if b_ids or o_ids:
+            all_empty = False
+        min_len = min(len(b_ids), len(o_ids))
+        first_div = next((p for p in range(min_len) if b_ids[p] != o_ids[p]), -1)
+        if first_div == -1 and len(b_ids) != len(o_ids):
+            first_div = min_len
+        if first_div >= 0:
+            divergent_questions += 1
+            first_divergence_positions.append(first_div)
+
+    # All outputs empty → override to FAIL regardless of accuracy
+    if all_empty and n > 0:
+        verdict = "FAIL"
+
+    # p50/p95 of first_divergence_positions (across divergent questions only)
+    if first_divergence_positions:
+        sorted_pos = sorted(first_divergence_positions)
+        p50_idx = max(0, int(len(sorted_pos) * 0.50) - 1)
+        p95_idx = max(0, int(len(sorted_pos) * 0.95) - 1)
+        fdp_p50 = sorted_pos[p50_idx]
+        fdp_p95 = sorted_pos[p95_idx]
     else:
-        raise ValueError(f"Unknown correctness mode: {mode}")
+        fdp_p50 = -1
+        fdp_p95 = -1
+
+    churn_rate = round((len(questions_lost) + len(questions_gained)) / n, 4) if n else 0.0
+
+    return {
+        "gate": "5.1b",
+        "verdict": verdict,
+        "num_questions": n,
+        "baseline_accuracy": round(baseline_acc, 4),
+        "optimized_accuracy": round(opt_acc, 4),
+        "accuracy_delta": round(opt_acc - baseline_acc, 4),
+        "baseline_correct_count": len(baseline_correct),
+        "optimized_correct_count": len(opt_correct),
+        "questions_lost": questions_lost,
+        "questions_gained": questions_gained,
+        "diagnostics": {
+            "divergent_questions": divergent_questions,
+            "first_divergence_positions_p50": fdp_p50,
+            "first_divergence_positions_p95": fdp_p95,
+            "churn_rate": churn_rate,
+            "note": "Token-level data is informational only and does not affect the verdict.",
+        },
+        "_diagnostic_notes": "p50/p95 computed across questions where first_divergence_pos >= 0; set to -1 if no questions diverge. churn_rate = (questions_lost + questions_gained) / num_questions.",
+    }
 
 
 def _run_inproc_latency_sweep_child(
@@ -949,10 +860,7 @@ def _run_inproc_latency_sweep_child(
     nsys_profile: bool = False,
     capture_golden_refs: bool = False,
     verify_correctness: bool = False,
-    correctness_mode: str = "exact_greedy",
-    correctness_num_questions: int = 30,
-    max_divergent_positions: int = 0,
-    max_topk_failures_pct: float = 5.0,
+    correctness_num_questions: int = 200,
 ) -> int:
     """Child-mode runner: load model once, benchmark all buckets.
 
@@ -1069,7 +977,7 @@ def _run_inproc_latency_sweep_child(
         try:
             prompts, gsm8k_labels = _build_gsm8k_prompts(num_questions=correctness_num_questions)
             correctness_sp = _CorrectnessSP(
-                temperature=0.0, max_tokens=256,
+                temperature=0.0, max_tokens=1024,
                 stop=["Question", "Assistant:", "<|separator|>"],
                 seed=42, logprobs=5,
             )
@@ -1094,13 +1002,12 @@ def _run_inproc_latency_sweep_child(
                 )
                 if not deterministic:
                     print("[correctness] WARNING: Self-consistency check FAILED — environment is non-deterministic.")
-                    print("[correctness] Recommended mode for Stage 5: topk_relaxed")
                 else:
                     print("[correctness] Self-consistency check PASSED — greedy decode is deterministic.")
 
                 golden_data = {
                     "metadata": {
-                        "num_questions": len(prompts), "num_shots": 5, "max_tokens": 256,
+                        "num_questions": len(prompts), "num_shots": 5, "max_tokens": 1024,
                         "seed": 42, "logprobs_k": 5, "gsm8k_accuracy": round(accuracy, 4),
                         "capture_duration_s": round(duration, 2), "gpu_name": gpu_name,
                         "deterministic": deterministic,
@@ -1125,6 +1032,24 @@ def _run_inproc_latency_sweep_child(
                 baseline_preds = golden_meta.get("baseline_preds")
                 golden_labels = golden_meta.get("labels")
 
+                # Metadata mismatch detection (exit code 4)
+                golden_nq = golden_meta.get("num_questions")
+                if golden_nq is not None and golden_nq != correctness_num_questions:
+                    msg = (f"[correctness] ERROR: golden refs num_questions={golden_nq} "
+                           f"!= current num_questions={correctness_num_questions}. "
+                           "Re-capture golden refs with matching --correctness-num-questions.")
+                    print(msg)
+                    _update_status("correctness_error", extra={"error": msg})
+                    return 4
+                golden_mt = golden_meta.get("max_tokens")
+                if golden_mt is not None and golden_mt != 1024:
+                    msg = (f"[correctness] ERROR: golden refs max_tokens={golden_mt} "
+                           f"!= current max_tokens=1024. "
+                           "Re-capture golden refs with v2 settings.")
+                    print(msg)
+                    _update_status("correctness_error", extra={"error": msg})
+                    return 4
+
                 # GPU name mismatch warning
                 golden_gpu = golden_meta.get("gpu_name", "")
                 if golden_gpu and golden_gpu != gpu_name:
@@ -1137,19 +1062,20 @@ def _run_inproc_latency_sweep_child(
                 # Run comparator
                 verdict = _compare_correctness(
                     golden_refs=golden_refs, opt_outputs=serialized,
-                    mode=correctness_mode,
-                    max_divergent_positions=max_divergent_positions,
-                    max_topk_failures_pct=max_topk_failures_pct,
                     labels=golden_labels, baseline_preds=baseline_preds, opt_preds=preds,
                 )
-                verdict["gsm8k_accuracy_baseline"] = golden_meta.get("gsm8k_accuracy")
-                verdict["gsm8k_accuracy_optimized"] = round(accuracy, 4)
                 verdict["duration_s"] = round(duration, 2)
 
                 verdict_path = json_dir / "correctness_verdict.json"
                 _write_json(verdict_path, verdict)
                 print(f"[correctness] Verdict: {verdict['verdict']}")
                 print(f"[correctness] Written to {verdict_path}")
+
+                # Infrastructure error (baseline_accuracy=0) → exit code 4
+                if verdict.get("infrastructure_error"):
+                    print(f"[correctness] {verdict.get('infrastructure_message', 'Infrastructure error')}")
+                    _update_status("correctness_error", extra=verdict)
+                    return 4
 
                 if verdict["verdict"] != "PASS":
                     _update_status("correctness_failed", extra=verdict)
@@ -1495,15 +1421,8 @@ def main() -> None:
                    help="Stage 1: run GSM8K greedy decode and save golden refs to json/golden_refs.json")
     p.add_argument("--verify-correctness", action="store_true", default=False,
                    help="Stage 5: compare GSM8K outputs against golden refs; exit nonzero on mismatch")
-    p.add_argument("--correctness-mode", type=str, default="exact_greedy",
-                   choices=["exact_greedy", "topk_relaxed", "first_divergence_topk"],
-                   help="Comparator mode for --verify-correctness (default: exact_greedy)")
-    p.add_argument("--correctness-num-questions", type=int, default=30,
-                   help="Number of GSM8K questions for correctness phase (default: 30)")
-    p.add_argument("--max-divergent-positions", type=int, default=0,
-                   help="(exact_greedy) max allowed token mismatches (default: 0)")
-    p.add_argument("--max-topk-failures-pct", type=float, default=5.0,
-                   help="(topk_relaxed) max pct of positions failing top-K containment (default: 5.0)")
+    p.add_argument("--correctness-num-questions", type=int, default=200,
+                   help="Number of GSM8K questions for correctness phase (default: 200)")
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
@@ -1512,10 +1431,7 @@ def main() -> None:
     p.add_argument("--_nsys-num-iters", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_capture-golden-refs", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_verify-correctness", action="store_true", default=False, help=argparse.SUPPRESS)
-    p.add_argument("--_correctness-mode", type=str, default="exact_greedy", help=argparse.SUPPRESS)
-    p.add_argument("--_correctness-num-questions", type=int, default=30, help=argparse.SUPPRESS)
-    p.add_argument("--_max-divergent-positions", type=int, default=0, help=argparse.SUPPRESS)
-    p.add_argument("--_max-topk-failures-pct", type=float, default=5.0, help=argparse.SUPPRESS)
+    p.add_argument("--_correctness-num-questions", type=int, default=200, help=argparse.SUPPRESS)
 
     args = p.parse_args()
 
@@ -1967,10 +1883,7 @@ def main() -> None:
             nsys_profile=getattr(args, "_nsys_profile", False),
             capture_golden_refs=getattr(args, "_capture_golden_refs", False),
             verify_correctness=getattr(args, "_verify_correctness", False),
-            correctness_mode=getattr(args, "_correctness_mode", "exact_greedy"),
-            correctness_num_questions=getattr(args, "_correctness_num_questions", 30),
-            max_divergent_positions=getattr(args, "_max_divergent_positions", 0),
-            max_topk_failures_pct=getattr(args, "_max_topk_failures_pct", 5.0),
+            correctness_num_questions=getattr(args, "_correctness_num_questions", 200),
         )
         raise SystemExit(returncode)
 
@@ -2060,11 +1973,8 @@ def main() -> None:
         if args.capture_golden_refs:
             child_cmd.append("--_capture-golden-refs")
         if args.verify_correctness:
-            child_cmd.extend(["--_verify-correctness",
-                              "--_correctness-mode", args.correctness_mode,
-                              "--_max-divergent-positions", str(args.max_divergent_positions),
-                              "--_max-topk-failures-pct", str(args.max_topk_failures_pct)])
-        if args.correctness_num_questions != 30:
+            child_cmd.append("--_verify-correctness")
+        if args.capture_golden_refs or args.verify_correctness:
             child_cmd.extend(["--_correctness-num-questions", str(args.correctness_num_questions)])
 
         # Prepend nsys wrapper when profiling.
