@@ -3,6 +3,9 @@ version: 1.2.0
 ## Changelog
 
 ### 1.2.0 (2026-04-03)
+- Accuracy failure persistence: impl-champions must classify failures (fixable vs fundamental), investigate root cause, and iterate on fixes until both champion AND monitor agree options are exhausted — no retry limits, no time limits
+- Transcript monitor dual role: monitors now suggest fix strategies (grounded in champion's own data) AND enforce persistence (CRITICAL on premature FAIL reports)
+- Updated orchestrator spawn templates: workflow step 6 adds accuracy fix iteration, monitor prompt includes persistence enforcement
 - PreToolUse hook: ammo-msg-check.sh — gates champion agents mid-turn when undelivered teammate messages exist (forces turn end so messages get delivered)
 - Gate 5.1b v2: unified accuracy gate (opt_accuracy >= baseline_accuracy)
 - Removed 3-mode token-level comparator (exact_greedy, topk_relaxed, first_divergence_topk)

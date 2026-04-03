@@ -171,6 +171,58 @@ The sweep script computes per-BS verdicts using thresholds from `references/vali
    - Overall PASS/FAIL/GATED_PASS verdict
 7. **Commit** and report to orchestrator
 
+## Accuracy Failure Persistence (NON-NEGOTIABLE)
+
+When Gate 5.1b (accuracy) fails, **do NOT immediately report FAIL**. Accuracy failures are often fixable. You MUST classify the failure and persist on fixable ones.
+
+### Step 1: Classify the Failure
+
+| Class | Description | Examples | Action |
+|-------|-------------|----------|--------|
+| **Fixable** | Accuracy loss stems from a specific code path that can be changed without abandoning the optimization | cuBLAS tiling divergence at prefill only (decode is bit-exact), torch.compile graph restructuring, FP accumulation order change in specific M range | **Persist — try fixes** |
+| **Fundamental** | Accuracy loss is inherent to the optimization's core mechanism and cannot be isolated | FP8 quantization error compounding across all layers, irreducible precision reduction | **Document and report FAIL** |
+
+**If unsure**: default to **Fixable** and try at least one fix before concluding Fundamental.
+
+### Step 2: Fix Iteration (Fixable Failures)
+
+Investigate the root cause, then try fixes. Common investigation questions:
+- Which M values (batch sizes) produce divergent outputs? Is it all M, or only specific ranges?
+- Is the divergence in decode (small M) or prefill (large M) or both?
+- Which component of the output diverges? All of it, or a specific subset?
+- What's the magnitude? 1-ULP (FP associativity) vs large error (algorithmic)?
+
+Use what you learn to design targeted fixes. If one approach doesn't work, try a different angle. Spawn `ammo-delegate` subagents to investigate root causes in parallel with your fix attempts.
+
+**For each fix attempt**:
+1. Identify root cause (which M values diverge? which component? decode vs prefill?)
+2. Implement the fix
+3. Run a quick smoke test (correctness at the failing M values)
+4. Re-run the E2E sweep with `--verify-correctness`
+5. If still failing: analyze new failure pattern, try next fix
+
+### Step 3: When to Stop
+
+Stop iterating ONLY when **both** of these are true:
+- **You** believe all viable fix approaches have been tried
+- **The transcript monitor** agrees (they will send a message confirming exhaustion or suggesting more fixes)
+
+There is NO retry limit. There is NO time limit. Focus solely on whether there are more options to try. If the monitor suggests a fix you haven't tried, try it. If you think of a new approach, try it.
+
+### Step 4: If Truly Fundamental
+
+Only after exhausting all fix approaches:
+1. Document every fix attempt with results in `validation_results.md`
+2. Explain why the failure is fundamental (not just "it didn't work" — WHY can't it work?)
+3. Set verdict to FAIL with the full fix attempt history
+4. Report to orchestrator
+
+### What NEVER to Do
+- Report FAIL after the first accuracy gate failure without attempting any fix
+- Claim a failure is "fundamental" without evidence (e.g., "FP accumulation differs" is not fundamental if decode-only dispatch would avoid it)
+- Weaken the correctness reference to make tests pass (the monitor WILL catch this)
+- Skip the monitor's confirmation that options are exhausted
+
 ## If Implementation Fails
 
 If you determine during implementation that the optimization is infeasible (e.g., roofline data contradicts the debate plan, SMEM budget impossible, dispatch conditions prevent activation):

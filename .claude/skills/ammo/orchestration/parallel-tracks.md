@@ -92,7 +92,9 @@ Agent(
     3. Commit implementation
     4. Spawn kernel validation sub-agent for Gates 5.1a + 5.2 (see your agent definition § Kernel Validation)
     5. Run E2E sweep per your agent definition § E2E Validation (ONE command handles 5.1b + 5.3a + 5.3b)
-    6. Evaluate E2E results against min_e2e_improvement_pct threshold, write validation_results.md
+    6. If Gate 5.1b FAILS: classify failure (fixable vs fundamental), investigate root cause, try fixes.
+       See your agent definition § Accuracy Failure Persistence. Do NOT report FAIL without exhausting options.
+    7. Evaluate E2E results against min_e2e_improvement_pct threshold, write validation_results.md
     """
 )
 
@@ -115,6 +117,9 @@ Agent(
 
     Focus on IMPLEMENTATION-STAGE concerns: production parity, worktree discipline,
     validation integrity, gate completeness, baseline reuse, reasoning gaps.
+    ALSO: enforce accuracy failure persistence — if the champion hits a Gate 5.1b
+    failure, ensure they classify it, investigate root cause, and try fixes before
+    reporting FAIL. See your agent definition § Accuracy Failure Persistence.
     See your agent definition § Stage-Specific Focus for the full list."""
 )
 
