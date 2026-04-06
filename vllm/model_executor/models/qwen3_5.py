@@ -38,6 +38,7 @@ from vllm.config import (
 from vllm.distributed import (
     get_pp_group,
 )
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3_5RMSNorm,

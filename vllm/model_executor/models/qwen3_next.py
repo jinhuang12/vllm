@@ -475,6 +475,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
 
+        # Combined in-proj weight for single-GEMM dispatch (set by
+        # _init_combined_inproj in the subclass load_weights when enabled)
+        self._combined_inproj_weight = None
+        self._gemm_fn = None
+        self._qkvz_out_size = None
+
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
