@@ -145,6 +145,29 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             prefix=prefix,
         )
 
+    def _init_combined_inproj(self):
+        """Create combined qkvz+ba weight for single-GEMM dispatch.
+
+        Called from load_weights() BEFORE torch.compile traces the forward.
+        Merges in_proj_qkvz [qkvz_dim, hidden] and in_proj_ba [ba_dim, hidden]
+        into a single weight [qkvz_dim+ba_dim, hidden] to eliminate 24 separate
+        ba_proj kernel launches per decode step.
+
+        Original weight.data attributes are replaced with views of the combined
+        tensor to avoid doubling memory usage.
+        """
+        from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+        self._gemm_fn = dispatch_unquantized_gemm()
+        self._qkvz_out_size = self.in_proj_qkvz.weight.shape[0]
+        self._combined_inproj_weight = torch.cat(
+            [self.in_proj_qkvz.weight.data,
+             self.in_proj_ba.weight.data], dim=0,
+        )
+        # Replace originals with views to free the old allocations
+        self.in_proj_qkvz.weight.data = (
+            self._combined_inproj_weight[:self._qkvz_out_size])
+        self.in_proj_ba.weight.data = (
+            self._combined_inproj_weight[self._qkvz_out_size:])
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -161,12 +184,20 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        if self._combined_inproj_weight is not None:
+            # Combined qkvz+ba GEMM: one launch instead of two
+            combined = self._gemm_fn(
+                self, hidden_states, self._combined_inproj_weight, None)
+            mixed_qkvz = combined[:, :self._qkvz_out_size]
+            ba = combined[:, self._qkvz_out_size:]
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
         z_size = self.value_dim // self.tp_size
         mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        ba, _ = self.in_proj_ba(hidden_states)
         b, a = ba.chunk(2, dim=-1)
 
         b = b.contiguous()
@@ -514,6 +545,15 @@ class Qwen3_5Model(Qwen3NextModel):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        # Post-load: create combined in-proj weights for GDN layers
+        if envs.VLLM_TRITON_SKINNY_GEMM:
+            for layer in self.layers:
+                if hasattr(layer, 'linear_attn') and hasattr(
+                    layer.linear_attn, '_init_combined_inproj'
+                ):
+                    layer.linear_attn._init_combined_inproj()
+
         return loaded_params
 
 
