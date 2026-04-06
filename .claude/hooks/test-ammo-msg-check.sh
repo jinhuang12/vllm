@@ -95,11 +95,17 @@ make_team_config "$TEAM_DIR" "test-team" "verifier-1:general-purpose" "champion-
 TRANSCRIPT="$TMPDIR/transcript.jsonl"
 
 # ════════════════════════════════════════════
-echo "== Tool filtering =="
+echo "== All tools checked =="
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 0
-run_test "Read tool → skip" 0 "{\"tool_name\":\"Read\",\"transcript_path\":\"$TRANSCRIPT\"}"
-run_test "Grep tool → skip" 0 "{\"tool_name\":\"Grep\",\"transcript_path\":\"$TRANSCRIPT\"}"
-run_test "Glob tool → skip" 0 "{\"tool_name\":\"Glob\",\"transcript_path\":\"$TRANSCRIPT\"}"
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|alert|alert|true"
+run_test "Read tool → DENY" 0 \
+    "{\"tool_name\":\"Read\",\"transcript_path\":\"$TRANSCRIPT\"}" "deny"
+run_test "Grep tool → DENY" 0 \
+    "{\"tool_name\":\"Grep\",\"transcript_path\":\"$TRANSCRIPT\"}" "deny"
+run_test "Glob tool → DENY" 0 \
+    "{\"tool_name\":\"Glob\",\"transcript_path\":\"$TRANSCRIPT\"}" "deny"
 
 # ════════════════════════════════════════════
 echo ""; echo "== Lead agent (no agentName in transcript) =="
@@ -179,8 +185,8 @@ run_test "4 inbox, 3 tags → DENY" 0 \
 
 # ════════════════════════════════════════════
 echo ""; echo "== impl-champion also gated =="
-make_transcript "$TRANSCRIPT" "test-team" "impl-1" 0
-make_inbox "$TEAM_DIR/inboxes/impl-1.json" \
+make_transcript "$TRANSCRIPT" "test-team" "impl-champion-op001" 0
+make_inbox "$TEAM_DIR/inboxes/impl-champion-op001.json" \
     "team-lead|spawn|spawn|true" \
     "team-lead|Fix correctness|CRITICAL: fix needed|true"
 run_test "impl-champion with undelivered → DENY" 0 \
@@ -266,7 +272,7 @@ run_test "Empty inbox [] → skip" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}"
 
 # ════════════════════════════════════════════
-echo ""; echo "== Edge: non-skipped tools =="
+echo ""; echo "== Edge: various tool types =="
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 0
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
@@ -285,6 +291,20 @@ run_test "Agent tool → checked + DENY" 0 \
     "deny"
 
 # ════════════════════════════════════════════
+echo ""; echo "== Edge: tool result containing teammate-message tag (false positive) =="
+# Simulates reading a file that contains <teammate-message teammate_id= as text
+FALSEP_T="$TMPDIR/false_positive.jsonl"
+echo '{"type":"permission-mode","sessionId":"s1"}' > "$FALSEP_T"
+echo '{"teamName":"test-team","agentName":"champion-1","type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">spawn</teammate-message>"}}' >> "$FALSEP_T"
+# Tool result from Read that contains the tag as file content (array format)
+echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"grep -o '"'"'<teammate-message teammate_id='"'"' file\n<teammate-message teammate_id= in docs"}]}}' >> "$FALSEP_T"
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|alert|alert|true"
+run_test "Tool result with tag text → NOT counted as delivery → DENY" 0 \
+    "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$FALSEP_T\"}" \
+    "deny"
+
 echo ""; echo "== Edge: multiple undelivered from same sender =="
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 1
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \

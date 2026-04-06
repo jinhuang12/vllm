@@ -10,7 +10,7 @@
 #
 # Identity: agentName + teamName from the transcript JSONL (first 5 lines).
 # Targets: ammo-champion and ammo-impl-champion agents only.
-# Skips: Read, Grep, Glob (low-latency tools).
+# Applies to all tool calls.
 # Behavior: fail-open (exit 0 on any error).
 set -euo pipefail
 trap 'exit 0' ERR
@@ -29,9 +29,7 @@ read -r TOOL_NAME TRANSCRIPT_PATH < <(
 ) || true
 dbg "tool=$TOOL_NAME"
 
-case "$TOOL_NAME" in
-    Read|Grep|Glob|"") exit 0;;
-esac
+[ -z "$TOOL_NAME" ] && exit 0
 
 # ── Identity from transcript ──
 # tmux agents have agentName+teamName in their transcript JSONL (line 1 or 2).
@@ -49,28 +47,14 @@ fi
 dbg "agent=$AGENT_NAME team=$TEAM_NAME"
 [ -z "$AGENT_NAME" ] && exit 0
 
-# ── Find team config + verify champion ──
-TEAM_DIR=""
-TEAM_CFG=""
-AGENT_TYPE=""
-if [ -n "$TEAM_NAME" ]; then
-    cfg="$HOME/.claude/teams/$TEAM_NAME/config.json"
-    if [ -f "$cfg" ]; then
-        AGENT_TYPE=$(jq -r --arg name "$AGENT_NAME" \
-            '.members[] | select(.name == $name) | .agentType // empty' \
-            "$cfg" 2>/dev/null) || true
-        [ -n "$AGENT_TYPE" ] && TEAM_CFG="$cfg" && TEAM_DIR="$(dirname "$cfg")"
-    fi
-fi
-[ -z "$TEAM_CFG" ] && exit 0
-
-dbg "type=$AGENT_TYPE"
-case "$AGENT_TYPE" in
-    ammo-champion|ammo-impl-champion) ;;
+# ── Verify champion by naming convention ──
+case "$AGENT_NAME" in
+    champion-*|impl-champion-*) ;;
     *) exit 0;;
 esac
 
-# ── Read inbox ──
+# ── Read inbox (existence = reliable team membership signal) ──
+TEAM_DIR="$HOME/.claude/teams/$TEAM_NAME"
 MY_INBOX="$TEAM_DIR/inboxes/$AGENT_NAME.json"
 [ -f "$MY_INBOX" ] || exit 0
 
@@ -79,7 +63,14 @@ dbg "inbox=$INBOX_COUNT"
 [ "$INBOX_COUNT" -eq 0 ] && exit 0
 
 # ── Detect undelivered messages via transcript counting ──
-DELIVERED_COUNT=$(grep -o '<teammate-message teammate_id=' "$TRANSCRIPT_PATH" 2>/dev/null | wc -l) || true
+# Only count <teammate-message> tags in user messages where content is a string
+# (actual deliveries). Tool results have content as an array — skip those to
+# avoid false positives from file contents that mention the tag.
+DELIVERED_COUNT=$(jq -r '
+    select(.type == "user") | .message.content
+    | select(type == "string")
+    | [scan("<teammate-message teammate_id=")] | length
+' "$TRANSCRIPT_PATH" 2>/dev/null | awk '{s+=$1} END {print s+0}') || true
 DELIVERED_COUNT=$((DELIVERED_COUNT + 0))
 
 UNDELIVERED=$((INBOX_COUNT - DELIVERED_COUNT))
