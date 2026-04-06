@@ -1,6 +1,7 @@
 {
   "env": {
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70"
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
+    "CLAUDE_PROJECT_DIR": "/home/jinhun/vllm"
   },
   "permissions": {
     "allow": [

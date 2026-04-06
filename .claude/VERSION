@@ -1,6 +1,12 @@
-version: 1.2.0
+version: 1.2.1
 
 ## Changelog
+
+### 1.2.1 (2026-04-06)
+- Fix: rewrite ammo-msg-check.sh for tmux agents — exit 0 + JSON permissionDecision deny (exit 2 ignored), transcript-based identity (agent_type absent), scan first 5 lines (v2.1.85+ format), dbg() ERR trap fix, grep pipefail fix
+- Fix: set CLAUDE_PROJECT_DIR in settings.local.json env for tmux agent hook resolution
+- Simplify: tmux-only (remove in-process Strategy 1), consolidate jq calls (12→4), 148→103 lines
+- Tests: 31 passing (20 core + 11 edge cases)
 
 ### 1.2.0 (2026-04-03)
 - Accuracy failure persistence: impl-champions must classify failures (fixable vs fundamental), investigate root cause, and iterate on fixes until both champion AND monitor agree options are exhausted — no retry limits, no time limits
