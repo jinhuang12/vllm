@@ -76,6 +76,13 @@ run_test() {
         if ! grep -qF "$check_output" /tmp/hook-stdout 2>/dev/null && ! grep -qF "$check_output" /tmp/hook-stderr 2>/dev/null; then
             pass=false
         fi
+        # If expecting "deny", also verify stdout is valid JSON
+        if [ "$check_output" = "deny" ] && [ -s /tmp/hook-stdout ]; then
+            if ! jq . /tmp/hook-stdout >/dev/null 2>&1; then
+                echo "  WARN: stdout is not valid JSON!"
+                pass=false
+            fi
+        fi
     fi
     if [ "$pass" = "true" ]; then
         echo "  PASS [$TOTAL]: $test_name (exit=$actual_exit)"
@@ -257,10 +264,13 @@ run_test "agentName on line 6 → skip (outside 5-line window)" 0 \
 # ════════════════════════════════════════════
 echo ""; echo "== Edge: special characters in summaries =="
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 0
-make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
-    "team-lead|spawn|spawn|true" \
-    'mon-1|DA-MONITOR: "quotes" & backslash\n|special chars|true'
-run_test "Summaries with quotes/backslash → DENY (no crash)" 0 \
+# Put quotes and backslashes in the SUMMARY field (which reaches JSON output)
+SPECIAL_INBOX="$TEAM_DIR/inboxes/champion-1.json"
+cat > "$SPECIAL_INBOX" << 'INBOX_EOF'
+[{"from":"team-lead","text":"spawn","timestamp":"2026-04-03T18:01:00.000Z","read":true,"summary":"spawn"},
+ {"from":"mon-1","text":"found issue","timestamp":"2026-04-03T18:02:00.000Z","read":true,"summary":"\"CRITICAL\" path\\to\\file & <tag>"}]
+INBOX_EOF
+run_test "Summaries with quotes/backslash/html → DENY (valid JSON)" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
     "deny"
 
@@ -303,6 +313,16 @@ make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "mon-1|alert|alert|true"
 run_test "Tool result with tag text → NOT counted as delivery → DENY" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$FALSEP_T\"}" \
+    "deny"
+
+echo ""; echo "== Edge: multiple undelivered messages (JSON newline handling) =="
+make_transcript "$TRANSCRIPT" "test-team" "champion-1" 0
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|first warning|warn 1|true" \
+    "mon-2|second warning|warn 2|true"
+run_test "2 undelivered from different senders → DENY (valid JSON)" 0 \
+    "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
     "deny"
 
 echo ""; echo "== Edge: multiple undelivered from same sender =="

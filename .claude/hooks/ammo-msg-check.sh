@@ -85,10 +85,16 @@ UNDELIVERED_OTHERS=$(jq --argjson skip "$DELIVERED_COUNT" --arg me "$AGENT_NAME"
 COUNT=$(echo "$UNDELIVERED_OTHERS" | jq 'length' 2>/dev/null) || exit 0
 [ "$COUNT" -eq 0 ] && exit 0
 
-SUMMARIES=$(echo "$UNDELIVERED_OTHERS" | jq -r '.[] |
-    "  - \(.from): \(.summary // (.text[0:80] + "..."))"' 2>/dev/null) || exit 0
-
-REASON="$COUNT unread teammate message(s). End your turn NOW to receive them."
-CONTEXT="AMMO MESSAGE GATE: $COUNT unread teammate message(s) detected.\\n\\n$SUMMARIES\\n\\nYou MUST end your turn NOW. Messages are queued and will be delivered when your current turn ends. Do NOT continue executing tools."
-echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\",\"additionalContext\":\"$CONTEXT\"}}"
+# Build output via jq to handle all JSON escaping (newlines, quotes, backslashes)
+echo "$UNDELIVERED_OTHERS" | jq -c --argjson count "$COUNT" '
+    [.[] | "  - \(.from): \(.summary // (.text[0:80] + "..."))"] | join("\n") as $summaries |
+    "\($count) unread teammate message(s). End your turn NOW to receive them." as $reason |
+    "AMMO MESSAGE GATE: \($count) unread teammate message(s) detected.\n\n\($summaries)\n\nYou MUST end your turn NOW. Messages are queued and will be delivered when your current turn ends. Do NOT continue executing tools." as $context |
+    {hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: $reason,
+        additionalContext: $context
+    }}
+' 2>/dev/null
 exit 0

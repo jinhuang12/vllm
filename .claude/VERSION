@@ -1,6 +1,13 @@
-version: 1.2.1
+version: 1.2.2
 
 ## Changelog
+
+### 1.2.2 (2026-04-06)
+- Fix: remove config.json member lookup (unreliable for resumed sessions) — use name-pattern matching + inbox file existence
+- Fix: counting bug — grep -o overcounted delivery tags in tool result content (e.g. agent reads file containing the tag); now uses jq to only count string-content user messages
+- Fix: build deny JSON output via jq (was bash interpolation — newlines, quotes, backslashes produced invalid JSON causing silent fail-open)
+- Change: check all tools including Read/Grep/Glob (previously skipped)
+- Tests: 33 passing with JSON validity checks on all deny outputs
 
 ### 1.2.1 (2026-04-06)
 - Fix: rewrite ammo-msg-check.sh for tmux agents — exit 0 + JSON permissionDecision deny (exit 2 ignored), transcript-based identity (agent_type absent), scan first 5 lines (v2.1.85+ format), dbg() ERR trap fix, grep pipefail fix
