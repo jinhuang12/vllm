@@ -1,6 +1,11 @@
-version: 1.2.3
+version: 1.2.4
 
 ## Changelog
+
+### 1.2.4 (2026-04-08)
+- Feat: PostToolUse hook (ammo-monitor-reminder.sh) reminds orchestrator to spawn transcript-monitor after creating champion agents
+- Session identity gate: only fires for orchestrator sessions, not champions spawning delegates
+- Tests: 47 passing
 
 ### 1.2.3 (2026-04-07)
 - Fix: corrupt transcript lines (NULL bytes from write races) caused jq to abort mid-file, undercounting deliveries and falsely blocking champions — now uses `jq -R 'try fromjson'` to skip unparseable lines

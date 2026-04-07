@@ -1,15 +1,7 @@
 {
   "env": {
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000",
     "CLAUDE_PROJECT_DIR": "/home/jinhun/vllm"
-  },
-  "permissions": {
-    "allow": [
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(source .venv/bin/activate)",
-      "Bash(python .claude/skills/ammo/scripts/new_target.py --artifact-dir /tmp/test-restructuring --model-id test --hardware test --dtype bf16 --force)"
-    ]
   },
   "hooks": {
     "PreToolUse": [
@@ -58,6 +50,16 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-gpu-release.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-monitor-reminder.sh",
+            "timeout": 3000
           }
         ]
       }
