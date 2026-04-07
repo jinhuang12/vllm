@@ -66,7 +66,7 @@ dbg "inbox=$INBOX_COUNT"
 # Only count <teammate-message> tags in user messages where content is a string
 # (actual deliveries). Tool results have content as an array — skip those to
 # avoid false positives from file contents that mention the tag.
-DELIVERED_COUNT=$(jq -r '
+DELIVERED_COUNT=$(jq -R -r 'try fromjson |
     select(.type == "user") | .message.content
     | select(type == "string")
     | [scan("<teammate-message teammate_id=")] | length

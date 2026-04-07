@@ -325,6 +325,20 @@ run_test "2 undelivered from different senders → DENY (valid JSON)" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
     "deny"
 
+echo ""; echo "== Edge: corrupt transcript line (jq resilience) =="
+CORRUPT_T="$TMPDIR/corrupt.jsonl"
+echo '{"type":"permission-mode","sessionId":"s1"}' > "$CORRUPT_T"
+echo '{"teamName":"test-team","agentName":"champion-1","type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">spawn</teammate-message>"}}' >> "$CORRUPT_T"
+# Corrupt line: not valid JSON
+printf '%20000s\n' '' >> "$CORRUPT_T"
+# Delivery AFTER the corrupt line
+echo '{"type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"mon-1\">post-corruption msg</teammate-message>"}}' >> "$CORRUPT_T"
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|post-corruption|alert|true"
+run_test "Corrupt line in transcript → counts deliveries on both sides → skip" 0 \
+    "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$CORRUPT_T\"}"
+
 echo ""; echo "== Edge: multiple undelivered from same sender =="
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 1
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \

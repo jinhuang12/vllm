@@ -1,6 +1,10 @@
-version: 1.2.2
+version: 1.2.3
 
 ## Changelog
+
+### 1.2.3 (2026-04-07)
+- Fix: corrupt transcript lines (NULL bytes from write races) caused jq to abort mid-file, undercounting deliveries and falsely blocking champions — now uses `jq -R 'try fromjson'` to skip unparseable lines
+- Tests: 34 passing (added corrupt transcript resilience test)
 
 ### 1.2.2 (2026-04-06)
 - Fix: remove config.json member lookup (unreliable for resumed sessions) — use name-pattern matching + inbox file existence
