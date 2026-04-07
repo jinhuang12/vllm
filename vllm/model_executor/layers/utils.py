@@ -300,7 +300,7 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
-    elif envs.VLLM_TRITON_SKINNY_GEMM:
+    elif envs.VLLM_TRITON_SKINNY_GEMM or envs.VLLM_FP8_WEIGHT_GEMM:
         from vllm.model_executor.layers.triton_skinny_gemm import (
             cuda_skinny_gemm,
         )

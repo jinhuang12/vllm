@@ -94,6 +94,8 @@ if TYPE_CHECKING:
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_TRITON_SKINNY_GEMM: bool = False
+    VLLM_FP8_WEIGHT_GEMM: bool = False
+    VLLM_FP8_OCC_GEMM: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
@@ -878,6 +880,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom Triton GEMM kernel for small-M BF16 decode (M <= 16)
     "VLLM_TRITON_SKINNY_GEMM": lambda: bool(
         int(os.getenv("VLLM_TRITON_SKINNY_GEMM", "0"))
+    ),
+    # Use FP8 E4M3 weight-only quantization with Triton skinny GEMM
+    "VLLM_FP8_WEIGHT_GEMM": lambda: bool(
+        int(os.getenv("VLLM_FP8_WEIGHT_GEMM", "0"))
+    ),
+    # Use occupancy-aware FP8 GEMM (BN=32/BK=256) for small-N projections.
+    # Default 0. Set to 1 to enable.
+    "VLLM_FP8_OCC_GEMM": lambda: bool(
+        int(os.getenv("VLLM_FP8_OCC_GEMM", "0"))
     ),
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (

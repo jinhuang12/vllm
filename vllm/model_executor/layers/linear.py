@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -250,6 +251,20 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+        elif (
+            envs.VLLM_FP8_WEIGHT_GEMM
+            and hasattr(layer, "weight")
+            and layer.weight.dtype == torch.bfloat16
+        ):
+            from vllm.model_executor.layers.triton_skinny_gemm import (
+                quantize_weights_per_channel,
+            )
+
+            weight_fp8, weight_scale = quantize_weights_per_channel(
+                layer.weight.data
+            )
+            layer.weight_fp8 = weight_fp8
+            layer.weight_scale = weight_scale
 
     def apply(
         self,
