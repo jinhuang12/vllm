@@ -19,6 +19,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.custom_scatter_reduce import (
+    scatter_reduce,
+)
+from vllm.model_executor.layers.fused_moe.fused_routing_metadata import (
+    FUSED_ROUTING_M_THRESHOLD,
+    fused_make_routing_data,
+)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -29,6 +36,11 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
+
+# Maximum M (number of tokens) for which the custom scatter-reduce
+# decode path is used.  Beyond this threshold the fused matmul_ogs
+# scatter-reduce is more efficient.
+_CUSTOM_SCATTER_REDUCE_M_THRESHOLD = 64
 
 use_legacy_triton_kernels = False
 
@@ -301,16 +313,56 @@ def triton_kernel_fused_experts(
         y=intermediate_cache,
     )
 
-    matmul_ogs(
-        intermediate_cache.view(M * topk, N // 2),
-        w2,
-        quant_config.w2_bias,
-        routing_data,
-        scatter_indx=scatter_indx,
-        precision_config=quant_config.w2_precision,
-        gammas=None if apply_router_weight_on_input else gammas,
-        y=output_tensor,
+    # Custom scatter-reduce: replace proprietary _reduce with Triton kernel.
+    use_custom_reduce = (
+        topk > 1
+        and routing_data is not None
+        and M <= _CUSTOM_SCATTER_REDUCE_M_THRESHOLD
     )
+
+    if use_custom_reduce:
+        # Disable internal scatter-reduce in matmul_ogs by setting
+        # n_expts_act = 1. This makes matmul_ogs write per-pair outputs
+        # (M*topk rows) instead of reducing to M rows internally.
+        orig_n_expts_act = routing_data.n_expts_act
+        routing_data.n_expts_act = 1
+        try:
+            # Get per-pair output buffer from persistent class buffer
+            # (CUDA graph safe -- allocated once, reused across calls).
+            per_pair_output = OAITritonExperts._get_per_pair_buffer(
+                M, topk, K, hidden_states.device, hidden_states.dtype,
+            )
+
+            matmul_ogs(
+                intermediate_cache.view(M * topk, N // 2),
+                w2,
+                quant_config.w2_bias,
+                routing_data,
+                scatter_indx=scatter_indx,
+                precision_config=quant_config.w2_precision,
+                gammas=None if apply_router_weight_on_input else gammas,
+                y=per_pair_output,
+            )
+        finally:
+            # Restore original routing_data state
+            routing_data.n_expts_act = orig_n_expts_act
+
+        # Custom Triton scatter-reduce: sum per-pair outputs to tokens
+        scatter_reduce(
+            per_pair_output, output_tensor, M=M, K=K, top_k=topk
+        )
+    else:
+        matmul_ogs(
+            intermediate_cache.view(M * topk, N // 2),
+            w2,
+            quant_config.w2_bias,
+            routing_data,
+            scatter_indx=scatter_indx,
+            precision_config=quant_config.w2_precision,
+            gammas=None if apply_router_weight_on_input else gammas,
+            y=output_tensor,
+        )
+
     output_tensor = output_tensor.view(M, K)
     return output_tensor
 
@@ -570,11 +622,42 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
         topk_weights: torch.Tensor,
         num_local_experts: int,
     ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
+        M = topk_ids.size(0)
+        # Fused routing: always-on for small M (no env var gating needed).
+        if (
+            M > 0
+            and M <= FUSED_ROUTING_M_THRESHOLD
+            and not use_legacy_triton_kernels
+        ):
+            topk_ids = topk_ids.to(torch.int16)
+            topk_weights = topk_weights.to(torch.bfloat16)
+            return fused_make_routing_data(
+                topk_ids, topk_weights, num_local_experts
+            )
         return make_routing_data(topk_ids, topk_weights, num_local_experts)
 
 
 class OAITritonExperts(BaseOAITritonExperts):
     """OAI Triton-based fused MoE expert implementation."""
+
+    # Persistent per-pair output buffer for custom scatter-reduce.
+    # Allocated lazily and reused across calls (CUDA graph safe).
+    _per_pair_buffer: torch.Tensor | None = None
+
+    @classmethod
+    def _get_per_pair_buffer(
+        cls, M: int, topk: int, K: int,
+        device: torch.device, dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Get or allocate a persistent per-pair output buffer."""
+        needed = M * topk * K
+        if (cls._per_pair_buffer is None
+                or cls._per_pair_buffer.numel() < needed
+                or cls._per_pair_buffer.device != device):
+            cls._per_pair_buffer = torch.empty(
+                needed, device=device, dtype=dtype,
+            )
+        return cls._per_pair_buffer[:needed].view(1, M * topk, K)
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
