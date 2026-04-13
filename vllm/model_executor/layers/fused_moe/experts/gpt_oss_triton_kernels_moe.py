@@ -19,13 +19,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.custom_scatter_reduce import (
-    scatter_reduce,
-)
-from vllm.model_executor.layers.fused_moe.fused_routing_metadata import (
-    FUSED_ROUTING_M_THRESHOLD,
-    fused_make_routing_data,
-)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -45,6 +38,14 @@ _CUSTOM_SCATTER_REDUCE_M_THRESHOLD = 64
 use_legacy_triton_kernels = False
 
 if has_triton_kernels():
+    from vllm.model_executor.layers.fused_moe.custom_scatter_reduce import (
+        scatter_reduce,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_routing_metadata import (
+        FUSED_ROUTING_M_THRESHOLD,
+        fused_make_routing_data,
+    )
+
     try:
         import triton_kernels.swiglu
         from triton_kernels.matmul_ogs import (
@@ -321,9 +322,10 @@ def triton_kernel_fused_experts(
     )
 
     if use_custom_reduce:
-        # Disable internal scatter-reduce in matmul_ogs by setting
-        # n_expts_act = 1. This makes matmul_ogs write per-pair outputs
-        # (M*topk rows) instead of reducing to M rows internally.
+        # Temporarily set n_expts_act = 1 so matmul_ogs writes per-pair
+        # outputs (M*topk rows) instead of reducing internally.
+        # Safe: routing_data is freshly constructed per call in
+        # _make_routing_data and vLLM uses process-based TP.
         orig_n_expts_act = routing_data.n_expts_act
         routing_data.n_expts_act = 1
         try:
@@ -629,6 +631,9 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
             and M <= FUSED_ROUTING_M_THRESHOLD
             and not use_legacy_triton_kernels
         ):
+            assert topk_ids.max() <= 32767, (
+                f"Expert IDs must fit in int16, got max={topk_ids.max()}"
+            )
             topk_ids = topk_ids.to(torch.int16)
             topk_weights = topk_weights.to(torch.bfloat16)
             return fused_make_routing_data(
@@ -649,13 +654,22 @@ class OAITritonExperts(BaseOAITritonExperts):
         cls, M: int, topk: int, K: int,
         device: torch.device, dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Get or allocate a persistent per-pair output buffer."""
+        """Get or allocate a persistent per-pair output buffer.
+
+        Pre-allocates to the maximum threshold size on first call to
+        avoid reallocation during CUDA graph replay.
+        """
         needed = M * topk * K
+        # Pre-allocate to max possible size for the M threshold so the
+        # buffer size is stable across CUDA graph captures.
+        alloc_size = max(needed,
+                        _CUSTOM_SCATTER_REDUCE_M_THRESHOLD * topk * K)
         if (cls._per_pair_buffer is None
                 or cls._per_pair_buffer.numel() < needed
-                or cls._per_pair_buffer.device != device):
+                or cls._per_pair_buffer.device != device
+                or cls._per_pair_buffer.dtype != dtype):
             cls._per_pair_buffer = torch.empty(
-                needed, device=device, dtype=dtype,
+                alloc_size, device=device, dtype=dtype,
             )
         return cls._per_pair_buffer[:needed].view(1, M * topk, K)
 
