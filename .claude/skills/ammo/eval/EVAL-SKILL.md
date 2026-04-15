@@ -134,6 +134,10 @@ Spawn Agent (general-purpose type) with:
           then analyze anomalies at /tmp/ammo_eval_anomalies.json
           with events at /tmp/ammo_eval_events.json
           and artifacts at <ARTIFACT_DIR>.
+          CITATION REQUIREMENT: Every finding must include an "evidence" array with
+          {file_path, line_start, line_end, claim, quoted_content} for each factual claim.
+          Read the cited lines and include verbatim excerpts. Findings without citations
+          will be flagged by the validator.
           Write deep_analysis.json to /tmp/ammo_eval_deep_analysis.json.
 ```
 
@@ -169,10 +173,28 @@ Spawn Agent (general-purpose type) with:
   name: transcript-grader
   prompt: Read the grader rubric at .claude/skills/ammo/eval/agents/transcript_grader.md,
           then evaluate the campaign artifacts at <ARTIFACT_DIR>.
+          CITATION REQUIREMENT: Every deduction (wasted_retries, hallucinated_data,
+          off_track_reasoning, anti_patterns) must include an "evidence" array with
+          {file_path, line_start, line_end, claim, quoted_content} for each factual claim.
+          Read the cited lines and include verbatim excerpts. Findings without citations
+          will be flagged by the validator.
           Write transcript_grading.json to /tmp/ammo_eval_transcript_grading.json.
 ```
 
 Steps 3d and 4 can run in parallel since they are independent.
+
+After both agents complete, validate their citations:
+```bash
+python .claude/skills/ammo/eval/scripts/verify_citations.py \
+  --input /tmp/ammo_eval_deep_analysis.json \
+  --artifact-dir <ARTIFACT_DIR>
+
+python .claude/skills/ammo/eval/scripts/verify_citations.py \
+  --input /tmp/ammo_eval_transcript_grading.json \
+  --artifact-dir <ARTIFACT_DIR>
+```
+
+If either agent has broken citations (>20% failure rate), send a message asking them to re-source the broken references before proceeding. If the failure rate is low (<20%), flag the broken citations in the final report but continue.
 
 Then re-score with transcript quality:
 ```bash
@@ -261,12 +283,72 @@ rm -rf /tmp/ammo_eval_snapshot.json /tmp/ammo_eval_scorecard.json \
 # SendMessage to each team member with {type: "shutdown_request"}
 ```
 
+## Citation Protocol (ALL agents + orchestrator)
+
+Every factual claim in the eval pipeline — whether from the causal-analyzer, transcript-grader, or the orchestrator presenting results — must be backed by a structured citation to a specific file and line range. This prevents the pattern where agents make plausible-sounding claims that cannot be traced to source data.
+
+### Why this matters
+
+In prior eval runs, agents produced findings that read convincingly but required a second pass to source exact evidence. The cost of that second pass was significant (extra agent invocations, context window usage). By requiring citations upfront, agents are forced to verify their claims at analysis time rather than producing unsupported narratives. This is the eval pipeline's own version of the AMMO "evidence-demanding review" principle.
+
+### Citation format (structured JSON)
+
+Every finding, deduction, or claim must include an `evidence` array of citation objects:
+
+```json
+{
+  "evidence": [
+    {
+      "file_path": "debate/campaign_round_2/micro_experiments/champion1_pershape_bw.log",
+      "line_start": 1,
+      "line_end": 12,
+      "claim": "All GEMM shapes achieve 80-83% BW in isolation",
+      "quoted_content": "gate_up_proj [2560, 18432]: 82.3% BW\ndown_proj [18432, 2560]: 80.5% BW\n..."
+    }
+  ]
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `file_path` | yes | Path relative to artifact dir (or absolute for JSONL/temp files) |
+| `line_start` | yes | First line number (1-indexed) |
+| `line_end` | yes | Last line number (inclusive) |
+| `claim` | yes | The factual statement this citation supports |
+| `quoted_content` | yes | Verbatim excerpt from the cited lines (truncated to ~200 chars if needed) |
+
+### Where citations are required
+
+| Agent / Role | What needs citations |
+|---|---|
+| **causal-analyzer** | Every `root_cause`, `causal_chain` step, and `counterfactual` must cite the source artifact |
+| **transcript-grader** | Every `wasted_retries` entry, `hallucinated_data` entry, `off_track_reasoning` entry, and `anti_patterns` finding |
+| **orchestrator (Step 7)** | Every claim in the results presentation — speedup numbers, round outcomes, ranking comparisons |
+
+### Verification
+
+After each agent writes its output JSON, the orchestrator runs the citation validator:
+
+```bash
+python .claude/skills/ammo/eval/scripts/verify_citations.py \
+  --input /tmp/ammo_eval_deep_analysis.json \
+  --artifact-dir <ARTIFACT_DIR> \
+  [--strict]  # fail on broken citations instead of just flagging
+```
+
+The validator checks:
+1. Each cited `file_path` exists
+2. The cited `line_start:line_end` range is within the file
+3. The `quoted_content` fuzzy-matches the actual content at those lines (>70% similarity)
+
+Findings with broken citations are flagged with `"citation_verified": false` in the output. In `--strict` mode, the orchestrator asks the agent to re-source broken citations before proceeding.
+
 ## Scoring Dimensions
 
 | Dimension | Weight | What it Measures |
 |-----------|--------|------------------|
-| E2E Outcome | 40% | Cumulative speedup, shipped optimization count |
-| Gate Pass Rates | 15% | First-attempt pass rate across all verification gates |
+| E2E Outcome | 40% | Cumulative speedup (verified-only if unverified lossy ops exist), shipped optimization count |
+| Gate Pass Rates | 15% | First-attempt pass rate across all verification gates (unverified lossy shipped ops count as expected failures) |
 | Debate Quality | 15% | Proposal grounding, micro-experiment backing, filtering |
 | Campaign Efficiency | 15% | Rounds to completion, failure rate, convergence |
 | Transcript Quality | 15% | LLM-graded: wasted retries, hallucinated data, off-track reasoning, delegation causality |
@@ -278,6 +360,24 @@ When delegation is enabled, the transcript grader additionally scores:
 - **Delegation failures** (-1.0 each, max -2.0): wrong delegate data that went uncaught
 - **Delegation efficiency** (-0.25 each, max -1.0): redundant delegate work
 - **Delegation utilization failures** (-0.5 each, max -1.5): champions ignoring correct delegate data
+
+### Accuracy Verification Adjustment
+
+Sessions that shipped **lossy** optimizations (FP8, INT4, etc.) without Gate 5.1b (GSM8K accuracy) verification are penalized:
+
+- **E2E Outcome**: Uses verified-only cumulative speedup — lossy ops that were never accuracy-gated are excluded entirely. Verified-only speedup is computed per-round when decomposition is available, otherwise approximated as `1 + (raw_speedup - 1) * (verified_ops / total_ops)`.
+- **Gate Pass Rates**: Each unverified lossy shipped op counts as an expected gate failure, lowering the pass rate.
+
+Classification uses `parallel_tracks` classification field when available, falling back to op_id name pattern matching (`fp8`, `int4`, `int8`, `w8a16`, `w4a16`, `quantiz`, `awq`, `gptq`). Lossless ops are always considered verified. The `_ensure_accuracy_verification()` backfill in `score_campaign.py` handles old snapshots that lack the `accuracy_verification` field.
+
+To retroactively apply scoring changes to all archived runs:
+```bash
+python .claude/skills/ammo/eval/scripts/rescore_archived.py \
+  --repository ~/.claude/ammo-eval        # re-score all
+  [--target qwen3-5-4b_l40s_bf16_tp1]     # or filter by target
+  [--dry-run]                              # preview without writing
+```
+Then regenerate aggregates and dashboard (Steps 6a/6b).
 
 **Philosophy**: Speedup is king. Guardrail violations are scored and reported but never automatically fail the eval.
 

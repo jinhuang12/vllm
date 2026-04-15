@@ -25,7 +25,7 @@ For each anomaly you receive, the following fields are provided:
 
 ## Required Output Fields
 
-For every anomaly, produce a JSON object with **ALL 8 fields below**. Validation fails if any field is missing.
+For every anomaly, produce a JSON object with **ALL 9 fields below**. Validation fails if any field is missing.
 
 | Field | Type | Description |
 |---|---|---|
@@ -37,6 +37,21 @@ For every anomaly, produce a JSON object with **ALL 8 fields below**. Validation
 | `skill_attribution` | enum string | One of: `"skill_guidance"` \| `"agent_behavior"` \| `"input_data"` \| `"stochastic"` |
 | `actionable_fix` | string | Specific change to skill text, agent prompt, or process |
 | `confidence` | float 0-1 | How confident you are in this analysis, based on evidence quality |
+| `evidence` | list of objects | Structured citations backing every factual claim (see below) |
+
+### `evidence` field (REQUIRED)
+
+Every factual claim in `root_cause`, `causal_chain`, and `counterfactual` must be backed by at least one citation. Each citation is an object with:
+
+| Field | Required | Description |
+|---|---|---|
+| `file_path` | yes | Path relative to artifact dir (or absolute for JSONL/temp files) |
+| `line_start` | yes | First line number (1-indexed) |
+| `line_end` | yes | Last line number (inclusive) |
+| `claim` | yes | The specific factual statement this citation supports |
+| `quoted_content` | yes | Verbatim excerpt from the cited lines (truncated to ~200 chars if long) |
+
+The purpose of this requirement is to prevent plausible-but-unsourced findings. When you identify a root cause or causal chain step, open the artifact file, find the exact lines that support your claim, and include the verbatim text. This forces you to verify your analysis against the actual data rather than producing narratives from memory. A validator script will check that your cited files exist and that the quoted content matches the actual lines — broken citations will be flagged.
 
 ### `skill_attribution` values
 
@@ -155,7 +170,23 @@ When any of these patterns are detected, include them in your analysis even if t
     "counterfactual": "Without hallucinated f-value, op004 (targeting 6.2% bottleneck with sound roofline) likely selected and had higher implementation success probability",
     "skill_attribution": "agent_behavior",
     "actionable_fix": "Add to champion prompt: 'For every f-value cited, include the exact line number from bottleneck_analysis.md. The orchestrator will cross-check these citations.'",
-    "confidence": 0.85
+    "confidence": 0.85,
+    "evidence": [
+      {
+        "file_path": "debate/proposals/champion-3.md",
+        "line_start": 42,
+        "line_end": 42,
+        "claim": "Champion-3 cited f=22% for MoE dispatch",
+        "quoted_content": "MoE dispatch accounts for ~22% of decode latency (f=0.22)"
+      },
+      {
+        "file_path": "investigation/bottleneck_analysis.md",
+        "line_start": 87,
+        "line_end": 87,
+        "claim": "Actual f-value for MoE dispatch is 14.8%",
+        "quoted_content": "| MoE dispatch | 14.8% | 312 µs |"
+      }
+    ]
   }
 ]
 ```
@@ -167,7 +198,7 @@ When any of these patterns are detected, include them in your analysis even if t
 Write your output as a JSON array of per-anomaly objects to the path specified by the orchestrator (typically `/tmp/ammo_eval_deep_analysis.json`).
 
 Rules:
-- Every object must include **ALL 8 required fields**.
+- Every object must include **ALL 9 required fields**.
 - If you cannot determine a field with high confidence, still include it with your best assessment and set `confidence` accordingly — **do not omit fields**.
 - Process all anomalies in the input list; do not silently skip any.
 - The `causal_chain` list must contain at least 2 entries and at most 8. Each entry is a single cause-or-effect step, written as a short declarative clause.

@@ -61,6 +61,240 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     return d
 
 
+_LOSSY_OP_PATTERN = re.compile(
+    r"fp8|int4|int8|w8a16|w4a16|quantiz|awq|gptq|squeezellm", re.IGNORECASE
+)
+
+
+def _classify_op_lossy(
+    op_id: str,
+    tracks: List[Dict[str, Any]],
+    parallel_tracks: Dict[str, Any],
+) -> str:
+    """Classify a shipped op as 'lossy' or 'lossless'.
+
+    Priority: parallel_tracks classification > parsed tracks > name pattern.
+    """
+    pt = parallel_tracks.get(op_id, {})
+    if isinstance(pt, dict) and pt.get("classification") in ("lossy", "lossless"):
+        return pt["classification"]
+    for t in tracks:
+        if t.get("op_id") == op_id and t.get("classification") in ("lossy", "lossless"):
+            return t["classification"]
+    return "lossy" if _LOSSY_OP_PATTERN.search(op_id) else "lossless"
+
+
+def _is_op_accuracy_verified(
+    op_id: str,
+    classification: str,
+    tracks: List[Dict[str, Any]],
+    parallel_tracks: Dict[str, Any],
+) -> bool:
+    """Check if a shipped op was accuracy-verified via Gate 5.1b.
+
+    Lossless ops are always considered verified (no accuracy risk).
+    Lossy ops are verified only if they appear in parallel_tracks with a
+    passing verdict AND an explicit 'lossy' classification (indicating the
+    5.1b gate infrastructure was active).
+    """
+    if classification == "lossless":
+        return True
+    pt = parallel_tracks.get(op_id, {})
+    if isinstance(pt, dict):
+        if pt.get("verdict") in ("PASS", "GATED_PASS") and pt.get("classification") == "lossy":
+            return True
+    for t in tracks:
+        if t.get("op_id") == op_id:
+            if t.get("verdict") in ("PASS", "GATED_PASS") and t.get("classification") == "lossy":
+                return True
+    return False
+
+
+def _parse_accuracy_verification(
+    state: Dict[str, Any],
+    tracks: List[Dict[str, Any]],
+    campaign_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Analyze accuracy verification coverage for shipped optimizations.
+
+    Returns a block describing which shipped ops are lossy, which were
+    accuracy-verified, and a verified-only cumulative speedup estimate.
+    """
+    parallel_tracks = state.get("parallel_tracks", {})
+    shipped_ops = state.get("campaign", {}).get("shipped_optimizations", [])
+    rounds = campaign_data.get("rounds", [])
+    total_cumulative = campaign_data.get("cumulative_e2e_speedup", 1.0)
+
+    ops_detail: List[Dict[str, Any]] = []
+    lossless_count = 0
+    lossy_count = 0
+    lossy_verified = 0
+    lossy_unverified = 0
+
+    for op in shipped_ops:
+        op_id = op.get("op_id") if isinstance(op, dict) else str(op)
+        op_round = op.get("round") if isinstance(op, dict) else None
+        classification = _classify_op_lossy(op_id, tracks, parallel_tracks)
+        verified = _is_op_accuracy_verified(op_id, classification, tracks, parallel_tracks)
+
+        if classification == "lossless":
+            lossless_count += 1
+        else:
+            lossy_count += 1
+            if verified:
+                lossy_verified += 1
+            else:
+                lossy_unverified += 1
+
+        ops_detail.append({
+            "op_id": op_id,
+            "round": op_round,
+            "classification": classification,
+            "accuracy_verified": verified,
+        })
+
+    # Compute verified-only cumulative speedup
+    verified_cumulative, estimated = _compute_verified_cumulative(
+        ops_detail, rounds, total_cumulative
+    )
+
+    return {
+        "shipped_ops_detail": ops_detail,
+        "total_shipped": len(ops_detail),
+        "lossless_shipped": lossless_count,
+        "lossy_shipped": lossy_count,
+        "lossy_verified": lossy_verified,
+        "lossy_unverified": lossy_unverified,
+        "has_unverified_lossy": lossy_unverified > 0,
+        "verified_cumulative_speedup": verified_cumulative,
+        "verified_cumulative_estimated": estimated,
+    }
+
+
+def _compute_verified_cumulative(
+    ops_detail: List[Dict[str, Any]],
+    rounds: List[Dict[str, Any]],
+    total_cumulative: float,
+) -> tuple:
+    """Compute cumulative speedup from verified ops only.
+
+    Returns (speedup, estimated) where estimated=True if approximated
+    because per-round decomposition was unavailable.
+    """
+    # Build round -> ops mapping
+    round_ops: Dict[Any, List[Dict[str, Any]]] = {}
+    for op in ops_detail:
+        r = op.get("round")
+        if r is not None:
+            round_ops.setdefault(r, []).append(op)
+
+    # Build round_id -> round_e2e_speedup mapping
+    round_speedups: Dict[Any, float] = {}
+    for r in rounds:
+        rid = r.get("round_id")
+        spd = r.get("round_e2e_speedup")
+        if rid is not None and isinstance(spd, (int, float)):
+            round_speedups[rid] = spd
+
+    if round_speedups and round_ops:
+        # Per-round decomposition available — multiply rounds where ALL ops are verified
+        verified_cumulative = 1.0
+        for rid, ops in round_ops.items():
+            if all(op.get("accuracy_verified", False) for op in ops):
+                spd = round_speedups.get(rid)
+                if spd is not None:
+                    verified_cumulative *= spd
+        return (round(verified_cumulative, 4), False)
+
+    # Fall back to linear approximation
+    total = len(ops_detail)
+    verified = sum(1 for op in ops_detail if op.get("accuracy_verified", False))
+    if total == 0:
+        return (1.0, True)
+    ratio = verified / total
+    verified_cumulative = 1.0 + (total_cumulative - 1.0) * ratio
+    return (round(verified_cumulative, 4), True)
+
+
+def _classify_gate_failure(fail_reason: Optional[str], verdict: Optional[str],
+                           correctness: Optional[str]) -> Optional[str]:
+    """Classify which gate type caused a track failure.
+
+    Returns one of: "5.1a", "5.1b", "5.2", "5.3", or None if passed/unknown.
+    """
+    if verdict in ("PASS", "GATED_PASS"):
+        return None
+    if not fail_reason:
+        if correctness == "FAIL":
+            return "5.1a"
+        return None
+
+    fr_lower = fail_reason.lower()
+    # Gate 5.1b: GSM8K accuracy gate
+    if any(kw in fr_lower for kw in ["5.1b", "gsm8k", "opt_accuracy", "accuracy",
+                                      "baseline_accuracy", "question"]):
+        return "5.1b"
+    # Gate 5.1a: kernel-level correctness (allclose)
+    if any(kw in fr_lower for kw in ["5.1a", "allclose", "kernel correctness",
+                                      "bit-exact", "numerical"]):
+        return "5.1a"
+    # Gate 5.2: kernel speedup / kill gate
+    if any(kw in fr_lower for kw in ["5.2", "kill gate", "kernel speedup",
+                                      "bw wall", "bandwidth"]):
+        return "5.2"
+    # Gate 5.3: E2E speedup
+    if any(kw in fr_lower for kw in ["5.3", "e2e improvement", "e2e speedup"]):
+        return "5.3"
+    # Fallback: correctness field
+    if correctness == "FAIL":
+        return "5.1b" if "accuracy" in fr_lower or "%" in fail_reason else "5.1a"
+    return None
+
+
+def _extract_accuracy_numbers(fail_reason: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Extract accuracy percentages and question counts from fail_reason strings.
+
+    Handles formats like:
+      "Gate 5.1b v2 FAIL: opt_accuracy 89.0% (178/200) < baseline_accuracy 89.5% (179/200)"
+      "Gate 5.1b FAIL: 88.5% vs 89.0% (-1 question)"
+      "89.0% vs 89.5% (-1q)"
+    """
+    if not fail_reason:
+        return None
+
+    result: Dict[str, Any] = {}
+
+    # Pattern 1: "opt_accuracy X% (A/B) < baseline_accuracy Y% (C/D)"
+    m = re.search(
+        r"opt_accuracy\s+(\d+\.?\d*)%\s*\((\d+)/(\d+)\)\s*[<>]\s*baseline_accuracy\s+(\d+\.?\d*)%\s*\((\d+)/(\d+)\)",
+        fail_reason,
+    )
+    if m:
+        result["opt_accuracy_pct"] = float(m.group(1))
+        result["opt_correct"] = int(m.group(2))
+        result["opt_total"] = int(m.group(3))
+        result["baseline_accuracy_pct"] = float(m.group(4))
+        result["baseline_correct"] = int(m.group(5))
+        result["baseline_total"] = int(m.group(6))
+        result["accuracy_gap_pct"] = round(result["baseline_accuracy_pct"] - result["opt_accuracy_pct"], 2)
+        result["questions_delta"] = result["opt_correct"] - result["baseline_correct"]
+        return result
+
+    # Pattern 2: "X% vs Y% (-Nq)" or "X% vs Y% (-N question)"
+    m = re.search(r"(\d+\.?\d*)%\s*vs\s*(\d+\.?\d*)%", fail_reason)
+    if m:
+        result["opt_accuracy_pct"] = float(m.group(1))
+        result["baseline_accuracy_pct"] = float(m.group(2))
+        result["accuracy_gap_pct"] = round(result["baseline_accuracy_pct"] - result["opt_accuracy_pct"], 2)
+        # Try to extract question delta
+        qm = re.search(r"[(-](\d+)\s*(?:net\s+)?question", fail_reason)
+        if qm:
+            result["questions_delta"] = -int(qm.group(1))
+        return result
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Target & Environment
 # ---------------------------------------------------------------------------
@@ -234,18 +468,51 @@ def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
     # Per-track validation gates
     tracks_state = state.get("parallel_tracks", {})
     track_gates = []
+    gate_type_counts: Dict[str, int] = {}  # e.g., {"5.1b": 3, "5.2": 1}
+    accuracy_margins: List[Dict[str, Any]] = []  # per-track accuracy data
+
     for track_id, track_data in tracks_state.items():
         if not isinstance(track_data, dict):
             continue
+
+        fail_reason = track_data.get("fail_reason")
+        verdict = track_data.get("verdict")
+        correctness = track_data.get("correctness")
+        classification = track_data.get("classification")
+
+        gate_type = _classify_gate_failure(fail_reason, verdict, correctness)
+        accuracy_data = _extract_accuracy_numbers(fail_reason) if gate_type == "5.1b" else None
+
         gate_entry = {
             "track_id": track_id,
             "status": track_data.get("status", "UNKNOWN"),
-            "correctness": track_data.get("correctness"),
+            "verdict": verdict,
+            "correctness": correctness,
+            "classification": classification,
             "kernel_speedup": track_data.get("kernel_speedup"),
             "e2e_speedup": track_data.get("e2e_speedup"),
+            "gating": track_data.get("gating"),
+            "gate_failure_type": gate_type,
+            "fail_reason": fail_reason,
+            "accuracy": accuracy_data,
         }
-        gate_entry["gating"] = track_data.get("gating")
         track_gates.append(gate_entry)
+
+        # Aggregate gate type counts
+        if gate_type:
+            gate_type_counts[gate_type] = gate_type_counts.get(gate_type, 0) + 1
+
+        # Collect accuracy margins for 5.1b failures
+        if accuracy_data:
+            accuracy_margins.append({
+                "track_id": track_id,
+                "classification": classification,
+                "opt_accuracy_pct": accuracy_data.get("opt_accuracy_pct"),
+                "baseline_accuracy_pct": accuracy_data.get("baseline_accuracy_pct"),
+                "accuracy_gap_pct": accuracy_data.get("accuracy_gap_pct"),
+                "questions_delta": accuracy_data.get("questions_delta"),
+                "near_miss": (accuracy_data.get("accuracy_gap_pct") or 999) <= 1.0,
+            })
 
     # Integration gate
     integration = state.get("integration", {})
@@ -257,6 +524,12 @@ def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
             "status": integration.get("status", "pending"),
             "final_decision": _safe_get(integration, "final_decision", "action"),
         },
+        "gate_type_breakdown": gate_type_counts,
+        "accuracy_gate_analysis": {
+            "total_5_1b_failures": gate_type_counts.get("5.1b", 0),
+            "near_misses": [m for m in accuracy_margins if m.get("near_miss")],
+            "all_accuracy_margins": accuracy_margins,
+        } if accuracy_margins else None,
     }
 
 
@@ -400,9 +673,12 @@ def _parse_tracks(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "op_id": track_id,
             "campaign_round": campaign_round,
             "status": track_data.get("status", "UNKNOWN"),
+            "verdict": track_data.get("verdict"),
             "correctness": track_data.get("correctness"),
+            "classification": track_data.get("classification"),
             "kernel_speedup": track_data.get("kernel_speedup"),
             "e2e_speedup": track_data.get("e2e_speedup"),
+            "fail_reason": track_data.get("fail_reason"),
         })
 
     return tracks
@@ -642,6 +918,7 @@ def parse_campaign(
     stage_timestamps = _parse_stage_timestamps(state, session_data=session_data)
     delegation = _parse_delegation(artifact_dir, state)
     agent_costs = _parse_agent_costs(state, session_data=session_data)
+    accuracy_verification = _parse_accuracy_verification(state, tracks, campaign)
 
     return {
         "parsed_at": datetime.now(timezone.utc).isoformat(),
@@ -656,6 +933,7 @@ def parse_campaign(
         "stage_timestamps": stage_timestamps,
         "delegation": delegation,
         "agent_costs": agent_costs,
+        "accuracy_verification": accuracy_verification,
     }
 
 

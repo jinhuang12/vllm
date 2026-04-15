@@ -86,27 +86,49 @@ def _tier_score(value: float, tiers: List[Tuple[float, float]]) -> float:
 
 
 def score_e2e(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Score E2E outcome dimension."""
+    """Score E2E outcome dimension.
+
+    When unverified lossy ops exist, score is based on verified-only cumulative
+    speedup (excluding lossy ops that were never accuracy-gated by 5.1b).
+    """
     campaign = snapshot.get("campaign") or {}
     status = campaign.get("status")
     cumulative = campaign.get("cumulative_e2e_speedup", 1.0)
     shipped = campaign.get("shipped_optimizations_count", 0)
     rounds = campaign.get("rounds", [])
 
-    if shipped == 0:
+    # Check accuracy verification — use verified-only speedup if unverified lossy exist
+    acc_ver = snapshot.get("accuracy_verification") or {}
+    has_unverified_lossy = acc_ver.get("has_unverified_lossy", False)
+    verified_cumulative = acc_ver.get("verified_cumulative_speedup")
+    verified_estimated = acc_ver.get("verified_cumulative_estimated", False)
+    lossy_unverified_count = acc_ver.get("lossy_unverified", 0)
+
+    # Effective speedup for scoring: verified-only when unverified lossy exist
+    effective_cumulative = cumulative
+    adjustment_applied = False
+    if has_unverified_lossy and verified_cumulative is not None:
+        effective_cumulative = verified_cumulative
+        adjustment_applied = True
+
+    # Effective shipped count: only count verified ops for bonus
+    effective_shipped = shipped
+    if adjustment_applied:
+        effective_shipped = max(0, shipped - lossy_unverified_count)
+
+    if effective_shipped == 0:
         base_score = E2E_EXHAUSTED_NO_SHIP_SCORE
         tier = "exhausted_no_ship"
     elif status == "campaign_exhausted":
-        # Exhausted but shipped optimizations: discount tier score (not zero)
-        raw_tier = _tier_score(cumulative, E2E_TIERS)
+        raw_tier = _tier_score(effective_cumulative, E2E_TIERS)
         base_score = round(raw_tier * E2E_EXHAUSTED_DISCOUNT, 2)
-        tier = f"exhausted_shipped (>={cumulative:.2f}x × {E2E_EXHAUSTED_DISCOUNT})"
+        tier = f"exhausted_shipped (>={effective_cumulative:.2f}x × {E2E_EXHAUSTED_DISCOUNT})"
     else:
-        base_score = _tier_score(cumulative, E2E_TIERS)
-        tier = f">={cumulative:.2f}x"
+        base_score = _tier_score(effective_cumulative, E2E_TIERS)
+        tier = f">={effective_cumulative:.2f}x"
 
-    # Bonus for extra shipped optimizations
-    extra_ships = max(0, shipped - 1)
+    # Bonus for extra shipped optimizations (verified only)
+    extra_ships = max(0, effective_shipped - 1)
     bonus = min(extra_ships * E2E_SHIP_BONUS_PER_EXTRA, E2E_SHIP_BONUS_MAX)
     score = min(10.0, base_score + bonus)
 
@@ -119,21 +141,37 @@ def score_e2e(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 "cumulative_after": r.get("cumulative_speedup_after"),
             })
 
+    sub_scores: Dict[str, Any] = {
+        "cumulative_speedup": cumulative,
+        "shipped_count": shipped,
+        "speedup_tier": tier,
+        "base_score": base_score,
+        "ship_bonus": bonus,
+        "per_round_speedups": per_round,
+    }
+
+    if adjustment_applied:
+        sub_scores["accuracy_adjustment"] = {
+            "applied": True,
+            "raw_cumulative": cumulative,
+            "verified_cumulative": verified_cumulative,
+            "verified_estimated": verified_estimated,
+            "lossy_unverified_excluded": lossy_unverified_count,
+            "effective_shipped": effective_shipped,
+        }
+
     return {
         "score": round(score, 2),
-        "sub_scores": {
-            "cumulative_speedup": cumulative,
-            "shipped_count": shipped,
-            "speedup_tier": tier,
-            "base_score": base_score,
-            "ship_bonus": bonus,
-            "per_round_speedups": per_round,
-        },
+        "sub_scores": sub_scores,
     }
 
 
 def score_gates(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Score gate pass rates dimension (pure pass/fail)."""
+    """Score gate pass rates dimension (pure pass/fail, enriched with gate-type sub-scores).
+
+    Unverified lossy shipped ops are counted as expected 5.1b failures using
+    the empirical failure rate (UNVERIFIED_LOSSY_EXPECTED_FAIL_RATE).
+    """
     gates = snapshot.get("gates") or {}
     total = 0
     passed = 0
@@ -145,11 +183,34 @@ def score_gates(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         if p1.get("status") == "PASS":
             passed += 1
 
-    # Per-track validation gates
+    # Per-track validation gates — also collect gate-type breakdown
+    gate_type_stats: Dict[str, Dict[str, int]] = {}  # type -> {total, passed, failed}
+    per_track_detail: List[Dict[str, Any]] = []
+
     for track in gates.get("validation_gates", []):
         total += 1
-        if track.get("status") in ("PASSED", "GATED_PASS"):
+        track_passed = track.get("status") in ("PASSED", "GATED_PASS") or \
+                       track.get("verdict") in ("PASS", "GATED_PASS")
+        if track_passed:
             passed += 1
+
+        gate_type = track.get("gate_failure_type")
+        if gate_type:
+            if gate_type not in gate_type_stats:
+                gate_type_stats[gate_type] = {"total": 0, "passed": 0, "failed": 0}
+            gate_type_stats[gate_type]["total"] += 1
+            gate_type_stats[gate_type]["failed"] += 1
+        elif track_passed:
+            # Track passed — no failure type, count as passed in "all"
+            pass
+
+        per_track_detail.append({
+            "track_id": track.get("track_id"),
+            "passed": track_passed,
+            "gate_failure_type": gate_type,
+            "classification": track.get("classification"),
+            "accuracy": track.get("accuracy"),
+        })
 
     # Integration
     integration = gates.get("integration", {})
@@ -158,17 +219,51 @@ def score_gates(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         if integration.get("status") in ("validated", "single_pass", "combined"):
             passed += 1
 
+    # Unverified lossy penalty: count unverified lossy shipped ops as expected failures
+    acc_ver = snapshot.get("accuracy_verification") or {}
+    lossy_unverified = acc_ver.get("lossy_unverified", 0)
+    unverified_penalty_applied = False
+    expected_failures = 0
+    if lossy_unverified > 0:
+        expected_failures = lossy_unverified  # count each as a failed gate
+        total += lossy_unverified
+        # Do not add to passed — they are expected failures
+        unverified_penalty_applied = True
+
     rate = passed / total if total > 0 else 1.0
     score = _tier_score(rate, GATE_TIERS)
 
+    # Accuracy gate analysis (from enriched parse_artifacts data)
+    accuracy_analysis = gates.get("accuracy_gate_analysis")
+    near_miss_count = 0
+    if accuracy_analysis:
+        near_miss_count = len(accuracy_analysis.get("near_misses", []))
+
+    sub_scores: Dict[str, Any] = {
+        "phase1_passed": p1.get("status") == "PASS",
+        "pass_rate": round(rate, 3),
+        "total_gates_checked": total,
+        "total_passed": passed,
+        "gate_type_breakdown": gate_type_stats if gate_type_stats else None,
+        "accuracy_near_misses": near_miss_count,
+        "per_track": per_track_detail if per_track_detail else None,
+        "accuracy_gate_analysis": accuracy_analysis,
+    }
+
+    if unverified_penalty_applied:
+        sub_scores["unverified_lossy_penalty"] = {
+            "applied": True,
+            "lossy_unverified_count": lossy_unverified,
+            "expected_failures_added": expected_failures,
+            "explanation": (
+                f"{lossy_unverified} shipped lossy op(s) were never accuracy-verified "
+                f"by Gate 5.1b. Each is counted as an expected gate failure."
+            ),
+        }
+
     return {
         "score": round(score, 2),
-        "sub_scores": {
-            "phase1_passed": p1.get("status") == "PASS",
-            "pass_rate": round(rate, 3),
-            "total_gates_checked": total,
-            "total_passed": passed,
-        },
+        "sub_scores": sub_scores,
     }
 
 
@@ -357,11 +452,99 @@ def score_transcript(grading: Dict[str, Any]) -> Dict[str, Any]:
 # Composite Scorer
 # ---------------------------------------------------------------------------
 
+def _ensure_accuracy_verification(snapshot: Dict[str, Any]) -> None:
+    """Backfill accuracy_verification into snapshot if missing.
+
+    Old snapshots don't have this field. We reconstruct it from campaign
+    shipped_optimization_ids using the same logic as parse_artifacts.py.
+    """
+    if snapshot.get("accuracy_verification") is not None:
+        return
+
+    campaign = snapshot.get("campaign") or {}
+    shipped_ops = campaign.get("shipped_optimization_ids", [])
+    tracks = snapshot.get("tracks") or []
+
+    if not shipped_ops:
+        return
+
+    import re
+    lossy_pattern = re.compile(
+        r"fp8|int4|int8|w8a16|w4a16|quantiz|awq|gptq|squeezellm", re.IGNORECASE
+    )
+
+    ops_detail = []
+    lossless_count = 0
+    lossy_count = 0
+    lossy_verified = 0
+    lossy_unverified = 0
+
+    for op in shipped_ops:
+        op_id = op.get("op_id") if isinstance(op, dict) else str(op)
+        op_round = op.get("round") if isinstance(op, dict) else None
+
+        # Try tracks for classification
+        classification = None
+        for t in tracks:
+            if t.get("op_id") == op_id and t.get("classification") in ("lossy", "lossless"):
+                classification = t["classification"]
+                break
+        if classification is None:
+            classification = "lossy" if lossy_pattern.search(op_id) else "lossless"
+
+        # Check accuracy verification: lossy ops verified only if track shows
+        # passing verdict with explicit 'lossy' classification
+        verified = True
+        if classification == "lossy":
+            verified = False
+            for t in tracks:
+                if t.get("op_id") == op_id:
+                    if t.get("verdict") in ("PASS", "GATED_PASS") and t.get("classification") == "lossy":
+                        verified = True
+                        break
+
+        if classification == "lossless":
+            lossless_count += 1
+        else:
+            lossy_count += 1
+            if verified:
+                lossy_verified += 1
+            else:
+                lossy_unverified += 1
+
+        ops_detail.append({
+            "op_id": op_id,
+            "round": op_round,
+            "classification": classification,
+            "accuracy_verified": verified,
+        })
+
+    # Compute verified-only cumulative speedup
+    total_cumulative = campaign.get("cumulative_e2e_speedup", 1.0)
+    total_shipped = len(ops_detail)
+    verified_count = sum(1 for op in ops_detail if op.get("accuracy_verified", False))
+    ratio = verified_count / total_shipped if total_shipped > 0 else 1.0
+    verified_cumulative = round(1.0 + (total_cumulative - 1.0) * ratio, 4)
+
+    snapshot["accuracy_verification"] = {
+        "shipped_ops_detail": ops_detail,
+        "total_shipped": total_shipped,
+        "lossless_shipped": lossless_count,
+        "lossy_shipped": lossy_count,
+        "lossy_verified": lossy_verified,
+        "lossy_unverified": lossy_unverified,
+        "has_unverified_lossy": lossy_unverified > 0,
+        "verified_cumulative_speedup": verified_cumulative,
+        "verified_cumulative_estimated": True,
+    }
+
+
 def compute_scorecard(
     snapshot: Dict[str, Any],
     transcript_grading: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute the full scorecard from a parsed snapshot."""
+    _ensure_accuracy_verification(snapshot)
     e2e = score_e2e(snapshot)
     gates = score_gates(snapshot)
     debate = score_debate(snapshot)
@@ -470,12 +653,28 @@ def compute_scorecard(
             "by_role": agent_costs_data.get("by_role"),
         }
 
+    # Accuracy verification summary
+    acc_ver = snapshot.get("accuracy_verification") or {}
+    acc_ver_summary = None
+    if acc_ver:
+        acc_ver_summary = {
+            "has_unverified_lossy": acc_ver.get("has_unverified_lossy", False),
+            "lossy_shipped": acc_ver.get("lossy_shipped", 0),
+            "lossy_unverified": acc_ver.get("lossy_unverified", 0),
+            "lossy_verified": acc_ver.get("lossy_verified", 0),
+            "lossless_shipped": acc_ver.get("lossless_shipped", 0),
+            "verified_cumulative_speedup": acc_ver.get("verified_cumulative_speedup"),
+            "verified_cumulative_estimated": acc_ver.get("verified_cumulative_estimated"),
+            "ops_detail": acc_ver.get("shipped_ops_detail"),
+        }
+
     return {
         "scored_at": datetime.now(timezone.utc).isoformat(),
         "overall_score": round(overall, 2),
         "overall_score_without_transcript": round(overall_no_t, 2),
         "dimensions": dimensions,
         "raw_metrics": raw_metrics,
+        "accuracy_verification": acc_ver_summary,
         "timing": timing_metrics,
         "delegation": delegation_metrics,
         "agent_costs": agent_cost_metrics,
@@ -534,6 +733,21 @@ def generate_report(scorecard: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
             lines.append(f"| {r.get('round_id', '?')} | {r.get('e2e_speedup') or '?'}x | {r.get('cumulative_after') or '?'}x |")
         lines.append("")
 
+    # Accuracy verification adjustment
+    acc_adj = e2e_sub.get("accuracy_adjustment")
+    if acc_adj and acc_adj.get("applied"):
+        lines.append("### Accuracy Verification Adjustment")
+        lines.append("")
+        lines.append(f"- Raw cumulative speedup: {acc_adj['raw_cumulative']:.3f}x")
+        lines.append(f"- Verified-only cumulative: {acc_adj['verified_cumulative']:.3f}x{' (estimated)' if acc_adj.get('verified_estimated') else ''}")
+        lines.append(f"- Lossy ops excluded (no 5.1b gate): {acc_adj['lossy_unverified_excluded']}")
+        lines.append(f"- Effective shipped count: {acc_adj['effective_shipped']}")
+        lines.append("")
+        lines.append("> **Note**: This session ran without the GSM8K accuracy gate (5.1b).")
+        lines.append("> Lossy optimizations (FP8/INT4) that shipped without accuracy verification")
+        lines.append("> are excluded from the E2E score. The gate pass rate is also penalized.")
+        lines.append("")
+
     # E2E per-batch results
     # TODO: For GATED_PASS tracks, add per-BS verdict columns to this table
     # (e.g., "Verdict" column showing PASS/NOISE/GATED_OFF per batch size,
@@ -562,6 +776,76 @@ def generate_report(scorecard: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
     lines.append(f"- Pass rate: {gate_sub.get('pass_rate', '?'):.0%}" if isinstance(gate_sub.get('pass_rate'), float) else f"- Pass rate: {gate_sub.get('pass_rate', '?')}")
     lines.append(f"- Gates checked: {gate_sub.get('total_gates_checked', 0)}, passed: {gate_sub.get('total_passed', 0)}")
     lines.append("")
+
+    # Gate type breakdown
+    gate_type_bd = gate_sub.get("gate_type_breakdown")
+    if gate_type_bd:
+        lines.append("### Failures by Gate Type")
+        lines.append("")
+        lines.append("| Gate | Failures | Description |")
+        lines.append("|---|---|---|")
+        gate_descriptions = {
+            "5.1a": "Kernel correctness (torch.allclose)",
+            "5.1b": "GSM8K accuracy (opt >= baseline)",
+            "5.2": "Kernel speedup / kill gate",
+            "5.3": "E2E speedup threshold",
+        }
+        for gt in ["5.1a", "5.1b", "5.2", "5.3"]:
+            if gt in gate_type_bd:
+                lines.append(f"| {gt} | {gate_type_bd[gt].get('failed', 0)} | {gate_descriptions.get(gt, '')} |")
+        lines.append("")
+
+    # Accuracy gate analysis (5.1b detail)
+    acc_analysis = gate_sub.get("accuracy_gate_analysis")
+    if acc_analysis:
+        lines.append("### Accuracy Gate Analysis (5.1b)")
+        lines.append("")
+        all_margins = acc_analysis.get("all_accuracy_margins", [])
+        near_misses = acc_analysis.get("near_misses", [])
+        lines.append(f"- Total 5.1b failures: {acc_analysis.get('total_5_1b_failures', 0)}")
+        lines.append(f"- Near-misses (gap <= 1%): {len(near_misses)}")
+        lines.append("")
+        if all_margins:
+            lines.append("| Track | Classification | Opt Accuracy | Baseline | Gap | Questions Delta | Near-Miss |")
+            lines.append("|---|---|---|---|---|---|---|")
+            for m in all_margins:
+                opt = m.get("opt_accuracy_pct")
+                base = m.get("baseline_accuracy_pct")
+                gap = m.get("accuracy_gap_pct")
+                qd = m.get("questions_delta")
+                nm = "YES" if m.get("near_miss") else "no"
+                lines.append(
+                    f"| {m.get('track_id', '?')} | {m.get('classification', '?')} "
+                    f"| {f'{opt:.1f}%' if opt is not None else '?'} "
+                    f"| {f'{base:.1f}%' if base is not None else '?'} "
+                    f"| {f'{gap:.1f}%' if gap is not None else '?'} "
+                    f"| {qd if qd is not None else '?'} "
+                    f"| {nm} |"
+                )
+            lines.append("")
+
+    # Per-track gate detail
+    per_track_gates = gate_sub.get("per_track")
+    if per_track_gates:
+        lines.append("### Per-Track Gate Results")
+        lines.append("")
+        lines.append("| Track | Passed | Failure Type | Classification |")
+        lines.append("|---|---|---|---|")
+        for t in per_track_gates:
+            passed_str = "PASS" if t.get("passed") else "FAIL"
+            ft = t.get("gate_failure_type") or "-"
+            cls = t.get("classification") or "-"
+            lines.append(f"| {t.get('track_id', '?')} | {passed_str} | {ft} | {cls} |")
+        lines.append("")
+
+    # Unverified lossy penalty
+    gate_sub_penalty = gate_sub.get("unverified_lossy_penalty")
+    if gate_sub_penalty and gate_sub_penalty.get("applied"):
+        lines.append("### Unverified Lossy Ops Penalty")
+        lines.append("")
+        lines.append(f"- Unverified lossy shipped ops: {gate_sub_penalty['lossy_unverified_count']}")
+        lines.append(f"- Expected gate failures added: {gate_sub_penalty['expected_failures_added']}")
+        lines.append("")
 
     # Debate Quality detail
     debate_sub = scorecard.get("dimensions", {}).get("debate_quality", {}).get("sub_scores", {})

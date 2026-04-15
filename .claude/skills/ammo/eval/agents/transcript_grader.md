@@ -169,18 +169,74 @@ Write `transcript_grading.json` to the current working directory.
 {
   "score": 7.5,
   "wasted_retries": [
-    "Stage 4 track op002: build failed due to missing include, rebuilt after fix"
+    {
+      "description": "Stage 4 track op002: build failed due to missing include, rebuilt after fix",
+      "evidence": [
+        {
+          "file_path": "tracks/op002/build.log",
+          "line_start": 142,
+          "line_end": 145,
+          "claim": "Build failed due to missing include directive",
+          "quoted_content": "error: 'cutlass/gemm/device/gemm.h' file not found\n#include <cutlass/gemm/device/gemm.h>"
+        }
+      ]
+    }
   ],
   "hallucinated_data": [
-    "Champion-3 proposal claims 'attention kernel takes 1800 µs' but bottleneck_analysis.md shows 1245 µs"
+    {
+      "description": "Champion-3 proposal claims 'attention kernel takes 1800 µs' but bottleneck_analysis.md shows 1245 µs",
+      "evidence": [
+        {
+          "file_path": "debate/proposals/champion-3.md",
+          "line_start": 15,
+          "line_end": 15,
+          "claim": "Champion-3 claimed attention kernel takes 1800 µs",
+          "quoted_content": "The attention kernel dominates at ~1800 µs per decode step"
+        },
+        {
+          "file_path": "investigation/bottleneck_analysis.md",
+          "line_start": 34,
+          "line_end": 34,
+          "claim": "Actual attention kernel time is 1245 µs",
+          "quoted_content": "| flash_attn_fwd | 1245 µs | 18.7% |"
+        }
+      ]
+    }
   ],
   "off_track_reasoning": [
-    "Champion-4 proposed optimizing token embedding (3.4% of decode) despite it being below the mechanical stop threshold"
+    {
+      "description": "Champion-4 proposed optimizing token embedding (3.4% of decode) despite it being below the mechanical stop threshold",
+      "evidence": [
+        {
+          "file_path": "debate/proposals/champion-4.md",
+          "line_start": 8,
+          "line_end": 10,
+          "claim": "Champion-4 targeted token embedding optimization",
+          "quoted_content": "I propose optimizing the token embedding lookup kernel..."
+        },
+        {
+          "file_path": "investigation/bottleneck_analysis.md",
+          "line_start": 52,
+          "line_end": 52,
+          "claim": "Token embedding is only 3.4% of decode latency",
+          "quoted_content": "| token_embedding | 3.4% | 227 µs |"
+        }
+      ]
+    }
   ],
   "anti_patterns": [
     {
       "pattern": "dominant_component_avoidance",
-      "evidence": "All 3 champions targeted GDN (13.8% f_decode) while GEMM (79.6% f_decode) had no optimization track. No independent negative experiments justified the exclusion.",
+      "description": "All 3 champions targeted GDN (13.8% f_decode) while GEMM (79.6% f_decode) had no optimization track. No independent negative experiments justified the exclusion.",
+      "evidence": [
+        {
+          "file_path": "investigation/bottleneck_analysis.md",
+          "line_start": 12,
+          "line_end": 12,
+          "claim": "GEMM is the dominant component at 79.6% f_decode",
+          "quoted_content": "| GEMM (all layers) | 79.6% | 5312 µs |"
+        }
+      ],
       "deduction": -2.0
     }
   ],
@@ -205,9 +261,9 @@ Write `transcript_grading.json` to the current working directory.
 {
   "score": 8.0,
   "delegation_enabled": true,
-  "wasted_retries": ["..."],
-  "hallucinated_data": ["..."],
-  "off_track_reasoning": ["..."],
+  "wasted_retries": [{"description": "...", "evidence": []}],
+  "hallucinated_data": [{"description": "...", "evidence": []}],
+  "off_track_reasoning": [{"description": "...", "evidence": []}],
   "anti_patterns": [],
   "verified_e2e": [],
   "delegation_causality_bonus": {
@@ -216,7 +272,16 @@ Write `transcript_grading.json` to the current working directory.
         "delegate": "delegate-1a",
         "finding": "Corrected hidden_size from 4096 to 2560",
         "impact": "Champion-1 used correct GEMM shapes",
-        "bonus_awarded": 0.5
+        "bonus_awarded": 0.5,
+        "evidence": [
+          {
+            "file_path": "debate/delegate_work/delegate-1a_report.md",
+            "line_start": 23,
+            "line_end": 25,
+            "claim": "Delegate corrected hidden_size from 4096 to 2560",
+            "quoted_content": "Hidden size is 2560 (not 4096 as stated in proposal)"
+          }
+        ]
       }
     ],
     "total_bonus": 1.0
@@ -224,7 +289,25 @@ Write `transcript_grading.json` to the current working directory.
   "delegation_failures": [],
   "delegation_efficiency_issues": [],
   "delegation_utilization_failures": [
-    "Champion-3 ignored correct L2 cache size from delegate-3a and used a stale value"
+    {
+      "description": "Champion-3 ignored correct L2 cache size from delegate-3a and used a stale value",
+      "evidence": [
+        {
+          "file_path": "debate/delegate_work/delegate-3a_report.md",
+          "line_start": 11,
+          "line_end": 11,
+          "claim": "Delegate provided correct L2 cache size",
+          "quoted_content": "L2 cache: 48 MB (per nvidia-smi)"
+        },
+        {
+          "file_path": "debate/proposals/champion-3.md",
+          "line_start": 31,
+          "line_end": 31,
+          "claim": "Champion-3 used stale value instead",
+          "quoted_content": "With 32 MB L2 cache, the tiling strategy..."
+        }
+      ]
+    }
   ],
   "counterfactual_assessment": {
     "would_errors_have_been_caught_without_delegates": "Likely no — the dimension error in Champion-1's original proposal was subtle",
@@ -238,3 +321,42 @@ Write `transcript_grading.json` to the current working directory.
 `estimated_quality_delta` must be one of: `strong_positive`, `moderate_positive`, `neutral`, `moderate_negative`, `strong_negative`.
 
 Be specific in your evidence. Quote the exact discrepancy (e.g., "proposal says X, but source data shows Y"). Vague issues like "could have been better" don't count as deductions.
+
+## Citation Requirement (MANDATORY)
+
+Every deduction, bonus, and factual claim must be backed by structured citations to the exact source artifact. This prevents plausible-sounding findings that cannot be traced back to real data — a pattern observed in prior eval runs where a second verification pass was needed at significant cost.
+
+### How to cite
+
+For each entry in `wasted_retries`, `hallucinated_data`, `off_track_reasoning`, and `anti_patterns`, include an `evidence` array of citation objects:
+
+```json
+{
+  "file_path": "debate/proposals/champion-3.md",
+  "line_start": 42,
+  "line_end": 42,
+  "claim": "Champion-3 cited f=22% for MoE dispatch",
+  "quoted_content": "MoE dispatch accounts for ~22% of decode latency (f=0.22)"
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `file_path` | yes | Path relative to artifact dir (or absolute for JSONL/temp files) |
+| `line_start` | yes | First line number (1-indexed) |
+| `line_end` | yes | Last line number (inclusive) |
+| `claim` | yes | The specific factual statement this citation supports |
+| `quoted_content` | yes | Verbatim excerpt from the cited lines (truncated to ~200 chars if long) |
+
+### Where citations are required
+
+| Field | What needs citations |
+|---|---|
+| `wasted_retries` | Each entry must cite the transcript/artifact lines showing the retry |
+| `hallucinated_data` | Each entry must cite BOTH the claim source AND the contradicting source data |
+| `off_track_reasoning` | Each entry must cite the off-track reasoning and the grounded data it deviates from |
+| `anti_patterns` | Each entry's `evidence` field must cite the specific artifact lines |
+| `delegation_causality_bonus` | Each chain must cite the delegate report AND the champion's citation of it |
+| `delegation_failures` | Each must cite the delegate's wrong data AND the champion's uncorrected use |
+
+A post-hoc validator (`verify_citations.py`) checks that cited files exist, line ranges are valid, and quoted content fuzzy-matches the actual lines (>70% similarity). Broken citations are flagged — so open each artifact, find the exact lines, and include verbatim text rather than paraphrasing from memory.

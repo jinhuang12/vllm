@@ -2,7 +2,7 @@
 # Test harness for ammo-msg-check.sh (PreToolUse hook)
 # Run: bash .claude/hooks/test-ammo-msg-check.sh
 #
-# Tests transcript-counting detection for tmux team member agents.
+# Tests timestamp-based delivery detection for tmux team member agents.
 
 set -euo pipefail
 
@@ -12,7 +12,7 @@ FAIL=0
 TOTAL=0
 
 TMPDIR=$(mktemp -d)
-cleanup() { rm -rf "$TMPDIR" /tmp/hook-stderr /tmp/hook-stdout; }
+cleanup() { rm -rf "$TMPDIR" /tmp/hook-stderr /tmp/hook-stdout; rm -f /tmp/ammo-msg-gate-*.ts 2>/dev/null || true; }
 trap cleanup EXIT
 
 make_team_config() {
@@ -38,25 +38,37 @@ make_inbox() {
         local text="${rest%%|*}"
         local rest2="${rest#*|}"
         local summary="${rest2%%|*}"
-        local read_val="${rest2#*|}"
-        [ "$read_val" = "$rest2" ] && read_val="true"
-        n=$((n + 1))
+        local rest3="${rest2#*|}"
+        local ts_or_read="${rest3%%|*}"
+        local read_val="${rest3#*|}"
+        # If 5 fields: from|text|summary|timestamp|read
+        # If 4 fields: from|text|summary|read (auto-gen ts)
+        if [ "$read_val" != "$rest3" ]; then
+            # 5 fields — explicit timestamp
+            local ts="$ts_or_read"
+        else
+            # 4 fields — auto-gen timestamp
+            read_val="$ts_or_read"
+            n=$((n + 1))
+            local ts="2026-04-03T18:$(printf '%02d' $n):00.000Z"
+        fi
         arr=$(echo "$arr" | jq --arg f "$from" --arg t "$text" \
-            --arg ts "2026-04-03T18:$(printf '%02d' $n):00.000Z" \
+            --arg ts "$ts" \
             --arg s "$summary" --argjson r "$read_val" \
             '. + [{from: $f, text: $t, timestamp: $ts, read: $r, summary: $s}]')
     done
     echo "$arr" > "$inbox_file"
 }
 
-# v2.1.85+: line 1 is permission-mode, line 2 has agentName+teamName
+# Delivery timestamps use 18:10+i, so inbox timestamps 18:01-18:09 are "before delivery"
+# and 18:20+ are "after delivery"
 make_transcript() {
     local file="$1" team="$2" agent="$3" count="${4:-0}"
     echo '{"type":"permission-mode","sessionId":"test-session"}' > "$file"
     echo "{\"teamName\":\"$team\",\"agentName\":\"$agent\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"sessionId\":\"test-session\"}" >> "$file"
     local i=0
     while [ "$i" -lt "$count" ]; do
-        echo "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"sender-$i\\\">msg $i</teammate-message>\"}}" >> "$file"
+        echo "{\"type\":\"user\",\"timestamp\":\"2026-04-03T18:$(printf '%02d' $((10+i))):00.000Z\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"sender-$i\\\">msg $i</teammate-message>\"}}" >> "$file"
         i=$((i + 1))
     done
 }
@@ -68,6 +80,7 @@ make_lead_transcript() {
 
 run_test() {
     local test_name="$1" expected_exit="$2" json_input="$3" check_output="${4:-}" actual_exit=0
+    rm -f /tmp/ammo-msg-gate-*.ts 2>/dev/null || true
     TOTAL=$((TOTAL + 1))
     echo "$json_input" | env HOME="$TMPDIR" bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
     local pass=true
@@ -129,7 +142,7 @@ make_transcript "$TRANSCRIPT" "test-team" "champion-1" 0
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
     "mon-1|CRITICAL alert|CRITICAL: issue|true"
-run_test "Champion identity → DENY (1 undelivered)" 0 \
+run_test "Champion identity → DENY (undelivered)" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
     "deny"
 
@@ -145,48 +158,51 @@ run_test "No inbox file → skip" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}"
 
 # ════════════════════════════════════════════
-echo ""; echo "== Transcript counting =="
+echo ""; echo "== Timestamp-based delivery detection =="
 
-# All delivered
+# All delivered: 2 inbox msgs (ts 18:01, 18:02) < 2 delivery lines (ts 18:10, 18:11)
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 2
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
     "mon-1|delivered warning|warn|true"
-run_test "2 inbox = 2 delivered → skip" 0 \
+run_test "2 inbox (ts < delivery) = all delivered → skip" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}"
 
-# 1 undelivered
+# 1 undelivered: 1 delivery (ts 18:10), inbox msg 2 at 18:20 (after delivery)
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 1
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
-    "mon-1|CRITICAL warning|CRITICAL: baseline issue|true"
-run_test "2 inbox, 1 delivered → DENY" 0 \
+    "mon-1|CRITICAL warning|CRITICAL: baseline issue|2026-04-03T18:20:00.000Z|true"
+run_test "inbox ts after delivery → DENY" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
     "deny"
 
 # Only self undelivered → allow
+# Inbox: team-lead at 18:01 (delivered via ts 18:10), champion-1 at 18:20 (after delivery, but self)
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 1
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
-    "champion-1|self msg|self task|true"
+    "champion-1|self msg|self task|2026-04-03T18:20:00.000Z|true"
 run_test "Only self undelivered → skip" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}"
 
 # Batched messages (multiple tags per JSONL line)
 BATCH_T="$TMPDIR/batch.jsonl"
 echo '{"type":"permission-mode","sessionId":"s1"}' > "$BATCH_T"
-echo "{\"teamName\":\"test-team\",\"agentName\":\"champion-1\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"team-lead\\\">spawn</teammate-message>\"}}" >> "$BATCH_T"
-echo "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"mon-1\\\">w1</teammate-message>\\n\\n<teammate-message teammate_id=\\\"team-lead\\\">g1</teammate-message>\"}}" >> "$BATCH_T"
+echo "{\"teamName\":\"test-team\",\"agentName\":\"champion-1\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"team-lead\\\">spawn</teammate-message>\"},\"timestamp\":\"2026-04-03T18:10:00.000Z\"}" >> "$BATCH_T"
+echo "{\"type\":\"user\",\"timestamp\":\"2026-04-03T18:15:00.000Z\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"mon-1\\\">w1</teammate-message>\\n\\n<teammate-message teammate_id=\\\"team-lead\\\">g1</teammate-message>\"}}" >> "$BATCH_T"
 
+# Inbox: 3 msgs all with ts before batch delivery at 18:15
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" "mon-1|w1|warn|true" "team-lead|g1|guide|true"
-run_test "3 inbox = 3 batched tags → skip" 0 \
+run_test "3 inbox (ts < batch delivery) → skip" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$BATCH_T\"}"
 
+# 4th msg with ts after batch delivery
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" "mon-1|w1|warn|true" "team-lead|g1|guide|true" \
-    "mon-1|DA-MONITOR: [CRITICAL] new|CRITICAL: new issue|true"
-run_test "4 inbox, 3 tags → DENY" 0 \
+    "mon-1|DA-MONITOR: [CRITICAL] new|CRITICAL: new issue|2026-04-03T18:20:00.000Z|true"
+run_test "4th inbox msg ts after batch delivery → DENY" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$BATCH_T\"}" \
     "deny"
 
@@ -201,13 +217,27 @@ run_test "impl-champion with undelivered → DENY" 0 \
     "deny"
 
 # ════════════════════════════════════════════
-echo ""; echo "== Repeated blocking =="
-run_test "Second call → still DENY" 0 \
-    "{\"tool_name\":\"Write\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
-    "deny"
-run_test "Third call (Agent) → still DENY" 0 \
-    "{\"tool_name\":\"Agent\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
-    "deny"
+echo ""; echo "== Cooldown behavior =="
+# First call denies, second within 5s is cooled down
+make_transcript "$TRANSCRIPT" "test-team" "impl-champion-op001" 0
+make_inbox "$TEAM_DIR/inboxes/impl-champion-op001.json" \
+    "team-lead|spawn|spawn|true" \
+    "team-lead|Fix correctness|CRITICAL: fix needed|true"
+rm -f /tmp/ammo-msg-gate-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+# First call — should deny
+R1=$(echo "{\"tool_name\":\"Write\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" | \
+    env HOME="$TMPDIR" bash "$HOOK" 2>/dev/null) || true
+# Second call — should be cooled down (no output)
+R2=$(echo "{\"tool_name\":\"Agent\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" | \
+    env HOME="$TMPDIR" bash "$HOOK" 2>/dev/null) || true
+if echo "$R1" | grep -q "deny" && [ -z "$R2" ]; then
+    echo "  PASS [$TOTAL]: 1st call DENY, 2nd call cooldown (no output)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: Cooldown: 1st=$(echo "$R1" | grep -c deny || echo 0) 2nd='$R2'"
+    FAIL=$((FAIL + 1))
+fi
 
 # ════════════════════════════════════════════
 echo ""; echo "== Fail-open =="
@@ -305,12 +335,13 @@ echo ""; echo "== Edge: tool result containing teammate-message tag (false posit
 # Simulates reading a file that contains <teammate-message teammate_id= as text
 FALSEP_T="$TMPDIR/false_positive.jsonl"
 echo '{"type":"permission-mode","sessionId":"s1"}' > "$FALSEP_T"
-echo '{"teamName":"test-team","agentName":"champion-1","type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">spawn</teammate-message>"}}' >> "$FALSEP_T"
-# Tool result from Read that contains the tag as file content (array format)
-echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"grep -o '"'"'<teammate-message teammate_id='"'"' file\n<teammate-message teammate_id= in docs"}]}}' >> "$FALSEP_T"
+echo '{"teamName":"test-team","agentName":"champion-1","type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">spawn</teammate-message>"},"timestamp":"2026-04-03T18:10:00.000Z"}' >> "$FALSEP_T"
+# Tool result from Read that contains the tag as file content (array format — NOT string)
+echo '{"type":"user","timestamp":"2026-04-03T18:15:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"grep -o '"'"'<teammate-message teammate_id='"'"' file\n<teammate-message teammate_id= in docs"}]}}' >> "$FALSEP_T"
+# Inbox: 1 delivered (ts 18:01 < delivery 18:10), 1 new after 18:15 tool_result
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
-    "mon-1|alert|alert|true"
+    "mon-1|alert|alert|2026-04-03T18:20:00.000Z|true"
 run_test "Tool result with tag text → NOT counted as delivery → DENY" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$FALSEP_T\"}" \
     "deny"
@@ -328,27 +359,156 @@ run_test "2 undelivered from different senders → DENY (valid JSON)" 0 \
 echo ""; echo "== Edge: corrupt transcript line (jq resilience) =="
 CORRUPT_T="$TMPDIR/corrupt.jsonl"
 echo '{"type":"permission-mode","sessionId":"s1"}' > "$CORRUPT_T"
-echo '{"teamName":"test-team","agentName":"champion-1","type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">spawn</teammate-message>"}}' >> "$CORRUPT_T"
+echo '{"teamName":"test-team","agentName":"champion-1","type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">spawn</teammate-message>"},"timestamp":"2026-04-03T18:10:00.000Z"}' >> "$CORRUPT_T"
 # Corrupt line: not valid JSON
 printf '%20000s\n' '' >> "$CORRUPT_T"
-# Delivery AFTER the corrupt line
-echo '{"type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"mon-1\">post-corruption msg</teammate-message>"}}' >> "$CORRUPT_T"
+# Delivery AFTER the corrupt line — this is the last delivery (ts 18:15)
+echo '{"type":"user","timestamp":"2026-04-03T18:15:00.000Z","message":{"role":"user","content":"<teammate-message teammate_id=\"mon-1\">post-corruption msg</teammate-message>"}}' >> "$CORRUPT_T"
+# Inbox: both msgs have ts before 18:15 → all delivered
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
     "mon-1|post-corruption|alert|true"
-run_test "Corrupt line in transcript → counts deliveries on both sides → skip" 0 \
+run_test "Corrupt line in transcript → deliveries on both sides counted → skip" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$CORRUPT_T\"}"
 
 echo ""; echo "== Edge: multiple undelivered from same sender =="
+# 1 delivery at 18:10; inbox has 1 delivered (ts 18:01) + 3 after delivery (ts 18:20+)
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 1
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
-    "mon-1|warn 1|w1|true" \
-    "mon-1|warn 2|w2|true" \
-    "mon-1|warn 3|w3|true"
+    "mon-1|warn 1|w1|2026-04-03T18:20:00.000Z|true" \
+    "mon-1|warn 2|w2|2026-04-03T18:21:00.000Z|true" \
+    "mon-1|warn 3|w3|2026-04-03T18:22:00.000Z|true"
 run_test "3 undelivered from same sender → DENY" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}" \
     "deny"
+
+# ════════════════════════════════════════════
+echo ""; echo "== P0: In-process subagent skip =="
+make_transcript "$TRANSCRIPT" "test-team" "champion-1" 0
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|alert|alert|true"
+run_test "agent_type=ammo-delegate → skip" 0 \
+    "{\"tool_name\":\"Bash\",\"transcript_path\":\"$TRANSCRIPT\",\"agent_type\":\"ammo-delegate\"}"
+run_test "agent_type=general-purpose → skip" 0 \
+    "{\"tool_name\":\"Bash\",\"transcript_path\":\"$TRANSCRIPT\",\"agent_type\":\"general-purpose\"}"
+
+# ════════════════════════════════════════════
+echo ""; echo "== Docker path: CLAUDE_CONFIG_DIR differs from HOME =="
+
+# Setup: team config + inbox at CLAUDE_CONFIG_DIR, empty HOME
+DOCKER_CFG="$TMPDIR/docker-claude-config"
+DOCKER_TEAM_DIR="$DOCKER_CFG/teams/test-team"
+make_team_config "$DOCKER_TEAM_DIR" "test-team" "champion-1:ammo-champion"
+make_inbox "$DOCKER_TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|CRITICAL alert|CRITICAL: baseline issue|true"
+
+DOCKER_FAKE_HOME=$(mktemp -d)  # empty, no .claude/teams/
+
+DOCKER_TRANSCRIPT="$TMPDIR/docker-transcript.jsonl"
+make_transcript "$DOCKER_TRANSCRIPT" "test-team" "champion-1" 0
+
+rm -f /tmp/ammo-msg-gate-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$DOCKER_TRANSCRIPT\"}" | \
+    env HOME="$DOCKER_FAKE_HOME" CLAUDE_CONFIG_DIR="$DOCKER_CFG" \
+    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
+if grep -qF "deny" /tmp/hook-stdout 2>/dev/null; then
+    echo "  PASS [$TOTAL]: Docker path — inbox found via CLAUDE_CONFIG_DIR → DENY"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: Docker path — inbox found via CLAUDE_CONFIG_DIR → DENY (exit=$actual_exit, no deny in output)"
+    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$DOCKER_FAKE_HOME"
+
+echo ""; echo "== Verifier edge-case probe 2: CLAUDE_CONFIG_DIR set, but no teams there — fail-open =="
+
+PROBE2_CFG=$(mktemp -d)  # exists but has no teams/ subdir
+PROBE2_HOME=$(mktemp -d)  # also empty
+PROBE2_TRANSCRIPT="$TMPDIR/probe2-transcript.jsonl"
+make_transcript "$PROBE2_TRANSCRIPT" "test-team" "champion-1" 0
+
+rm -f /tmp/ammo-msg-gate-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$PROBE2_TRANSCRIPT\"}" | \
+    env HOME="$PROBE2_HOME" CLAUDE_CONFIG_DIR="$PROBE2_CFG" \
+    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
+if [ "$actual_exit" -eq 0 ] && ! grep -qF "deny" /tmp/hook-stdout 2>/dev/null; then
+    echo "  PASS [$TOTAL]: CLAUDE_CONFIG_DIR set, no teams — fail-open (exit=0, no deny)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: CLAUDE_CONFIG_DIR set, no teams — fail-open (expected exit=0 no deny, got exit=$actual_exit)"
+    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$PROBE2_CFG" "$PROBE2_HOME"
+
+echo ""; echo "== Verifier edge-case probe: CLAUDE_CONFIG_DIR == HOME/.claude =="
+
+PROBE_HOME=$(mktemp -d)
+mkdir -p "$PROBE_HOME/.claude/teams/test-team/inboxes"
+make_team_config "$PROBE_HOME/.claude/teams/test-team" "test-team" "champion-1:ammo-champion"
+make_inbox "$PROBE_HOME/.claude/teams/test-team/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|alert|alert|true"
+PROBE_TRANSCRIPT="$TMPDIR/probe-transcript.jsonl"
+make_transcript "$PROBE_TRANSCRIPT" "test-team" "champion-1" 0
+
+rm -f /tmp/ammo-msg-gate-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$PROBE_TRANSCRIPT\"}" | \
+    env HOME="$PROBE_HOME" CLAUDE_CONFIG_DIR="$PROBE_HOME/.claude" \
+    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
+if grep -qF "deny" /tmp/hook-stdout 2>/dev/null; then
+    echo "  PASS [$TOTAL]: CLAUDE_CONFIG_DIR == HOME/.claude — inbox found, DENY"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: CLAUDE_CONFIG_DIR == HOME/.claude — inbox found, DENY (exit=$actual_exit, no deny)"
+    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$PROBE_HOME"
+
+# ════════════════════════════════════════════
+echo ""; echo "== NEW: Self-message only undelivered (timestamp) =="
+make_transcript "$TRANSCRIPT" "test-team" "champion-1" 1
+# Inbox: 1 delivered (ts 18:01 < delivery 18:10), 1 self-msg after delivery
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "champion-1|self note|self|2026-04-03T18:20:00.000Z|true"
+run_test "Self-msg ts after delivery, non-self all before → skip" 0 \
+    "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}"
+
+# ════════════════════════════════════════════
+echo ""; echo "== NEW: No deliveries in transcript =="
+# Fresh transcript with agentName but zero teammate-message tags
+FRESH_T="$TMPDIR/fresh.jsonl"
+echo '{"type":"permission-mode","sessionId":"s1"}' > "$FRESH_T"
+echo '{"teamName":"test-team","agentName":"champion-1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-04-03T18:00:00.000Z"}' >> "$FRESH_T"
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|initial dispatch|true"
+run_test "No deliveries + inbox has msgs → DENY" 0 \
+    "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$FRESH_T\"}" \
+    "deny"
+
+# ════════════════════════════════════════════
+echo ""; echo "== NEW: Exact timestamp match (inbox ts == delivery ts) =="
+# Delivery at 18:10, inbox msg with EXACT same timestamp → treated as delivered
+make_transcript "$TRANSCRIPT" "test-team" "champion-1" 1
+make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|spawn|true" \
+    "mon-1|alert|alert|2026-04-03T18:10:00.000Z|true"
+run_test "inbox ts == delivery ts → ALLOW (treated as delivered)" 0 \
+    "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$TRANSCRIPT\"}"
 
 echo ""
 echo "================================"

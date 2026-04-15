@@ -27,17 +27,56 @@ You are the **lead orchestrator**. You scaffold, delegate, and gate — you neve
 
 ## Invocation
 
-User provides: model_id, hardware, dtype, tp.
+User provides: model_id, hardware, dtype, tp, and optional workload config flags.
 
 Lead (you) scaffolds artifact directory, orchestrates the **campaign loop** — an iterative pipeline of 7 stages that continues until `f < min_e2e_improvement_pct` (mechanical threshold — see Campaign Stop Condition). Each iteration (round) discovers, debates, and implements optimizations against the current bottleneck landscape.
 
-Before calling `new_target.py`, determine target batch sizes. If the user specified batch sizes, pass them via `--batch-sizes`. If not, use the default `[1, 8, 32]`. Batch sizes define the decode buckets for all profiling and validation throughout the campaign.
+Before calling `new_target.py`, extract workload parameters from the user prompt:
+
+| Parameter | Prompt format | `new_target.py` flag | Default (if omitted) |
+|-----------|--------------|---------------------|----------------------|
+| Batch sizes | `--batch-sizes 1 8 32` | `--batch-sizes 1 8 32` | `[8]` |
+| Max model length | `--max-model-len=auto` or `--max-model-len=65536` | `--max-model-len 65536` | `4096` (omit flag for default) |
+| Input/output lengths | `--input-len=64 --output-len=512` | `--input-len 64 --output-len 512` | `64` / `512` |
+| Max num sequences | `--max-num-seqs=32` | _(not a new_target.py flag)_ — post-patch `bench.extra_args` | max(batch_sizes) |
+| Multi ISL/OSL pairs | `--isl-osl=64:512,2048:256` | _(not a new_target.py flag)_ — post-patch `workload_matrix` | N/A |
+
+Batch sizes define the decode buckets for all profiling and validation throughout the campaign.
+
+**Single ISL/OSL pair** (most common): pass `--input-len` and `--output-len` directly to `new_target.py`.
+
+**Multiple ISL/OSL pairs** (`--isl-osl=`): Do NOT pass `--input-len`/`--output-len` to `new_target.py`. Instead, after `new_target.py` creates `target.json`, patch the workload section to use `workload_matrix` — each ISL/OSL pair crossed with every batch size:
+
+```json
+"workload": {
+    "workload_matrix": [
+        {"input_len": 64, "output_len": 512, "batch_size": 1},
+        {"input_len": 64, "output_len": 512, "batch_size": 8},
+        {"input_len": 2048, "output_len": 256, "batch_size": 1},
+        {"input_len": 2048, "output_len": 256, "batch_size": 8}
+    ],
+    "num_iters": 5
+}
+```
+
+**`--max-model-len=auto`**: Omit `--max-model-len` from `new_target.py` (uses its default of 4096). Note in `target.json` that the user requested auto and the actual value depends on the model config.
+
+**`--max-num-seqs`**: This is a vLLM serving flag, not a `new_target.py` flag. After `new_target.py` creates `target.json`, add it to `bench.extra_args`:
+
+```json
+"bench": {
+    "extra_args": ["--max-num-seqs", "32"],
+    ...
+}
+```
 
 ```bash
 python .claude/skills/ammo/scripts/new_target.py \
   --artifact-dir kernel_opt_artifacts/{model}_{hardware}_{dtype}_tp{tp} \
   --model-id <MODEL_ID> --hardware <HW> --dtype <DTYPE> --tp <TP> \
-  [--batch-sizes 1 8 32]
+  [--batch-sizes 8] \
+  [--input-len 64 --output-len 512] \
+  [--max-model-len 4096]
 ```
 
 ## Campaign Workflow
