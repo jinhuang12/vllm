@@ -1,6 +1,14 @@
-version: 1.2.4
+version: 1.3.0
 
 ## Changelog
+
+### 1.3.0 (2026-04-15)
+- Feat: SKILL.md invocation template parses --batch-sizes, --max-model-len, --max-num-seqs, --input-len, --output-len, --isl-osl; multi ISL/OSL pairs expand to workload_matrix cross-product; default batch size [1,8,32] → [8]
+- Feat: ammo-report-writer agent definition
+- Feat: ammo-artifact-catalog PostToolUse hook + prompt template for automatic artifact tracking
+- Feat: eval pipeline — rescore_archived.py (re-score archived campaigns), verify_citations.py (validate grader citation accuracy)
+- Update: transcript_grader, causal_analyzer, parse_artifacts, score_campaign, EVAL-SKILL.md
+- Fix: ammo-msg-check hook resilient transcript counting
 
 ### 1.2.4 (2026-04-08)
 - Feat: PostToolUse hook (ammo-monitor-reminder.sh) reminds orchestrator to spawn transcript-monitor after creating champion agents
