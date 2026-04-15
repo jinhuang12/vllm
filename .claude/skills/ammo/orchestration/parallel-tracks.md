@@ -64,8 +64,11 @@ Agent(
     Optimization plan: {artifact_dir}/debate/summary.md (section for {op_id})
     Bottleneck analysis: {artifact_dir}/bottleneck_analysis.md
     GPU pool: {gpu_count} GPUs available (TP={tp}). Acquire at runtime:
-      CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <cmd>
+      CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve \
+        --num-gpus N --session-id {op_id} --no-auto-release) && \
+        CUDA_VISIBLE_DEVICES=$CVD <cmd>
       Kernel work: --num-gpus 1  |  E2E sweep: --num-gpus {tp}
+      If reserve fails (pool exhausted), retry with 30s backoff — see references/gpu-pool.md § Contention Handling.
 
     ## Stage 1 Baseline (DO NOT RE-RUN)
     Baseline E2E latency files (captured from the session base branch in Stage 1):

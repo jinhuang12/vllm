@@ -50,7 +50,7 @@ Stage 4+5: Parallel Tracks          [round team reused: per-track impl-champion 
   + Round N+1 Debate (overlapped)   [round team: N ammo-champion agents, if round 2+] → debate/campaign_round_{N+1}/summary.md
 Stage 6: Integration Validation     [main session direct]                       → SHIP or round-fail
 Stage 7: Campaign Evaluation        [main session direct]                       → next round, campaign_complete, or campaign_exhausted
-Stage 7b: Report Generation          [general-purpose subagent, background]       → REPORT.md (on campaign_complete or campaign_exhausted)
+Stage 7b: Report Generation          [ammo-report-writer subagent, background]    → REPORT.md (on campaign_complete or campaign_exhausted)
 ```
 
 Stages 1-6 form the **inner loop** of a round. Stage 7 executes the mechanical threshold check (`f` vs `min_e2e_improvement_pct`) → continue or stop. A single round-scoped team persists from Stage 3 through Stage 5; it is created at debate start and deleted after all implementation tracks complete. During Stages 4-5 (round 2+), the orchestrator may launch the next round's debate concurrently -- debate champions are spawned into the same round team alongside implementation agents (see Overlapped Debate below).
@@ -267,9 +267,18 @@ This stage is fully autonomous — no user interaction. The orchestrator execute
 
 ### Stage 7b: Report Generation
 
-When the campaign ends (`campaign_complete` or `campaign_exhausted`), spawn a general-purpose subagent in the background to generate the optimization report. The subagent reads `.claude/skills/ammo/report/SKILL.md` and follows its instructions, passing the artifact directory path. This produces `{artifact_dir}/REPORT.md` with supporting charts in `{artifact_dir}/report_assets/`.
+When the campaign ends (`campaign_complete` or `campaign_exhausted`), spawn an `ammo-report-writer` subagent in the background to generate the optimization report:
 
-The report subagent runs as a background task — the orchestrator does not wait for it before declaring the campaign done. No GPU access is needed; the subagent reads existing campaign artifacts (state.json, constraints.md, bottleneck_analysis.md, debate artifacts, validation results, benchmark JSONs) and writes the report.
+```
+Agent(
+  subagent_type="ammo-report-writer",
+  description="Generate AMMO optimization report",
+  prompt="Generate the optimization report for the campaign at {artifact_dir}. Read .claude/skills/ammo/report/SKILL.md for the full report template, chart specs, data sources, and quality checklist. The artifact directory contains all source data: state.json, constraints.md, bottleneck_analysis.md, debate artifacts, validation results, and benchmark JSONs. Write the report to {artifact_dir}/REPORT.md with charts in {artifact_dir}/report_assets/.",
+  run_in_background=True
+)
+```
+
+The report subagent runs as a background task — the orchestrator does not wait for it before declaring the campaign done. No GPU access is needed. The subagent's Stop hook runs an adversarial Sonnet fact-checker that cross-references every claim against source artifacts — the report is not finalized until the reviewer confirms all numbers are traceable, no AMMO jargon leaks through, and all claims match actual validation results.
 
 ## Task Graph
 
@@ -328,7 +337,7 @@ T15: Campaign evaluation                                  [main]               <
       IF f < threshold: CAMPAIGN EXHAUSTED
       ELSE: new debate round from existing data (→ T6)
 T19: GATE: campaign evaluation                            [main]               <- T15..T18
-T20: Generate optimization report                         [general-purpose subagent, background] <- T19 (campaign_complete or campaign_exhausted)
+T20: Generate optimization report                         [ammo-report-writer subagent, background] <- T19 (campaign_complete or campaign_exhausted)
 
 ```
 
@@ -340,9 +349,11 @@ These are NOT advisory. Violation blocks stage progression.
 2. **vLLM baseline**: Compare against production kernel, NOT naive PyTorch.
 3. **Numerical correctness**: `torch.allclose()` is mandatory in every correctness test.
 4. **GPU sequencing**: E2E benchmarks sequential via GPU lock. Use `scripts/run_vllm_bench_latency_sweep.py` for all E2E measurements. *(Reminded by `ammo-pretool-guard.sh` — warns on raw `vllm bench latency`)*
-5. **GPU isolation**: GPU commands MUST use the pool reservation pattern:
-   `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>`.
+5. **GPU isolation**: GPU commands MUST use the pool reservation pattern with agent-scoped session_id:
+   `CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N --session-id {op_id} --no-auto-release) && CUDA_VISIBLE_DEVICES=$CVD <command>`.
    The PostToolUse hook auto-releases GPUs when the command completes. Lease expiry handles crashes.
+   If the pool is exhausted, retry with 30s backoff — see `references/gpu-pool.md` § Contention Handling.
+   **Never kill processes on GPUs you don't own** — see `references/gpu-pool.md` § Process Isolation Rules.
    *(Enforced by ammo-pretool-guard.sh PreToolUse — one-shot block on first missing pattern, then trusts agent judgment)*
 6. **Full-model E2E**: Do not skip because "weights aren't available" — download them.
 6. **E2E delta math**: `E2E_improvement ~ f x kernel_speedup`, where `f` = component share of total latency. If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug. For BS-dependent optimizations, compute per-BS `f(BS) × kernel_speedup(BS)` — different batch sizes may have different `f` values. A partial regression at some batch sizes does not negate the optimization if it is gatable — see tiered verdict system in `references/validation-defaults.md`.
@@ -544,7 +555,7 @@ After interruption or compaction:
 7. Read `campaign.current_round` to determine which round is active.
 8. If `campaign` key is missing (legacy state.json): treat as round 1 — initialize the campaign object.
 9. The Stop hook will block session end while campaign is active — complete the current stage. Do NOT set `campaign.status` to `"paused"` autonomously to satisfy the Stop hook; setting `paused` requires explicit user request (see Campaign State Transitions). If you cannot complete the stage, escalate the blocker through the Escalation Protocol.
-10. If `campaign.status` is `campaign_complete` or `campaign_exhausted` but no `REPORT.md` exists, spawn the report generation subagent (T20).
+10. If `campaign.status` is `campaign_complete` or `campaign_exhausted` but no `REPORT.md` exists, spawn the `ammo-report-writer` subagent (T20).
 
 ## Quick Start Examples
 

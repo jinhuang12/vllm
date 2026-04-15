@@ -5,14 +5,45 @@ All GPU commands must use the pool reservation pattern. This ensures GPU isolati
 ## Reservation Pattern
 
 ```bash
-CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve --num-gpus N) && CUDA_VISIBLE_DEVICES=$CVD <command>
+CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve \
+  --num-gpus N --session-id {op_id} --no-auto-release) && \
+  CUDA_VISIBLE_DEVICES=$CVD <command>
 ```
+
+- `--session-id {op_id}`: Use your agent's op_id (e.g., `op001`). Prevents cross-agent eviction.
+- `--no-auto-release`: Prevents your reservation from silently clearing another agent's GPUs that share a session_id.
 
 GPUs auto-release when the command completes. The PostToolUse hook detects the reservation pattern and releases by session ID. Lease expiry (2h default, 4h for nsys) handles crashes.
 
 ## Contention Handling
 
-If the pool is exhausted, the reserve command fails. Wait briefly and retry. For CPU-only commands (file reads, roofline math, ISA inspection), no reservation is needed.
+If the pool is exhausted, the reserve command **fails immediately** with a `ReservationError`. Retry with backoff until a GPU frees up:
+
+```bash
+# Retry loop — keep trying until a GPU is available
+MAX_RETRIES=60
+for i in $(seq 1 $MAX_RETRIES); do
+  CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve \
+    --num-gpus N --session-id {op_id} --no-auto-release 2>/dev/null) && break
+  echo "GPU pool exhausted, retry $i/$MAX_RETRIES (sleeping 30s)..." >&2
+  sleep 30
+done
+if [ -z "$CVD" ]; then
+  echo "ERROR: Could not acquire GPU after $MAX_RETRIES retries" >&2
+  exit 1
+fi
+CUDA_VISIBLE_DEVICES=$CVD <command>
+```
+
+For CPU-only commands (file reads, roofline math, ISA inspection), no reservation is needed.
+
+## Process Isolation Rules
+
+**Never kill processes on GPUs you don't own.** When multiple agents share a GPU pool:
+
+- Only terminate processes YOU started. Do not `kill`, `pkill`, or `killall` processes belonging to other agents.
+- If `nvidia-smi` shows a process on "your" GPU that you didn't start, it belongs to another agent whose reservation overlaps. Wait for them to finish — do not kill it.
+- If you suspect a zombie/leaked process, report it to the orchestrator rather than killing it yourself.
 
 ## GPU Count by Task Type
 

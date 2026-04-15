@@ -10,11 +10,13 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // .input.command // empty'
 [ -z "$COMMAND" ] && exit 0
 
 # Only release for commands that used the reservation pattern
-if ! echo "$COMMAND" | grep -q 'gpu_reservation.py reserve'; then
+if ! echo "$COMMAND" | grep -qP '(?<!\S)gpu_reservation\.py\s+reserve(?:\s|$)'; then
     exit 0
 fi
 
-SESSION_ID="${CLAUDE_SESSION_ID:-}"
+# Extract explicit --session-id from the command if present; fall back to CLAUDE_SESSION_ID
+SESSION_ID=$(echo "$COMMAND" | grep -oP '(?<=--session-id\s)\S+' 2>/dev/null) || true
+[ -z "$SESSION_ID" ] && SESSION_ID="${CLAUDE_SESSION_ID:-}"
 [ -z "$SESSION_ID" ] && exit 0
 
 GPU_RES_DIR="${AMMO_GPU_RES_DIR:-/tmp/ammo_gpu_res}"
