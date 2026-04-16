@@ -26,6 +26,7 @@ cleanup() {
     rm -f "/tmp/ammo-stop-nudged-unknown"
     rm -f "/tmp/ammo-stop-nudged-lead-session-123"
     rm -f "/tmp/ammo-stop-nudged-teammate-session-1"
+    rm -f /tmp/test-transcript-*.jsonl
 }
 trap cleanup EXIT
 
@@ -179,6 +180,85 @@ EOF
 
 run_test "Solo orchestrator (no teams) gets nudge" 2 \
     '{"session_id": "unknown"}'
+
+# ══════════════════════════════════════════════════
+echo ""
+echo "== Bug 3: Tmux teammate detection (no agent_type, Docker paths) =="
+# ══════════════════════════════════════════════════
+
+# Test A — Docker path: CLAUDE_CONFIG_DIR differs from HOME
+# Setup: team config at CLAUDE_CONFIG_DIR, NOT at HOME
+DOCKER_CONFIG_DIR="$TMPDIR/claude-config"
+mkdir -p "$DOCKER_CONFIG_DIR/teams/ammo-round-2"
+cat > "$DOCKER_CONFIG_DIR/teams/ammo-round-2/config.json" << 'TCEOF'
+{"leadSessionId": "lead-session-123", "members": [{"name": "impl-champion-op003", "sessionId": "teammate-session-1"}]}
+TCEOF
+FAKE_HOME=$(mktemp -d)  # empty HOME with no .claude/teams/
+
+# Campaign state: stage 4_5, round 2, overlap active (would nudge orchestrator)
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "stage": "4_5_parallel_tracks",
+  "campaign": { "status": "active", "current_round": 2 },
+  "debate": { "next_round_overlap": { "active": true, "phase": "debating", "selected_winners": [], "profiling_basis": "bottleneck_analysis.md", "f_values_at_proposal": {} } },
+  "parallel_tracks": { "op003": { "status": "in_progress" } }
+}
+EOF
+
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/ammo-stop-nudged-* 2>/dev/null || true
+actual_exit=0
+echo '{"session_id": "teammate-session-1"}' | \
+    env HOME="$FAKE_HOME" CLAUDE_PROJECT_DIR="$TMPDIR" CLAUDE_CONFIG_DIR="$DOCKER_CONFIG_DIR" \
+    bash "$HOOK" 2>/dev/null || actual_exit=$?
+if [ "$actual_exit" -eq 0 ]; then
+    echo "  PASS [$TOTAL]: Docker path — teammate detected via CLAUDE_CONFIG_DIR"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: Docker path — teammate detected via CLAUDE_CONFIG_DIR (expected=0, got=$actual_exit)"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$FAKE_HOME"
+
+# Remove team configs — force transcript-only detection
+rm -rf "$TMPDIR/.claude/teams" "$TMPDIR/claude-config"
+
+# Create fake transcript JSONL for Test B
+cat > /tmp/test-transcript-B.jsonl << 'EOF'
+{"type":"summary","agentName":"impl-champion-op003","teamName":"ammo-round-2","timestamp":"2026-04-09T10:00:00Z"}
+{"type":"user","message":{"role":"user","content":"implement op003"}}
+EOF
+
+# Campaign: stage 7 active (would nudge orchestrator)
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{
+  "stage": "7_campaign_eval",
+  "campaign": { "status": "active", "current_round": 2 },
+  "debate": { "next_round_overlap": { "active": false, "phase": null, "selected_winners": [], "profiling_basis": null, "f_values_at_proposal": {} } },
+  "parallel_tracks": {}
+}
+EOF
+
+run_test "Tmux teammate detected via transcript agentName" 0 \
+    '{"session_id": "teammate-session-1", "transcript_path": "/tmp/test-transcript-B.jsonl"}'
+
+# Test C — Orchestrator transcript has NO agentName (negative guard)
+cat > /tmp/test-transcript-C.jsonl << 'EOF'
+{"type":"user","message":{"role":"user","content":"start campaign"}}
+{"type":"assistant","message":{"role":"assistant","content":"starting..."}}
+EOF
+
+run_test "Orchestrator transcript (no agentName) still gets nudge" 2 \
+    '{"session_id": "lead-session-123", "transcript_path": "/tmp/test-transcript-C.jsonl"}'
+
+# Test D — Team-lead transcript must NOT be silenced
+cat > /tmp/test-transcript-D.jsonl << 'EOF'
+{"type":"summary","agentName":"team-lead","teamName":"ammo-round-2","timestamp":"2026-04-09T10:00:00Z"}
+{"type":"user","message":{"role":"user","content":"orchestrate campaign"}}
+EOF
+
+run_test "Team-lead transcript still gets nudge (not silenced)" 2 \
+    '{"session_id": "lead-session-123", "transcript_path": "/tmp/test-transcript-D.jsonl"}'
 
 # Restore team config for remaining tests
 mkdir -p "$TMPDIR/.claude/teams/ammo-round-2"
@@ -494,6 +574,43 @@ run_test "Other stage with stale active overlap → lead gets nudge" 2 \
     '{"session_id": "lead-session-123"}'
 
 # ══════════════════════════════════════════════════
+echo ""
+echo "== Verifier edge-case probe: CLAUDE_CONFIG_DIR == HOME/.claude =="
+# ══════════════════════════════════════════════════
+
+# Edge-case probe: when CLAUDE_CONFIG_DIR is explicitly set to the same value
+# as $HOME/.claude, team detection must still work (no path divergence).
+# This guards against the fix over-constraining: if CLAUDE_CONFIG_DIR is set
+# but happens to equal the default path, teammates must still be silenced.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/ammo-stop-nudged-* 2>/dev/null || true
+# State: stage 6, active overlap (would nudge orchestrator)
+cat > "$ARTIFACT_DIR/state.json" << 'EOF'
+{"stage":"6_integration","campaign":{"status":"active","current_round":2},"debate":{"next_round_overlap":{"active":true,"phase":"debating","selected_winners":[],"profiling_basis":"bottleneck_analysis.md","f_values_at_proposal":{}}},"parallel_tracks":{}}
+EOF
+actual_exit=0
+echo '{"session_id": "teammate-session-1"}' | \
+    env HOME="$TMPDIR" CLAUDE_PROJECT_DIR="$TMPDIR" CLAUDE_CONFIG_DIR="$TMPDIR/.claude" \
+    bash "$HOOK" 2>/dev/null || actual_exit=$?
+if [ "$actual_exit" -eq 0 ]; then
+    echo "  PASS [$TOTAL]: CLAUDE_CONFIG_DIR == HOME/.claude — teammate still silenced"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: CLAUDE_CONFIG_DIR == HOME/.claude — teammate still silenced (expected=0, got=$actual_exit)"
+    FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "== Verifier edge-case probe 2: transcript_path given but file missing =="
+# ══════════════════════════════════════════════════
+
+# Edge-case: transcript_path in JSON but file doesn't exist → fail-open.
+# The [ -f "$TRANSCRIPT_PATH" ] guard must skip transcript detection,
+# fall through to team config check (is_lead=true), and nudge the orchestrator.
+# Guards against the fix accidentally blocking lead when transcript is absent.
+run_test "Missing transcript file → fail-open, lead still gets nudge" 2 \
+    '{"session_id": "lead-session-123", "transcript_path": "/tmp/nonexistent-does-not-exist-98765.jsonl"}'
+
 echo ""
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed out of $TOTAL tests"

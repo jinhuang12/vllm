@@ -32,12 +32,29 @@ if [ -n "$AGENT_TYPE" ]; then
     exit 0  # Subagent — campaign-level nudges are irrelevant
 fi
 
+# Transcript-based detection for tmux-backed teammates.
+# tmux teammates lack agent_type but their transcript JSONL contains agentName.
+# The lead orchestrator's transcript may also contain agentName="team-lead" after
+# context compaction — exclude that to avoid silencing the orchestrator.
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
+if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+    _AGENT_NAME=""
+    _result=$(head -5 "$TRANSCRIPT_PATH" 2>/dev/null | jq -rs \
+        'first(.[] | select(.agentName) | [.agentName, .teamName // ""] | @tsv)' 2>/dev/null) || true
+    if [ -n "$_result" ]; then
+        IFS=$'\t' read -r _AGENT_NAME _TEAM_NAME <<< "$_result"
+    fi
+    if [ -n "$_AGENT_NAME" ] && [ "$_AGENT_NAME" != "team-lead" ]; then
+        exit 0  # Team member — campaign nudges are irrelevant
+    fi
+fi
+
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 
 # Secondary: check team config as fallback (works when session_ids differ).
 IS_LEAD=false
-for team_cfg in "$HOME/.claude/teams"/*/config.json; do
+for team_cfg in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/teams"/*/config.json; do
     [ -f "$team_cfg" ] || continue
     lead_sid=$(jq -r '.leadSessionId // empty' "$team_cfg" 2>/dev/null)
     if [ "$lead_sid" = "$SESSION_ID" ]; then
@@ -49,7 +66,7 @@ done
 # If we found team configs but none had our session_id as lead, we're a teammate.
 # If no team configs exist at all, we might be the orchestrator running solo — continue checks.
 HAS_TEAMS=false
-for team_cfg in "$HOME/.claude/teams"/*/config.json; do
+for team_cfg in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/teams"/*/config.json; do
     [ -f "$team_cfg" ] && HAS_TEAMS=true && break
 done
 

@@ -958,13 +958,27 @@ def _run_inproc_latency_sweep_child(
     engine_args = EngineArgs.from_cli_args(args)
     _update_status("loading_model")
     # Work around pydantic validation: _dataclasses.asdict may produce None
-    # values inside nested config dicts (e.g. compilation_config.cudagraph_capture_sizes)
-    # which CompilationConfig rejects. Filter them out.
-    ea_dict = _dataclasses.asdict(engine_args)
-    for _cfg_key in ("compilation_config", "profiler_config", "attention_config",
-                      "structured_outputs_config"):
-        if isinstance(ea_dict.get(_cfg_key), dict):
-            ea_dict[_cfg_key] = {k: v for k, v in ea_dict[_cfg_key].items() if v is not None}
+    # values inside nested config dicts (e.g. compilation_config.cudagraph_capture_sizes
+    # or compilation_config.pass_config.fuse_minimax_qk_norm)                                                                                                                                                                                                                                                                                                           
+    # which CompilationConfig/PassConfig reject. Filter them out recursively.           
+    def _strip_none_recursive(d):                                                                                                                                                                                                                                                                                                                                       
+        """Remove None values from a dict, recursing into nested dicts."""              
+        cleaned = {}                                                                    
+        for k, v in d.items():                                                          
+            if v is None:                                                               
+                continue                                                                
+            if isinstance(v, dict):                                                     
+                v = _strip_none_recursive(v)                                            
+                if not v:  # skip empty dicts too                                       
+                    continue                                                            
+            cleaned[k] = v                                                              
+        return cleaned                                                                  
+                                                                                        
+    ea_dict = _dataclasses.asdict(engine_args)                                          
+    for _cfg_key in ("compilation_config", "profiler_config", "attention_config",       
+                    "structured_outputs_config"):                                     
+        if isinstance(ea_dict.get(_cfg_key), dict):                                     
+            ea_dict[_cfg_key] = _strip_none_recursive(ea_dict[_cfg_key])
     # Configure torch profiler on the engine when --torch-profile is active.
     if torch_profile:
         torch_profile_base = str(out_root / "torch_profile")

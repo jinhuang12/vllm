@@ -23,13 +23,20 @@ STEP 4 — CATALOG NEW FILES:
 
   **stage**: inferred from path using these rules (first match wins):
       nsys/, ncu_* (root-level NCU text files) -> "baseline"
-      e2e_latency*/ (but NOT e2e_latency_integration*) -> "baseline"
+      e2e_latency/ (root dir, no suffix) -> "baseline"
+      e2e_latency_{ISO_TIMESTAMP}/ (timestamped reruns) -> "baseline"
+      e2e_latency_round{N}*/ (round N re-profile) -> "baseline"
+      e2e_latency_gate*/ (gate benchmark) -> "baseline"
+      e2e_latency_perf*/ (perf validation) -> "baseline"
+      e2e_latency_opt*/ -> "baseline"
+      e2e_latency_{op_id}*/ (track-specific e2e) -> "baseline"
       bottleneck_analysis*, *_analysis.md (root-level) -> "mining"
       debate/ -> "debate"
       tracks/ -> "implementation/validation"
       e2e_latency_integration* -> "integration"
       REPORT.md, report_assets/ -> "campaign_eval"
       monitor_log_* -> "monitoring"
+      op{NNN}_sweep*/, op{NNN}_baseline_check/, op{NNN}_native_check/ -> "implementation/validation"
       Everything else -> null
 
   **round**: Extract the CAMPAIGN round number. This is NOT the same as debate sub-rounds.
@@ -42,20 +49,34 @@ STEP 4 — CATALOG NEW FILES:
       2. bottleneck_analysis_round{N}.md -> N  (filename-embedded round)
       3. e2e_latency_round{N}* dirname -> N  (e.g. e2e_latency_round5_baseline/ -> 5)
       4. -r{N}- in filename -> N  (e.g. monitor_log_champion-r3-2.md -> 3)
-      5. Files under debate/ with NO campaign_round_{N} ancestor -> 1  (flat R1 debate)
+      5. Files under debate/ with NO campaign_round_{N} ancestor:
+         a. Read state.json campaign.rounds[] to build a champion-to-round map:
+            - Each round's debate summary lists champions (e.g., R1: A/B/C, R2: D/E, R3: F/G)
+            - Also check debate/campaign_round_{N}/summary.md for champion names
+         b. If filename contains champion_{letter} or champ_{letter}, look up that champion's
+            round from the map. Use that round number.
+         c. If no champion name in filename (generic experiments like fused_qknorm.py) -> 1
       6. bottleneck_analysis.md (no round suffix) -> 1
       7. monitor_log_champion-{M}.md (no -r{N}- pattern, R1 champions) -> 1
       8. e2e_latency/ (root dir, no round/op/timestamp suffix) -> 1
       9. e2e_latency_opt/ -> 1
-      10. Everything else -> null
+      10. Files under tracks/{op_id}/:
+          - Read state.json campaign.rounds[] array
+          - Find which round's selected_candidates contains this op_id
+          - If found -> that round number
+          - If not found (current round): use campaign.current_round
+          - Fallback: null
+      11. Everything else -> null
 
       DO NOT match debate/round_1/, debate/round_2/, round1/, round2/ as campaign rounds.
 
-  **track_id**: Extract op_id ONLY from paths matching pattern `op\d+`:
+  **track_id**: Extract op_id from paths matching pattern `op[-]?\d+`:
       tracks/{op_id}/ -> op_id  (e.g. tracks/op002_silu_prologue_concat/ -> "op002")
       e2e_latency_{op_id}*/ -> op_id  (e.g. e2e_latency_op003_v2/ -> "op003")
+      {op_id}_sweep*/, {op_id}_baseline_check/, {op_id}_native_check/ -> op_id  (e.g. op004_sweep_v3/ -> "op004")
       monitor_log_impl-champion-{op_id}.md -> op_id  (e.g. monitor_log_impl-champion-op001.md -> "op001")
       IMPORTANT: only match if the extracted value starts with "op" followed by digits. Do NOT extract "opt" from e2e_latency_opt/.
+      Normalize: if extracted as "op002" (no dash), normalize to "op-002". Canonical format: op-NNN (dash + zero-padded 3 digits).
 
   **metrics**: ONLY for these known JSON files — read the file and extract real values (never leave as null if data exists):
       e2e_latency_results.json -> The JSON has top-level keys like "8" (batch sizes). Each has "baseline" and/or "opt" sub-objects with "avg_s", "p50_s", "p99_s". Extract: {batch_sizes: {<bs>: {baseline_avg_s, baseline_p50_s, opt_avg_s, opt_p50_s}}}
@@ -76,17 +97,18 @@ RULES:
 - Do NOT modify state.json or any other file besides artifact_catalog.json
 - Do NOT run GPU commands or benchmarks
 - Skip empty directories
-- Skip binary files (.nsys-rep, .sqlite, .ncu-rep, .png) for content reading — just index path+type
+- Skip binary files (.nsys-rep, .sqlite, .ncu-rep, .png, .pyc) and __pycache__/ directories for content reading — just index path+type
 
 VERSION DEDUP (MANDATORY — apply before writing catalog):
-- For e2e_latency dirs with version suffixes (_v2, _v3, _v4, _v5, _timestamp):
-  Keep ONLY the highest version. Add "versions": N to that entry.
-  Delete all lower-version entries from the catalog.
-  Example: e2e_latency_op006/, _v2, _v3, _v4, _v5 -> keep only _v5 entries, set "versions": 5
+- Applies to ANY dir family with _v{N} or _{timestamp} suffixes:
+  e2e_latency*, op*_sweep*, validator_tests*, and similar versioned directories.
+- Group entries by base directory name (strip _v{N} or _{timestamp} suffix).
+  Keep ONLY entries from the highest version. Delete all lower-version entries.
+  Example: op004_sweep/, op004_sweep_v2, ..., op004_sweep_v5 -> keep only _v5 entries
+  Example: e2e_latency_op006/, _v2, _v3, _v4, _v5 -> keep only _v5 entries
   Timestamp suffixes (e.g. _2026-04-06T175521Z) count as older versions of the base dir.
-- For validator_tests/ vs validator_tests_v2/:
-  Keep ONLY validator_tests_v2/ entries. Add "retried": true to those entries.
-  Delete all validator_tests/ (non-v2) entries from the catalog.
+- Do NOT add "versions" or "retried" keys to entries (violates schema contract — only
+  type, stage, round, track_id, and optional metrics are allowed).
 
 NAMING CONVENTIONS:
     R1 debate: debate/ (flat), R2+: debate/campaign_round_{N}/

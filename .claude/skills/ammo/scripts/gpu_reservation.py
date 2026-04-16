@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -34,6 +36,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import IO
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +78,8 @@ def _discover_gpu_count() -> int:
     """Return the number of NVIDIA GPUs visible to nvidia-smi.
 
     Returns 0 on any failure (nvidia-smi not found, no GPUs, etc.).
+    NOTE: This function sees ALL host GPUs, ignoring session boundaries.
+    Use _discover_session_gpus() for session-scoped reservation pools.
     """
     try:
         result = subprocess.run(
@@ -88,13 +94,69 @@ def _discover_gpu_count() -> int:
         return 0
 
 
+def _discover_session_gpus() -> list[int]:
+    """Discover which physical GPU IDs this session owns via CUDA_VISIBLE_DEVICES.
+
+    Parses the CUDA_VISIBLE_DEVICES environment variable to get the exact
+    physical GPU IDs allocated to this session by the server.
+
+    Critical for multi-session isolation: nvidia-smi sees all host GPUs,
+    but CUDA_VISIBLE_DEVICES reflects only THIS session's allocation.
+    Since CVD is non-composable (child CVD overrides parent entirely),
+    returned IDs are physical host IDs that must be used directly.
+
+    Returns:
+        Sorted list of integer GPU IDs, e.g. [4, 5, 6, 7].
+        Empty list if CUDA_VISIBLE_DEVICES is unset, empty, or "-1".
+    """
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not cvd or cvd == "-1":
+        return []
+    gpu_ids = []
+    for x in cvd.split(","):
+        x = x.strip()
+        if x.isdigit():
+            gpu_ids.append(int(x))
+        elif x.startswith("GPU-") or x.startswith("MIG-"):
+            logger.warning(
+                f"Non-integer GPU ID in CUDA_VISIBLE_DEVICES: {x} — skipping. "
+                "gpu_reservation.py requires integer GPU IDs."
+            )
+    if gpu_ids:
+        logger.info(f"GPU reservation pool initialized with physical IDs: {gpu_ids}")
+    return sorted(gpu_ids)
+
+
+def _compute_state_dir() -> Path:
+    """Compute the state directory path at call time.
+
+    Uses AMMO_GPU_RES_DIR env var if set (injected by the server at session
+    creation for per-session isolation).
+
+    Falls back to /tmp/ammo_gpu_res_{sha256(CVD)[:12]}/ using a SHA256 hash
+    of CUDA_VISIBLE_DEVICES. This is deterministic across processes (unlike
+    hash() which is randomized by PYTHONHASHSEED) and provides isolation
+    between sessions with different GPU allocations.
+    """
+    env_dir = os.environ.get("AMMO_GPU_RES_DIR")
+    if env_dir:
+        return Path(env_dir)
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    hash_suffix = hashlib.sha256(cvd.encode()).hexdigest()[:12]
+    return Path(f"/tmp/ammo_gpu_res_{hash_suffix}")
+
+
 def _init_state() -> dict:
-    """Create and persist an initial state.json based on discovered GPUs."""
+    """Create and persist an initial state.json based on session's GPU pool.
+
+    Uses CUDA_VISIBLE_DEVICES to discover the physical GPU IDs owned by this
+    session (not nvidia-smi, which would see all host GPUs).
+    """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    gpu_count = _discover_gpu_count()
+    gpu_ids = _discover_session_gpus()
     state: dict = {
-        "gpus": {str(i): None for i in range(gpu_count)},
-        "gpu_count": gpu_count,
+        "gpus": {str(g): None for g in gpu_ids},
+        "gpu_count": len(gpu_ids),
         "audit": [],
     }
     _write_state(state)
@@ -285,11 +347,15 @@ def reserve(
                     state["gpus"][key] = None
 
         # --- Find free GPUs ---
-        gpu_count = state.get("gpu_count", len(state["gpus"]))
+        # Iterate the actual pool keys (physical IDs), not range(gpu_count).
+        # This is critical for multi-session isolation: physical IDs may be
+        # non-contiguous (e.g. [4,5,6,7]), and range(gpu_count) would wrongly
+        # return 0-based indices that map to different physical GPUs.
+        all_pool_ids = sorted(int(k) for k in state["gpus"].keys())
         free_set = set()
-        for i in range(gpu_count):
-            if state["gpus"].get(str(i)) is None:
-                free_set.add(i)
+        for gpu_id in all_pool_ids:
+            if state["gpus"].get(str(gpu_id)) is None:
+                free_set.add(gpu_id)
 
         if len(free_set) < num_gpus:
             raise ReservationError(
@@ -302,7 +368,7 @@ def reserve(
 
         if num_gpus == 1:
             # Just take the first free GPU
-            for i in range(gpu_count):
+            for i in all_pool_ids:
                 if i in free_set:
                     allocated = [i]
                     break
@@ -310,7 +376,7 @@ def reserve(
             # Scan for a contiguous block of num_gpus consecutive free GPUs
             run_start = None
             run_len = 0
-            for i in range(gpu_count):
+            for i in all_pool_ids:
                 if i in free_set:
                     if run_start is None:
                         run_start = i
