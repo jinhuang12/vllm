@@ -1,0 +1,989 @@
+{
+  "run_idx": 17,
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "artifact_dir": "campaign_artifacts",
+  "intervention_inventory": [
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R2",
+      "message_number": 1,
+      "severity": "WARNING",
+      "topic": "L2 flush too small",
+      "description": "L2 flush uses 96 MB (1x L2), debate rules require 240 MB (2.5x). Sent before body GEMM split-K experiments ran.",
+      "outcome": "ACKNOWLEDGED_LATE",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 35,
+          "line_end": 35,
+          "claim": "Monitor flagged L2 flush as too small before experiments ran",
+          "quoted_content": "### Message 1 [WARNING]: L2 flush too small\nSent after body GEMM split-K script written. flush_l2() uses 96 MB (1x L2), debate rules require 240 MB (2.5x). Sent before experiment runs."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R2",
+      "message_number": 2,
+      "severity": "WARNING",
+      "topic": "gate_up weight flush critical boundary",
+      "description": "gate_up weight 94.4 MB vs 96 MB L2 flush = 1.017x, barely enough to evict weight but debate rules require 2.5x = 240 MB.",
+      "outcome": "ACKNOWLEDGED_LATE",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 32,
+          "line_end": 33,
+          "claim": "Monitor warned about gate_up weight nearly equal to L2 flush size",
+          "quoted_content": "### Message 2 [WARNING]: gate_up weight 94.4MB vs 96MB flush critical\nSent before hybrid NN/TN experiment runs. gate_up weight = 94.4 MB, flush = 96 MB = 1.017x \u2014 just barely enough to evict the weight."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R2",
+      "message_number": 3,
+      "severity": "CRITICAL",
+      "topic": "Speculative lm_head E2E claim",
+      "description": "Champion about to claim 0.15-1.5% E2E for lm_head where lower bound is below threshold and upper bound is pure speculation. Own data shows cold speedup=1.012x, E2E=0.16%.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 17,
+          "line_end": 22,
+          "claim": "Monitor caught speculative E2E claim before proposal written",
+          "quoted_content": "### Message 3 [CRITICAL]: Speculative lm_head E2E claim\nSent before proposal written. Champion was about to claim \"0.15-1.5% E2E\" for lm_head where:\n- Lower bound 0.15% = below 1.0% threshold\n- Upper bound 1.5% = pure speculation (\"production effects may favor Triton\")\n- Own data shows: cold speedup=1.012x, E2E=0.16%"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R2",
+      "message_number": 4,
+      "severity": "CRITICAL",
+      "topic": "Wrong lm_head shape N=151936 vs N=248320",
+      "description": "Background delegates confirmed actual vocab shape is N=248320. Torch.compile autotune shows only 0.7% speedup for actual shape -> 0.09% E2E. Proposal based on wrong shape.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 14,
+          "line_end": 16,
+          "claim": "Monitor flagged the critical N shape error and champion independently confirmed",
+          "quoted_content": "### Message 4 [CRITICAL]: Wrong lm_head shape N=151936 vs N=248320\nBackground delegates confirmed actual shape is N=248320 (full vocab_size). Torch.compile autotune shows only 0.7% speedup for actual shape \u2192 0.09% E2E."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R2",
+      "message_number": 5,
+      "severity": "INFO",
+      "topic": "Team-lead alert about wrong shape + negative evidence",
+      "description": "Notified team-lead of N=151936 vs N=248320 shape error in champion-1's proposal. Also noted 5 body GEMM negative experiments as valuable evidence.",
+      "outcome": "ACTED_ON",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 11,
+          "line_end": 12,
+          "claim": "Monitor proactively escalated shape error to team-lead",
+          "quoted_content": "### Message 5 [team-lead alert]: Wrong shape notification\nNotified team-lead of N=151936 vs N=248320 shape error in champion-1's proposal. Also noted 5 body GEMM negative experiments as valuable evidence."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R3",
+      "message_number": 1,
+      "severity": "WARNING",
+      "topic": "Benchmark 4.7x faster than production",
+      "description": "Experiment baseline 6.50 us/call x 24 = 156 us vs profiled production 30.8 us x 24 = 737 us = 4.7x discrepancy. All 24 calls use SAME h0 tensor fitting in L2.",
+      "outcome": "INDEPENDENTLY_CONFIRMED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 480,
+          "line_end": 495,
+          "claim": "Monitor flagged benchmark-production discrepancy; champion independently found same issue",
+          "quoted_content": "CRITICAL CONCERN FLAGGED (Message 1 sent):\nExperiment baseline 6.50 us/call \u00d7 24 = 156 us vs profiled production 30.8 us \u00d7 24 = 737 us = 4.7x discrepancy.\nRoot cause: All 24 calls in the CUDA graph use the SAME h0 tensor (8 MB), which fits in 96 MB L2."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R3",
+      "message_number": 2,
+      "severity": "WARNING",
+      "topic": "V2 benchmark still warm-cache",
+      "description": "V2 benchmark STILL does not reproduce production because active working set per call 8 MB << 96 MB L2. Need flush_l2(240 MB) BETWEEN each of 24 recurrence calls.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 497,
+          "line_end": 512,
+          "claim": "Monitor sent second warning about warm-cache methodology; champion understood and created v3 with L2 flush",
+          "quoted_content": "ROOT CAUSE ANALYSIS:\nThe v2 benchmark STILL doesn't reproduce production because:\n- Active working set per call = 8 entries \u00d7 (32 \u00d7 128 \u00d7 128 \u00d7 2 bytes) = 8 MB per call\n- 8 MB << 96 MB L2, so the state STAYS WARM in L2 across all 24 calls"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R3",
+      "message_number": 3,
+      "severity": "CRITICAL",
+      "topic": "FP8 race condition on scale factor write",
+      "description": "All NV=4 blocks per head write to same h_scale location. Last writer wins, giving wrong scale for other tiles. Fix: use per-BV-tile scale.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 556,
+          "line_end": 563,
+          "claim": "Monitor flagged FP8 race condition; champion fixed it achieving 11x accuracy improvement",
+          "quoted_content": "CRITICAL BUG FLAGGED (Message 3 sent):\nRace condition on scale factor write: all NV=4 blocks per head (i_v=0..3) all write to same `h_scale[state_idx, i_hv]` location. Last writer wins, giving wrong scale for other tiles.\nFix: Use per-BV-tile scale `h_scale[state_idx, i_hv, i_v]`"
+        },
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 685,
+          "line_end": 689,
+          "claim": "Race condition fix led to 11x accuracy improvement and slight speedup improvement",
+          "quoted_content": "DA-MONITOR IMPACT SUMMARY:\n- CRITICAL message (msg 3): Led to 11x accuracy improvement + slight speedup improvement\n- Fixed implementation is now production-viable (with model quality validation in Stage 5)"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-2",
+      "agent_monitored": "champion-2",
+      "round": "R3",
+      "message_number": 1,
+      "severity": "CRITICAL",
+      "topic": "L2-cached single-call benchmark invalid",
+      "description": "Single-call shows 278.5% BW utilization (physically impossible). L2 cache pollution from same 8.4 MB state tensors replayed 200 times in 48 MB L2. Pipeline benchmark (24 layers) at 23.73 us more realistic.",
+      "outcome": "INDEPENDENTLY_CONFIRMED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-2.md",
+          "line_start": 92,
+          "line_end": 101,
+          "claim": "Monitor sent CRITICAL about L2-cached benchmark; champion had independently reached same conclusion",
+          "quoted_content": "CRITICAL DATA ANALYSIS:\n1. Single-call benchmark: 6.97\u00b5s baseline \u2192 278.5% BW utilization (IMPOSSIBLE \u2014 L40S has 864 GB/s, 278% = 2404 GB/s)\n   - Root cause: L2 cache pollution \u2014 same 8.4 MB state tensors replayed 200 times fit in L2 (48 MB L40S)\n   - Single-call numbers are INVALID for performance assessment"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-3",
+      "agent_monitored": "champion-3",
+      "round": "R3",
+      "message_number": 1,
+      "severity": "WARNING",
+      "topic": "Baseline provenance mismatch",
+      "description": "F.linear -> cuBLAS baseline != Triton GEMV production kernel. Overhead measurements may not be representative.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-3.md",
+          "line_start": 141,
+          "line_end": 141,
+          "claim": "Monitor warned about baseline provenance; champion addressed it in proposal caveat",
+          "quoted_content": "1. MSG 1: WARNING \u2014 Baseline provenance (F.linear \u2260 Triton GEMV for overhead measurement). ADDRESSED in proposal via caveat."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-3",
+      "agent_monitored": "champion-3",
+      "round": "R3",
+      "message_number": 2,
+      "severity": "WARNING",
+      "topic": "RMSNorm savings overstated 2x",
+      "description": "Proposal uses 64 norms but only 32 pre-MLP norms are fusible. 179 us -> ~89.6 us. Effect: 2.8% -> ~2.1%.",
+      "outcome": "NOT_ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-3.md",
+          "line_start": 142,
+          "line_end": 142,
+          "claim": "Monitor warned about RMSNorm 2x overstatement; champion did NOT address it in proposal",
+          "quoted_content": "2. MSG 2: WARNING \u2014 RMSNorm savings overstated 2x (64 norms used, should be 32 fusible). NOT ADDRESSED \u2014 proposal still uses 179 us. Corrected: ~89.6 us. Effect: 2.8% \u2192 ~2.1% (still above 1% threshold)."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-r4-1",
+      "agent_monitored": "champion-r4-1",
+      "round": "R4",
+      "message_number": 1,
+      "severity": "WARNING",
+      "topic": "Graph overhead arithmetic inconsistency",
+      "description": "Champion estimates 2-3 us/node x 88 nodes = 150 us but own data shows 0.87 us/node across ~400 graph nodes = ~77 us. At correct estimate, total = 0.82% deflated (below threshold).",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-1.md",
+          "line_start": 32,
+          "line_end": 34,
+          "claim": "Monitor flagged arithmetic inconsistency in graph overhead estimate; champion measured actual 1.6-1.7 us/node",
+          "quoted_content": "Champion's threshold crossing for GEMV epilogue fusion depends on UNVERIFIED CUDA graph node overhead savings. Champion's own data mentions 347 us total overhead across ~400 graph nodes = ~0.87 us/node, but estimates 2-3 us/node \u00d7 88 nodes = 150 us. This is a 2-3x overestimate."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-r4-2",
+      "agent_monitored": "champion-r4-2",
+      "round": "R4",
+      "message_number": 1,
+      "severity": "WARNING",
+      "topic": "Borderline E2E math + fusion opportunity gap",
+      "description": "466 us is POST-torch.compile residual; WHY torch.compile cannot fuse those ops not established. Delegate research must answer this mechanistic question.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-2.md",
+          "line_start": 26,
+          "line_end": 28,
+          "claim": "Monitor warned about borderline math and fusion opportunity gap",
+          "quoted_content": "**Issues flagged**: \n- WARNING sent (message 1/10): Borderline E2E math + reasoning gap: 466 us is POST-torch.compile residual; WHY torch.compile can't fuse those ops not established."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-r4-2",
+      "agent_monitored": "champion-r4-2",
+      "round": "R4",
+      "message_number": 2,
+      "severity": "WARNING",
+      "topic": "Memcopy BW ceiling not valid for M=8 GEMV",
+      "description": "Champion using memcopy BW (92-95%) as ceiling for M=8 GEMV, but these are different workloads. Need GEMV-specific benchmark.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-2.md",
+          "line_start": 86,
+          "line_end": 89,
+          "claim": "Monitor flagged memcopy BW ceiling invalid for GEMV; champion ran cuBLAS cold-cache test",
+          "quoted_content": "**REASONING GAP FLAGGED (WARNING 2/10)**:\nChampion using memcopy BW (92-95%) as ceiling for M=8 GEMV, but these are different workloads. Memcopy is sequential streaming; M=8 GEMV has extremely low arithmetic intensity per SM and scatter-gather output patterns."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-r4-2",
+      "agent_monitored": "champion-r4-2",
+      "round": "R4",
+      "message_number": 3,
+      "severity": "WARNING",
+      "topic": "ba_proj below threshold; run cuBLAS ceiling test",
+      "description": "Before finalizing ba_proj-only proposal (below threshold), should run cuBLAS ceiling test to validate/reject CUDA C++ body GEMV potential.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-2.md",
+          "line_start": 122,
+          "line_end": 124,
+          "claim": "Monitor recommended cuBLAS ceiling test; champion ran it and confirmed Triton beats cuBLAS on all shapes",
+          "quoted_content": "**WARNING sent (message 3/10)**: Before finalizing ba_proj-only proposal (below threshold), should run cuBLAS ceiling test to validate/reject CUDA C++ body GEMV potential. If cuBLAS hits 83-86% \u2192 campaign exhaustion evidence; if cuBLAS hits 90%+ \u2192 stronger proposal."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-r4-3",
+      "agent_monitored": "champion-r4-3",
+      "round": "R4",
+      "message_number": 1,
+      "severity": "WARNING",
+      "topic": "Fused SiLU GEMV saves only ~0.38% deflated",
+      "description": "Even corrected kernel saves only ~96 us (0.38% deflated), combined with rearrange fix (120 us) = 0.82% deflated -- below 1% threshold.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-3.md",
+          "line_start": 67,
+          "line_end": 69,
+          "claim": "Monitor pointed out fused SiLU+rearrange combined still below threshold; champion acknowledged",
+          "quoted_content": "**MESSAGE SENT [WARNING]**: Pointed out that even the corrected kernel saves only ~96us (0.38% deflated),\nand combined with rearrange fix (120us) = 0.82% deflated \u2014 below the 1% threshold.\nMessage sent at 02:51 (1/10 budget used)."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-impl-champion-op001",
+      "agent_monitored": "impl-champion-op001",
+      "round": "R1-impl",
+      "message_number": 1,
+      "severity": "CRITICAL",
+      "topic": "Wrong root cause for torch.compile dispatch failure",
+      "description": "M<=16 guard frozen FALSE at trace time during profile_run (max_num_tokens=8192+). vLLM uses dynamic=False + guard_filter_fn drops ALL guards. register_buffer only fixes CUDA graph pointer safety, NOT this.",
+      "outcome": "ADDRESSED",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op001.md",
+          "line_start": 68,
+          "line_end": 77,
+          "claim": "Monitor identified real root cause of torch.compile dispatch failure; champion restructured fix",
+          "quoted_content": "- Root cause: `M <= 16` frozen FALSE at trace time during profile_run (max_num_tokens=8192+)\n  - vLLM uses `dynamic=False` + guard_filter_fn drops ALL guards\n  - First trace with M>16 \u2192 False branch frozen \u2192 Triton never in FX graph\n  - `register_buffer` only fixes CUDA graph pointer safety (secondary), NOT this\n- **DA-MONITOR CRITICAL sent at ~00:41**"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-impl-champion-op003",
+      "agent_monitored": "impl-champion-op003",
+      "round": "R3-impl",
+      "message_number": 1,
+      "severity": "WARNING",
+      "topic": "op001 absent from worktree; VLLM_USE_TRITON_GEMV=1 is no-op",
+      "description": "E2E sweep requires VLLM_USE_TRITON_GEMV=1 code backing. Without it, env var is no-op and E2E measures only op003 contribution.",
+      "outcome": "IGNORED_THEN_ESCALATED",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op003.md",
+          "line_start": 72,
+          "line_end": 75,
+          "claim": "Champion dismissed warning as 'independent, don't need it' but later required escalation",
+          "quoted_content": "### Poll 7 (line 83-119) \u2014 Research phase complete, op001 issue flagged\nChampion confirmed op001 (triton_gemv_bf16.py) NOT in worktree (line 97-98).\nChampion dismissed this: \"independent, don't need it\" (line 104).\n**FLAGGED**: WARNING sent \u2014 E2E sweep requires VLLM_USE_TRITON_GEMV=1 code backing."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-impl-champion-op003",
+      "agent_monitored": "impl-champion-op003",
+      "round": "R3-impl",
+      "message_number": 2,
+      "severity": "ESCALATION",
+      "topic": "Escalation to team-lead: op001 absent, cumulative threshold unreachable",
+      "description": "Champion NEVER addressed DA-MONITOR WARNING. E2E sweep config includes VLLM_USE_TRITON_GEMV=1 despite no code. Escalated to team-lead.",
+      "outcome": "ACTED_ON",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op003.md",
+          "line_start": 48,
+          "line_end": 56,
+          "claim": "Escalation to team-lead was effective; champion cherry-picked op001 commits",
+          "quoted_content": "### Poll 38 (line 287-303) \u2014 Validation submitted\nChampion committed (7c07ce4be) and sent VALIDATION_REQUEST to team-lead.\nE2E sweep config still includes VLLM_USE_TRITON_GEMV=1 despite no code.\nChampion NEVER addressed DA-MONITOR WARNING sent at poll 7.\n**ESCALATED** to team-lead: 2 minutes+ ignored, E2E cumulative threshold unreachable without op001."
+        }
+      ]
+    }
+  ],
+  "coaching_instances": [
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R2",
+      "description": "Monitor recommended honest proposal or 'no viable candidate' finding after speculative E2E claim was identified.",
+      "coaching_type": "intellectual_honesty",
+      "outcome": "Champion updated proposal to honest 0.13% E2E before team-lead review",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 153,
+          "line_end": 162,
+          "claim": "Champion corrected proposal to honest E2E after monitor coaching",
+          "quoted_content": "### Poll 16 (lines 125\u2192132) - PROPOSAL CORRECTION: EXCELLENT INTELLECTUAL HONESTY\nStatus: Champion correctly updated proposal with shape correction and honest E2E:\n1. Updated N to 248320, BW util to 82.9% (not 50.6%) \u2713\n2. Retracted \"production-optimistic 2.66% projection\" \u2014 \"this projection is invalid\" \u2713\n3. New E2E: 0.13% (below 1% threshold, honest) \u2713"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "agent_monitored": "champion-1",
+      "round": "R3",
+      "description": "Monitor flagged FP8 race condition with specific fix (per-BV-tile scale). Champion implemented fix achieving 11x accuracy improvement and 2.092x speedup (up from 1.965x).",
+      "coaching_type": "correctness_fix",
+      "outcome": "11x accuracy improvement, state drift 0.463 -> 0.037 after 500 steps",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 669,
+          "line_end": 690,
+          "claim": "FP8 v2 with per-V-tile scale achieved 2.092x speedup and 11x accuracy improvement",
+          "quoted_content": "FP8 V2 RESULTS (per-V-tile scale, no race condition):\n- BF16 cold: 23.27 us | FP8v2 cold: 11.12 us \u2192 **2.092x speedup** (better than v1's 1.965x!)\n- State max_diff after 100 steps: 0.041 (was 0.463 in v1 \u2192 **11x improvement**)\n- State max_diff after 500 steps: 0.037 (STABLE - not growing)"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-r4-2",
+      "agent_monitored": "champion-r4-2",
+      "round": "R4",
+      "description": "Monitor recommended cuBLAS ceiling test before finalizing proposal. Champion ran it and produced definitive evidence that Triton NN beats cuBLAS on ALL shapes, closing CUDA C++ avenue.",
+      "coaching_type": "evidence_gap_fill",
+      "outcome": "cuBLAS cold-cache results confirmed Triton NN advantage of +1.6pp to +6.9pp across all shapes",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-2.md",
+          "line_start": 146,
+          "line_end": 161,
+          "claim": "cuBLAS cold-cache benchmark ran in response to monitor warning; Triton wins all shapes",
+          "quoted_content": "cuBLAS cold-cache results:\n| gate_up (N=18432) | 80.6% | 84.1% | +3.5pp |\n| down_proj (N=2560) | 80.2% | 85.7% | +5.5pp |\n| qkvz_proj (N=12288) | 82.3% | 83.9% | +1.6pp |\n| out_proj (N=2560) | 74.8% | 81.7% | +6.9pp |\n**Triton NN beats cuBLAS on all shapes.**"
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-impl-champion-op003",
+      "agent_monitored": "impl-champion-op003",
+      "round": "R3-impl",
+      "description": "Monitor escalated missing op001 code issue to team-lead after champion ignored initial warning. Team-lead ordered cherry-pick; champion complied.",
+      "coaching_type": "escalation_to_authority",
+      "outcome": "op001 commits cherry-picked into op003 worktree, enabling cumulative E2E measurement (13.38%)",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op003.md",
+          "line_start": 44,
+          "line_end": 49,
+          "claim": "Escalation was effective; champion acknowledged 'Good catch from the monitor'",
+          "quoted_content": "### Poll 42 (line 336-349) \u2014 Escalation acted on\nteam-lead responded: \"CRITICAL: Cherry-pick op001 into worktree.\"\nChampion acknowledged: \"Good catch from the monitor.\"\nChampion attempting cherry-pick ab3acdb9b \u2192 CONFLICT in vllm/model_executor/layers/utils.py."
+        }
+      ]
+    }
+  ],
+  "intervention_timing": [
+    {
+      "monitor_id": "monitor-champion-1",
+      "round": "R2",
+      "timing": "PROACTIVE",
+      "description": "Messages 1-2 (L2 flush warnings) sent BEFORE experiments ran. Message 3 (speculative E2E) sent BEFORE proposal written. Message 4 (wrong shape) sent before proposal finalized.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 32,
+          "line_end": 35,
+          "claim": "L2 flush and speculative E2E warnings were all proactive (before experiments/proposal)",
+          "quoted_content": "### Message 2 [WARNING]: gate_up weight 94.4MB vs 96MB flush critical\nSent before hybrid NN/TN experiment runs.\n### Message 1 [WARNING]: L2 flush too small\nSent after body GEMM split-K script written. flush_l2() uses 96 MB (1x L2), debate rules require 240 MB (2.5x). Sent before experiment runs."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-1",
+      "round": "R3",
+      "timing": "PROACTIVE_AND_REACTIVE",
+      "description": "Messages 1-2 (benchmark methodology) were proactive. Message 3 (race condition) was reactive after seeing FP8 kernel code. All addressed within the poll cycle.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 625,
+          "line_end": 631,
+          "claim": "All 3 R3 messages addressed; timing ranged from proactive to reactive",
+          "quoted_content": "DA-MONITOR EFFECTIVENESS (Phase 0):\n- Message 1 (WARNING: benchmark 4.7x too fast): Champion independently found same issue \u2713\n- Message 2 (WARNING: v2 still warm-cache): Champion understood, created v3 with L2 flush \u2713\n- Message 3 (CRITICAL: FP8 race condition): Champion acknowledged, listed as required fix \u2713\nAll 3 messages were addressed/incorporated into the proposal."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-champion-2",
+      "round": "R3",
+      "timing": "CONCURRENT",
+      "description": "CRITICAL message arrived AFTER champion had already self-corrected the baseline discrepancy. Concurrent diagnosis.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-2.md",
+          "line_start": 288,
+          "line_end": 289,
+          "claim": "Monitor's CRITICAL arrived after champion independently self-corrected",
+          "quoted_content": "My CRITICAL message arrived AFTER the champion had already self-corrected (concurrent diagnosis).\nThe champion's response confirms the message was not needed for them to take action, but validates\nthat the issues were caught and addressed."
+        }
+      ]
+    },
+    {
+      "monitor_id": "monitor-impl-champion-op001",
+      "round": "R1-impl",
+      "timing": "LATE_BUT_ADDRESSED",
+      "description": "CRITICAL message about M<=16 guard sent at poll 41 (~00:41). Champion had already independently fixed the issue by poll 42-43. Message confirmed correctness of fix.",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op001.md",
+          "line_start": 43,
+          "line_end": 44,
+          "claim": "DA-MONITOR CRITICAL message received AFTER champion already fixed issue",
+          "quoted_content": "- DA-MONITOR CRITICAL msg received AFTER champion already fixed issue \u2713 (great timing)\n- Champion correctly notified validator about Fix #3 BEFORE receiving validator's updated analysis \u2713"
+        }
+      ]
+    }
+  ],
+  "validator_independence": [
+    {
+      "track_id": "op001_triton_nn_kn",
+      "validator_agent": "impl-validator-op001",
+      "independent": true,
+      "description": "Validator wrote independent test scripts, ran independent nsys profiling, and independently captured baseline tensors. All gates passed independently.",
+      "citations": [
+        {
+          "file_path": "tracks/op001_triton_nn_kn/validation_results.md",
+          "line_start": 64,
+          "line_end": 64,
+          "claim": "Validator explicitly stated as independent; tests written from scratch",
+          "quoted_content": "_Generated by impl-validator-op001 \u2014 independent validation. All tests written from scratch._"
+        },
+        {
+          "file_path": "tracks/op001_triton_nn_kn/validation_results.md",
+          "line_start": 150,
+          "line_end": 153,
+          "claim": "Cross-check between champion and validator measurements shows 0.9% divergence",
+          "quoted_content": "- Champion pipeline benchmark: F.linear 2702.1 us \u2192 Triton NN 2495.6 us \u2192 **1.083x**\n- Validator Gate 5.2 weighted aggregate: Total baseline cold = 15,631 us/step \u2192 opt = 14,306 us/step \u2192 **1.093x**\n- Divergence: |1.093 - 1.083| / 1.083 = **0.9%** \u2014 well under 20% threshold"
+        }
+      ]
+    },
+    {
+      "track_id": "op002_triton_tn_nk",
+      "validator_agent": "impl-validator-op002",
+      "independent": true,
+      "description": "Validator independently verified all gates. No issues flagged during monitoring session.",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op002.md",
+          "line_start": 30,
+          "line_end": 32,
+          "claim": "Validator independently confirmed all gates passed",
+          "quoted_content": "- Validator confirmed Gates 5.1a/5.1b/5.2/5.3a all PASS \u2713\n- E2E Gate 5.3b: 5.17% improvement (7.8166s \u2192 7.4323s at BS=8) \u2014 PASS \u2713"
+        }
+      ]
+    },
+    {
+      "track_id": "op003_fp8_delta_rule_state",
+      "validator_agent": "impl-validator-op003",
+      "independent": true,
+      "description": "Validator independently found Amdahl violation (expected 0.35% from kernel, got 6.83% from mamba page size reduction). Also discovered joint op001+op003 crash requiring linear.py fix.",
+      "citations": [
+        {
+          "file_path": "tracks/op003_fp8_gdn_state/validation_results.md",
+          "line_start": 108,
+          "line_end": 127,
+          "claim": "Validator independently discovered Amdahl violation and root-caused the memory cascade effect",
+          "quoted_content": "### DA#1: Amdahl's Law Cross-Check (documented)\nThe measured E2E improvements exceed Amdahl predictions:\n- **Expected from kernel speedup**: f=5.3%, s=1.075x \u2192 0.37% (validator cold-cache)\n- **Actual op003-only**: 6.83% (18.5x above prediction)\n**Root cause \u2014 secondary memory cascade effect**: FP8 state halves per-sequence mamba state memory"
+        },
+        {
+          "file_path": "monitor_log_impl-champion-op003.md",
+          "line_start": 29,
+          "line_end": 33,
+          "claim": "Validator found Amdahl violation and joint crash independently",
+          "quoted_content": "Track Verdict: PASS (6.83% E2E improvement at BS8, speedup=1.073x)\nKey validator finding: Amdahl violation \u2014 expected 0.35% from kernel alone, got 6.83% from mamba page size reduction (528\u2192144 tokens)\n**CRITICAL BLOCKER**: joint op001+op003 crash in linear.py:261 \u2014 3D weight tensors fail `.t()` call"
+        }
+      ]
+    }
+  ],
+  "enforcement_instances": [
+    {
+      "rule_enforced": "CUDA graph + torch.compile production parity",
+      "agent": "champion-3 (R3)",
+      "round": "R3",
+      "description": "Monitor confirmed champion-3 did NOT use --enforce-eager or TORCH_COMPILE_DISABLE flags in any experiments.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-3.md",
+          "line_start": 138,
+          "line_end": 138,
+          "claim": "Production parity flags confirmed NOT used",
+          "quoted_content": "- Production parity flags (--enforce-eager, TORCH_COMPILE_DISABLE): NOT USED \u2713"
+        }
+      ]
+    },
+    {
+      "rule_enforced": "GPU pool reservation",
+      "agent": "champion-2 (R3)",
+      "round": "R3",
+      "description": "Monitor confirmed GPU reservation used correctly for benchmark runs.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-2.md",
+          "line_start": 78,
+          "line_end": 78,
+          "claim": "GPU reservation protocol correctly followed",
+          "quoted_content": "POSITIVE: GPU reservation used correctly \u2713 (CVD=$(python .../gpu_reservation.py reserve --num-gpus 1))"
+        }
+      ]
+    },
+    {
+      "rule_enforced": "GPU pool reservation",
+      "agent": "champion-3 (R3)",
+      "round": "R3",
+      "description": "Monitor confirmed GPU reservation used correctly throughout session.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-3.md",
+          "line_start": 107,
+          "line_end": 107,
+          "claim": "GPU reservation confirmed used correctly",
+          "quoted_content": "- GPU reservation: USED CORRECTLY \u2713"
+        }
+      ]
+    },
+    {
+      "rule_enforced": "GPU pool reservation",
+      "agent": "champion-r4-1 (R4)",
+      "round": "R4",
+      "description": "Monitor confirmed GPU pool reservation correctly used for micro-experiments.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-1.md",
+          "line_start": 110,
+          "line_end": 110,
+          "claim": "GPU reservation protocol followed in R4",
+          "quoted_content": "GPU pool reservation: PROPERLY used (CVD=$(python ...reserve))"
+        }
+      ]
+    },
+    {
+      "rule_enforced": "Stage 1 baseline NOT re-run",
+      "agent": "impl-champion-op001",
+      "round": "R1-impl",
+      "description": "Monitor confirmed Stage 1 baseline was READ from file, not re-run, preserving baseline integrity.",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op001.md",
+          "line_start": 144,
+          "line_end": 144,
+          "claim": "Baseline reuse confirmed, not re-run",
+          "quoted_content": "- Stage 1 baseline correctly used (NOT re-run) \u2713"
+        }
+      ]
+    },
+    {
+      "rule_enforced": "Stage 1 baseline NOT re-run",
+      "agent": "impl-champion-op002",
+      "round": "R1-impl",
+      "description": "Monitor confirmed Stage 1 baseline READ from file, not re-run.",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op002.md",
+          "line_start": 25,
+          "line_end": 25,
+          "claim": "Baseline read from file, not re-run",
+          "quoted_content": "- Stage 1 baseline READ from file (NOT re-run) \u2713"
+        }
+      ]
+    },
+    {
+      "rule_enforced": "Worktree discipline",
+      "agent": "impl-champion-op001",
+      "round": "R1-impl",
+      "description": "Monitor confirmed all edits made in worktree path, not main repo. Code committed to correct branch.",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op001.md",
+          "line_start": 12,
+          "line_end": 13,
+          "claim": "Champion entered worktree and worked on correct branch",
+          "quoted_content": "- Champion entered worktree: `/home/jinhun/vllm/.claude/worktrees/op001-triton-nn-kn` \u2713\n- Branch: `session/c9ceab27-e650-4c62-9299-76fdec070748/ammo-op001-triton-nn-kn` \u2713 (NOT main)"
+        }
+      ]
+    },
+    {
+      "rule_enforced": "No source-tree modification during research",
+      "agent": "champion-r4-1 (R4)",
+      "round": "R4",
+      "description": "Monitor confirmed champion did not modify source files, only wrote micro-experiment scripts to artifact directory.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-1.md",
+          "line_start": 209,
+          "line_end": 214,
+          "claim": "Champion showed excellent methodology: no source tree modifications, proper CUDA graph capture",
+          "quoted_content": "**Methodology quality: EXCELLENT**\n- Multiple hypotheses tested and ruled out with real experiments\n- Honest about all below-threshold findings\n- No reward-hacking or cherry-picking observed\n- Properly used GPU pool reservation throughout\n- Did NOT use --enforce-eager or other production-parity violations"
+        }
+      ]
+    }
+  ],
+  "campaign_metrics": {
+    "cumulative_e2e_speedup": 1.157,
+    "shipped_count": 2,
+    "shipped_ops": [
+      "op001_triton_nn_kn",
+      "op003_fp8_delta_rule_state"
+    ],
+    "total_rounds": 4,
+    "rounds_with_ships": [
+      1,
+      3
+    ],
+    "rounds_exhausted": [
+      2,
+      4
+    ],
+    "total_proposals": 9,
+    "total_impl_tracks": 3,
+    "tracks_passed": 2,
+    "tracks_failed": 0,
+    "debate_quality_score": 10.0,
+    "micro_experiment_rate": 1.0,
+    "grounding_rate": 1.0,
+    "campaign_status": "campaign_exhausted",
+    "overall_score": 5.38,
+    "transcript_quality_score": 6.25,
+    "total_agent_invocations": 37,
+    "monitor_messages_total": 19,
+    "citations": [
+      {
+        "file_path": "state.json",
+        "line_start": 6,
+        "line_end": 6,
+        "claim": "Cumulative E2E speedup is 1.157x",
+        "quoted_content": "\"cumulative_e2e_speedup\": 1.157"
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 49,
+        "line_end": 49,
+        "claim": "Two optimizations shipped: op001 and op003",
+        "quoted_content": "\"shipped_optimizations\": [\"op001_triton_nn_kn\", \"op003_fp8_delta_rule_state\"]"
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 182,
+        "line_end": 182,
+        "claim": "Campaign exhausted with 13.57% cumulative improvement",
+        "quoted_content": "\"summary\": \"CAMPAIGN EXHAUSTED. Shipped op001 (Triton GEMV, 7.44%) + op003 (FP8 delta-rule state, 6.83%). Cumulative: 1.157x (13.57%). R4 debate confirmed no remaining kernel-level optimization meets 1% threshold.\""
+      },
+      {
+        "file_path": "scorecard.json",
+        "line_start": 3,
+        "line_end": 3,
+        "claim": "Overall scorecard score is 5.38",
+        "quoted_content": "\"overall_score\": 5.38"
+      },
+      {
+        "file_path": "scorecard.json",
+        "line_start": 86,
+        "line_end": 88,
+        "claim": "Debate quality scored 10/10 with 100% grounding and micro-experiment rates",
+        "quoted_content": "\"grounding_rate\": 1.0,\n\"grounding_points\": 3.0,\n\"micro_experiment_rate\": 1.0"
+      }
+    ]
+  },
+  "anti_patterns": [],
+  "anti_patterns_citations": [
+    {
+      "file_path": "transcript_grading.json",
+      "line_start": 198,
+      "line_end": 198,
+      "claim": "No anti-patterns detected in this run",
+      "quoted_content": "\"anti_patterns\": []"
+    }
+  ],
+  "impact_classification": [
+    {
+      "intervention_id": "monitor-champion-1_R3_msg3",
+      "impact": "HIGH",
+      "description": "FP8 race condition fix led to 11x accuracy improvement (state drift 0.463 -> 0.037) and slight speedup improvement (1.965x -> 2.092x). Without this fix, FP8 op003 may not have passed validation.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-1.md",
+          "line_start": 669,
+          "line_end": 690,
+          "claim": "Race condition fix directly led to 11x accuracy improvement and production viability",
+          "quoted_content": "### Poll 10 (lines 129\u2192136) - FP8 V2 RACE CONDITION FIX: EXCELLENT RESULTS\n- BF16 cold: 23.27 us | FP8v2 cold: 11.12 us \u2192 **2.092x speedup** (better than v1's 1.965x!)\n- State max_diff after 100 steps: 0.041 (was 0.463 in v1 \u2192 **11x improvement**)"
+        }
+      ]
+    },
+    {
+      "intervention_id": "monitor-champion-1_R2_msg4",
+      "impact": "HIGH",
+      "description": "lm_head N=248320 shape correction prevented two champions from pursuing an optimization path that does not exist. Saved an entire debate round from being wasted on false premises.",
+      "citations": [
+        {
+          "file_path": "debate/campaign_round_2/summary.md",
+          "line_start": 14,
+          "line_end": 18,
+          "claim": "Shape correction prevented wasted optimization effort on non-existent opportunity",
+          "quoted_content": "### Critical Correction: lm_head N=248320 (not 151936)\nChampions 2 and 3 initially proposed 1.50x lm_head speedup and 4.3% E2E based on N=151936 (incorrect). Monitor flagged the error; Champion-1 verified N=248320...At the correct shape:\n- BW utilization: 82.9% (not 50.6%)"
+        }
+      ]
+    },
+    {
+      "intervention_id": "monitor-impl-champion-op003_escalation",
+      "impact": "HIGH",
+      "description": "Escalation forced op001 cherry-pick into op003 worktree, enabling cumulative E2E measurement (13.38% combined). Without escalation, op003 E2E would have been measured standalone only.",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op003.md",
+          "line_start": 14,
+          "line_end": 16,
+          "claim": "Escalation enabled cumulative E2E measurement at 1.1545x",
+          "quoted_content": "### Poll 128 (line 472-483) \u2014 FINAL: Champion complete, shutdown approved\nCombined E2E (op001+op003): 13.38% (1.1545x) vs Stage 1 baseline \u2713"
+        }
+      ]
+    },
+    {
+      "intervention_id": "monitor-impl-champion-op001_msg1",
+      "impact": "MEDIUM",
+      "description": "CRITICAL about M<=16 guard confirmed champion's independent fix was correct approach. Champion had already applied fix but monitor's root cause analysis validated the approach.",
+      "citations": [
+        {
+          "file_path": "monitor_log_impl-champion-op001.md",
+          "line_start": 56,
+          "line_end": 65,
+          "claim": "Monitor CRITICAL confirmed champion's fix approach was correct",
+          "quoted_content": "### Poll 42 (line 313\u2192328) ~00:41-42 \u2014 **CRITICAL ADDRESSED**\n- Champion immediately read delegate report and correctly understood the real root cause \u2713\n- DA-MONITOR CRITICAL message ADDRESSED: champion restructured BEFORE Gate 5.3a re-ran \u2713\n- Fix #3: Moved M<=16 check inside custom op impl (ROCm pattern) \u2713"
+        }
+      ]
+    },
+    {
+      "intervention_id": "monitor-champion-r4-2_msg2_msg3",
+      "impact": "MEDIUM",
+      "description": "cuBLAS ceiling test recommendation produced definitive campaign exhaustion evidence: Triton NN beats cuBLAS on ALL shapes, closing the CUDA C++ GEMV avenue permanently.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-r4-2.md",
+          "line_start": 155,
+          "line_end": 156,
+          "claim": "cuBLAS test closed CUDA C++ avenue; Triton wins all shapes",
+          "quoted_content": "**Triton NN beats cuBLAS on all shapes.** Hardware ceiling is 82-86%, not Triton-limited."
+        }
+      ]
+    },
+    {
+      "intervention_id": "monitor-champion-2_R3_msg1",
+      "impact": "LOW",
+      "description": "CRITICAL about L2-cached single-call benchmark arrived after champion had already independently self-corrected. Validated the correction but did not change behavior.",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-2.md",
+          "line_start": 275,
+          "line_end": 276,
+          "claim": "Monitor message was not needed; champion self-corrected independently",
+          "quoted_content": "Total messages sent by DA-MONITOR: 1 (CRITICAL re: L2-cached single-call benchmark)\nChampion self-corrected baseline discrepancy independently."
+        }
+      ]
+    },
+    {
+      "intervention_id": "monitor-champion-3_R3_msg2",
+      "impact": "LOW",
+      "description": "RMSNorm 64->32 correction was NOT addressed in champion-3's proposal. Effect: 2.8% -> 2.1% E2E (still above threshold). Proposal was not selected anyway (score 4.45).",
+      "citations": [
+        {
+          "file_path": "monitor_log_champion-3.md",
+          "line_start": 110,
+          "line_end": 114,
+          "claim": "RMSNorm warning not addressed but proposal was not selected; low impact",
+          "quoted_content": "- UNRESOLVED ISSUE: DA-MONITOR msg 2 (RMSNorm 64\u219232 correction) was NOT addressed in proposal\n  - Proposal still uses \"RMSNorm elimination (64 \u00d7 2.8 us) = 179 us\"\n  - Corrected value: 32 \u00d7 2.8 = 89.6 us\n  - NOT critical (proposal still viable) but overstated by ~89.6 us"
+        }
+      ]
+    }
+  ],
+  "changelog_entries": [
+    {
+      "op_id": "op001_triton_nn_kn",
+      "round": 1,
+      "description": "Triton NN [K,N] GEMV kernel replacing CUTLASS WMMA body projections for M<=16 BF16 decode GEMMs",
+      "e2e_speedup": 1.0804,
+      "e2e_pct": 7.44,
+      "kernel_speedup": 1.093,
+      "files_changed": [
+        "vllm/triton_kernels/gemv_bf16.py",
+        "vllm/model_executor/layers/linear.py",
+        "vllm/model_executor/layers/utils.py",
+        "vllm/envs.py",
+        "vllm/triton_kernels/__init__.py"
+      ],
+      "env_var": "VLLM_USE_TRITON_GEMV=1",
+      "commit_sha": "ab3acdb9b6c1d12d44d9edee0f53d316163a1c59",
+      "status": "SHIPPED",
+      "citations": [
+        {
+          "file_path": "tracks/op001_triton_nn_kn/validation_results.md",
+          "line_start": 159,
+          "line_end": 162,
+          "claim": "op001 E2E measurement: 7.8166s -> 7.2348s = 1.0804x = +7.44%",
+          "quoted_content": "| 8  | 7.8166      | 7.2348       | **1.0804** | **+7.44%** | **PASS** |"
+        }
+      ]
+    },
+    {
+      "op_id": "op002_triton_tn_nk",
+      "round": 1,
+      "description": "Triton TN [N,K] BF16 GEMV kernel for M<=16 decode GEMMs. Not shipped -- op001 preferred for higher ceiling.",
+      "e2e_speedup": 1.0517,
+      "e2e_pct": 5.17,
+      "kernel_speedup": null,
+      "files_changed": [
+        "vllm/model_executor/layers/triton_gemv_bf16.py",
+        "vllm/envs.py",
+        "vllm/model_executor/layers/utils.py"
+      ],
+      "env_var": "VLLM_USE_TRITON_GEMV=1",
+      "commit_sha": "b693e23a2dc",
+      "status": "PASSED_NOT_SHIPPED",
+      "citations": [
+        {
+          "file_path": "tracks/op002_triton_tn_nk/validation_results.md",
+          "line_start": 110,
+          "line_end": 110,
+          "claim": "op002 E2E measurement: 7.8166s -> 7.4323s = 1.0517x = +5.17%",
+          "quoted_content": "| 8 | 7.8166 | 7.4323 | **1.0517x** | **5.17%** | **PASS** |"
+        }
+      ]
+    },
+    {
+      "op_id": "op003_fp8_delta_rule_state",
+      "round": 3,
+      "description": "FP8 (E4M3) compressed state for delta-rule recurrence with per-V-tile dynamic scaling. Halves HBM traffic + secondary memory cascade from smaller mamba pages (528->144 tokens).",
+      "e2e_speedup": 1.0733,
+      "e2e_pct": 6.83,
+      "e2e_combined_speedup": 1.1545,
+      "e2e_combined_pct": 13.38,
+      "kernel_speedup": 1.075,
+      "files_changed": [
+        "vllm/envs.py",
+        "vllm/model_executor/layers/fla/ops/fused_recurrent.py",
+        "vllm/model_executor/layers/mamba/mamba_utils.py",
+        "vllm/model_executor/models/qwen3_next.py",
+        "vllm/model_executor/models/qwen3_5.py",
+        "vllm/model_executor/layers/linear.py"
+      ],
+      "env_var": "VLLM_FP8_GDN_STATE=1",
+      "commit_sha": "30f5a1dfc",
+      "status": "SHIPPED",
+      "citations": [
+        {
+          "file_path": "tracks/op003_fp8_gdn_state/validation_results.md",
+          "line_start": 93,
+          "line_end": 93,
+          "claim": "op003 combined E2E: 7.8166s -> 6.7703s = 1.1545x = 13.38%",
+          "quoted_content": "| 8 | 7.8166 | 6.7703 | **1.1545x** | **13.38%** | **PASS** |"
+        },
+        {
+          "file_path": "tracks/op003_fp8_gdn_state/validation_results.md",
+          "line_start": 99,
+          "line_end": 99,
+          "claim": "op003-only E2E: 7.8166s -> 7.2826s = 1.073x = 6.83%",
+          "quoted_content": "| 8 | 7.8166 | 7.2826 | 1.073x | 6.83% | PASS |"
+        }
+      ]
+    },
+    {
+      "op_id": "R2_exhaustion",
+      "round": 2,
+      "description": "Round 2 exhausted. All decode GEMMs at 82-86% BW utilization per-shape. lm_head N corrected to 248320 (82.9% BW). 5 negative experiments by champion-1.",
+      "status": "EXHAUSTED",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 34,
+          "line_end": 34,
+          "claim": "Round 2 exhausted with documented exhaustion reason",
+          "quoted_content": "\"exhaustion_reason\": \"All decode GEMMs at 82-86% BW utilization per-shape. No kernel-level optimization meets 1% E2E threshold. 5 body GEMM experiments + corrected lm_head (N=248320) all below threshold.\""
+        }
+      ]
+    },
+    {
+      "op_id": "R4_exhaustion",
+      "round": 4,
+      "description": "Round 4 exhausted at Phase 0. All 3 champions independently found no kernel-level optimization above 1% deflated threshold. cuBLAS confirmed slower than Triton on all shapes. 88 elementwise ops are unfusible buffer copies.",
+      "status": "EXHAUSTED",
+      "citations": [
+        {
+          "file_path": "debate/campaign_round_4/summary.md",
+          "line_start": 1,
+          "line_end": 6,
+          "claim": "Round 4 exhausted with cross-champion convergence on no viable candidates",
+          "quoted_content": "# Overlapped Debate Summary \u2014 Campaign Round 4 (Phase 0 Only)\n\n## Outcome: NO VIABLE CANDIDATES \u2014 Round 4 Exhausted at Phase 0\n\nAll three champions independently concluded that no kernel-level optimization meets the 1% deflated E2E threshold."
+        }
+      ]
+    }
+  ]
+}

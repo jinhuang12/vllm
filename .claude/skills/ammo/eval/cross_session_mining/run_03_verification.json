@@ -1,0 +1,233 @@
+{
+  "total": 35,
+  "passed": 30,
+  "failed": 5,
+  "failure_rate": 0.143,
+  "results": [
+    {
+      "file_path": "state.json",
+      "line_range": "4-4",
+      "claim": "Cumulative E2E speedup is 1.0156x after Round 1",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "23-23",
+      "claim": "One optimization (mla_gemv) was shipped in Round 1",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.46 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/mla_gemv/validation_results.md",
+      "line_range": "73-76",
+      "claim": "MLA q_b_proj optimization delivered -1.56% E2E improvement at BS=1",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/mla_gemv/validation_results.md",
+      "line_range": "24-29",
+      "claim": "Correctness verified as bitwise identical (max_abs_err = 0.0) across all tested M values",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/mla_gemv/validation_results.md",
+      "line_range": "9-10",
+      "claim": "Implementation was 91 lines in a single Python file (mla.py)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/moe_gemv/validation_results.md",
+      "line_range": "55-59",
+      "claim": "Pipeline benchmark showed only 1.20x speedup at BS=1, with BS=8 regression at 0.84x",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/moe_gemv/validation_results.md",
+      "line_range": "72-73",
+      "claim": "Root cause: modular GEMV requires 5+ separate kernel launches vs TRT-LLM single fused launch",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "7-8",
+      "claim": "Debate terminated early after 1 round because all positions were well-developed and no new evidence would emerge",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "44-57",
+      "claim": "Champion-3 scored highest (7.70) with strongest empirical evidence: 8.5x measured speedup under CUDA graph + cold-cache, lowest implementation risk (~250 LOC), and unique MLA target orthogonal to MoE proposals",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "64-68",
+      "claim": "Winner selection ranked Champion-3 first (7.70), Champion-2 second (6.65), Champion-1 third (5.80)",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_mla_projection_trace.md",
+      "line_range": "52-62",
+      "claim": "Delegate-3a confirmed kv_b_proj is absorbed in decode -- new information not in bottleneck_analysis.md",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_mla_projection_trace.md",
+      "line_range": "199-210",
+      "claim": "Delegate-3a identified mla.py:139 as the exact integration intercept",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.16 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_b200_specs.md",
+      "line_range": "13-16",
+      "claim": "Delegate-1a confirmed B200 L2 cache = 126 MB via live hardware query",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.23 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_moe_gemm_codepath.md",
+      "line_range": "96-105",
+      "claim": "Delegate-2a provided wrong BMM attribution (shared expert 'most likely') that champion-2 used without correction",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_moe_gemm_codepath.md",
+      "line_range": "108-112",
+      "claim": "Delegate-1a reported W2 per-rank shape as [256, 768, 2048] -- K and N are transposed vs the correct [256, 6144, 256]",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_argument.md",
+      "line_range": "143-147",
+      "claim": "Champion-1 claimed f_decode(BS=8) ~8-12% and E2E ~6.4-9.6% without any BS=8 measurement",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "70-73",
+      "claim": "Champion-1 conceded BS=8 estimates were speculative with no measurement basis",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "33-36",
+      "claim": "Champion-2 attributed FlashInfer BMM 18.8% to shared expert code path and built Target A on it",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_rebuttal.md",
+      "line_range": "3-11",
+      "claim": "Champion-2 conceded the code path misidentification in rebuttal after adversarial critique",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_argument.md",
+      "line_range": "149-152",
+      "claim": "Champion-1 claimed spin-wait compression could amplify E2E gain by 2x without any measurement data",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_rebuttal.md",
+      "line_range": "107-113",
+      "claim": "Champion-2's final revised E2E projection was 2.7-3.2% at BS=1",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/moe_gemv/validation_results.md",
+      "line_range": "83-88",
+      "claim": "Validator projected only 0.39% E2E improvement -- well below the 1.5% kill criterion",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_moe_act_quant_analysis.md",
+      "line_range": "90-97",
+      "claim": "Delegate-1a had confirmed TRTLLM-GEN IS fully fused during debate -- this info was available but not incorporated into E2E projections",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "5-6",
+      "claim": "Stage 2 profiling was BS=1 only -- only baseline_bs1_node.nsys-rep captured successfully",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.62 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "48-48",
+      "claim": "Round 2 debate team was named and configured but produced no results",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/moe_gemv/validation_results.md",
+      "line_range": "129-131",
+      "claim": "Primary failure reason: pipeline-level speedup (1.20x) insufficient to meet E2E kill criterion due to monolithic kernel fusion advantage",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "462-467",
+      "claim": "Lesson 2: Dispatch-level optimization can be more impactful than kernel replacement -- 91 lines delivered 1.56% E2E with zero correctness risk",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_rebuttal.md",
+      "line_range": "3-11",
+      "claim": "Adversarial debate forced champion-2 to concede code path misidentification",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "27-31",
+      "claim": "Champion-3 cited delegate-3a's finding and scoped target to q_b_proj only",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "451-457",
+      "claim": "Lesson 1: Monolithic kernel fusion trumps modular kernel speedup -- raw 2.44x GEMV became only 1.20x at pipeline level",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/mla_gemv/validation_results.md",
+      "line_range": "90-96",
+      "claim": "Amdahl's Law prediction validated within 1.14x of measured result on B200 hardware",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "10-11",
+      "claim": "Profiling under production parity: CUDA graphs (PIECEWISE) + torch.compile with norm_quant, act_quant fusions active",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "15-15",
+      "claim": "nsys trace captured 40,456 kernel instances across 8 TP ranks",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "46-46",
+      "claim": "Communication accounts for 83.2% of total GPU time, with 227.5 ms non-communication compute",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.43 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "env.json",
+      "line_range": "79-83",
+      "claim": "B200 hardware confirmed: sm_100 CC 10.0, 183359 MiB total memory, 1965 MHz max SM clock",
+      "verified": true
+    }
+  ]
+}

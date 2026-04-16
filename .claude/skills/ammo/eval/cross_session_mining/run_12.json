@@ -1,0 +1,427 @@
+{
+  "run_idx": 12,
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "intervention_inventory": [
+    {
+      "op_id": "op001",
+      "name": "Custom Triton GEMM for gate_up_proj",
+      "target_component": "GEMM (gate_up_proj)",
+      "f_decode_pct": 35.4,
+      "technique": "Autotuned Triton GEMM kernel with M-matched tiling, shape-gated dispatch for [M, 2560] x [2560, 18432] at M>=8",
+      "status": "FAILED",
+      "debate_score": 8.15,
+      "projected_e2e_bs32_pct": 2.8,
+      "actual_e2e_bs32_pct": 0.066,
+      "correctness": true,
+      "verdict": "FAIL",
+      "failure_reason": "Kernel speedup vanishes under production DRAM-bound conditions; L2-warm speedup (1.05-1.19x) does not translate to E2E",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 18,
+          "line_end": 23,
+          "claim": "OP-001 selected with status FAILED, reason: kernel speedup vanishes under DRAM-bound conditions",
+          "quoted_content": "\"op001\": {\"status\": \"FAILED\", \"reason\": \"Kernel speedup vanishes under DRAM-bound conditions\"}"
+        },
+        {
+          "file_path": "tracks/op001/validation_results.md",
+          "line_start": 1,
+          "line_end": 6,
+          "claim": "OP-001 overall determination is FAIL; numerically correct but does not meet E2E kill criteria",
+          "quoted_content": "# Validation Results: OP-001 -- Custom Triton GEMM for gate_up_proj\n\n## Overall Determination: FAIL\n\nThe implementation is numerically correct and torch.compile compatible, but does not meet the E2E kill criteria at any target batch size."
+        },
+        {
+          "file_path": "tracks/op001/validation_results.md",
+          "line_start": 66,
+          "line_end": 76,
+          "claim": "E2E results: BS=8 -0.052%, BS=32 +0.066%, both within noise and below kill criteria",
+          "quoted_content": "| 8  | 7.7388      | 7.7429  | -4.1       | -0.052%   | >= +1.0%       | NOISE   |\n| 32 | 10.2237     | 10.2170 | +6.8       | +0.066%   | >= +2.5%       | PASS    |"
+        }
+      ]
+    },
+    {
+      "op_id": "op002",
+      "name": "GDN Sub-Chain Fusion",
+      "target_component": "GDN decode path (conv1d_update + gdn_gating + fused_recurrent)",
+      "f_decode_pct": 15.5,
+      "technique": "Fuse 3-kernel decode sub-chain into single Triton kernel; inline conv1d (4-tap + SiLU), gating, L2norm, and recurrent delta rule",
+      "status": "FAILED",
+      "debate_score": 5.85,
+      "projected_e2e_bs32_pct": 1.05,
+      "actual_e2e_bs32_pct": -1.03,
+      "correctness": true,
+      "verdict": "FAIL",
+      "failure_reason": "Inter-program race condition on shared Q,K conv state forced Python-level scatter workaround; overhead exceeded fusion savings at all batch sizes",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 24,
+          "line_end": 28,
+          "claim": "OP-002 FAILED: fused kernel slower cold-cache, all BS regressed",
+          "quoted_content": "\"op002\": {\"status\": \"FAILED\", \"reason\": \"Fused kernel slower cold-cache, all BS regressed\"}"
+        },
+        {
+          "file_path": "tracks/op002/validation_results.md",
+          "line_start": 1,
+          "line_end": 6,
+          "claim": "OP-002 overall determination is FAIL; all batch sizes regressed",
+          "quoted_content": "# OP-002 GDN Sub-Chain Fusion -- Validation Results\n\n## Overall Determination: FAIL\n\nAll batch sizes regressed. No PASS at any BS. Kill criteria not met."
+        },
+        {
+          "file_path": "tracks/op002/validation_results.md",
+          "line_start": 69,
+          "line_end": 74,
+          "claim": "E2E sweep all regressed: BS=1 0.973x, BS=8 0.989x, BS=32 0.990x",
+          "quoted_content": "| 1  | 6.4935 | 6.6713 | +177.7 | 0.973x | **REGRESSED** |\n| 8  | 7.7388 | 7.8216 | +82.8 | 0.989x | **REGRESSED** |\n| 32 | 10.2237 | 10.3293 | +105.6 | 0.990x | **REGRESSED** |"
+        }
+      ]
+    },
+    {
+      "op_id": "op003",
+      "name": "GDN Sub-Chain Fusion (alternate)",
+      "target_component": "GDN decode path",
+      "f_decode_pct": 15.5,
+      "technique": "Same target as OP-002, alternate implementation approach",
+      "status": "ELIMINATED",
+      "debate_score": 4.9,
+      "projected_e2e_bs32_pct": 0.8,
+      "actual_e2e_bs32_pct": null,
+      "correctness": null,
+      "verdict": "ELIMINATED",
+      "failure_reason": "Below 5.0 debate threshold; conv_dim error (12288 vs 8192), no register measurement, progressive downward revisions",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 54,
+          "line_end": 55,
+          "claim": "Champion-3 scored 4.90, below 5.0 minimum threshold, FAIL",
+          "quoted_content": "| Minimum threshold (5.0) | Champion-1: 8.15 PASS, Champion-2: 5.85 PASS, Champion-3: 4.90 FAIL |"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 40,
+          "line_end": 44,
+          "claim": "Champion-3 feasibility evidence 4/10: no register measurement (est 200 vs actual 227), no prototype",
+          "quoted_content": "| Feasibility evidence | 25% | 4/10 | Tier 2: num_warps sweep. No register measurement (estimated 200, actual 227). No prototype."
+        }
+      ]
+    }
+  ],
+  "coaching": [],
+  "timing": {
+    "total_tracked_seconds": 8357,
+    "total_tracked_minutes": 139.3,
+    "campaign_duration_hours": 2.6,
+    "per_stage": {
+      "1_baseline": {
+        "seconds": 1312.6,
+        "minutes": 21.9
+      },
+      "3_debate": {
+        "seconds": 7044.4,
+        "minutes": 117.4
+      }
+    },
+    "stage_timestamps": {
+      "1_baseline_started": "2026-03-23T18:39:49.546016+00:00",
+      "1_baseline_completed": "2026-03-23T19:03:37.872689+00:00",
+      "3_debate_started": "2026-03-23T19:19:40.953966+00:00",
+      "3_debate_completed": "2026-03-23T20:09:40.907936+00:00",
+      "4_5_parallel_tracks_started": "2026-03-23T20:09:40.907936+00:00",
+      "4_5_parallel_tracks_completed": "2026-03-23T21:16:39.300723+00:00",
+      "7_campaign_eval_completed": "2026-03-23T21:16:53.874785+00:00"
+    },
+    "citations": [
+      {
+        "file_path": "state.json",
+        "line_start": 143,
+        "line_end": 166,
+        "claim": "Stage timestamps from state.json recording baseline through campaign_eval",
+        "quoted_content": "\"1_baseline\": {\"completed_at\": \"2026-03-23T19:03:37.872689+00:00\", \"started_at\": \"2026-03-23T18:39:49.546016+00:00\"}"
+      },
+      {
+        "file_path": "REPORT.md",
+        "line_start": 5,
+        "line_end": 6,
+        "claim": "Campaign duration approximately 2.6 hours from profiling through final evaluation",
+        "quoted_content": "**Duration**: ~2.6 hours (profiling through final evaluation)"
+      }
+    ]
+  },
+  "validator_independence": {
+    "op001_validator_independent": true,
+    "op002_validator_independent": true,
+    "validator_correctness_methodology": "Independent validator scripts at tracks/op{N}/validator_tests/; tested across BS=[1,8,32] with atol/rtol tolerances; modes include eager, CUDA graph capture+replay, NaN/INF adversarial, edge batches",
+    "citations": [
+      {
+        "file_path": "tracks/op001/validation_results.md",
+        "line_start": 38,
+        "line_end": 44,
+        "claim": "OP-001 validator ran independent tests: batch sizes [1,8,32], atol=0.01, rtol=0.01, bit-identical to cuBLAS",
+        "quoted_content": "Validator's independent tests (all at `tracks/op001/validator_tests/`):\n- Batch sizes: [1, 8, 32]\n- Tolerances: atol=0.01, rtol=0.01 (BF16)\n- Max absolute error: 0.00000 (bit-identical to cuBLAS)\n- Modes tested: eager, CUDA graph capture+replay, NaN/INF adversarial, edge batches"
+      },
+      {
+        "file_path": "tracks/op002/validation_results.md",
+        "line_start": 32,
+        "line_end": 45,
+        "claim": "OP-002 validator: 26/26 correctness tests passed including CUDA graph, multi-step, adversarial",
+        "quoted_content": "## Gate 5.1: Correctness -- PASS (26/26)\n\n**Validator script:** `tracks/op002/validator_tests/test_correctness.py`\n\n| Test | BS=1 | BS=8 | BS=32 |\n|------|------|------|-------|\n| attn_output (atol=1e-2) | PASS (0.003) | PASS (0.005) | PASS (0.008) |"
+      }
+    ]
+  },
+  "enforcement": {
+    "kill_criteria_defined": true,
+    "kill_criteria_enforced": true,
+    "op001_kill_criteria": "BS=32 >= +2.5%, BS=8 >= +1.0%, BS=1 no regression (>= -0.5%)",
+    "op001_kill_outcome": "FAIL (BS=32: +0.066% vs +2.5% required; BS=8: -0.052% vs +1.0% required)",
+    "op002_kill_criteria": "BS=32 >= +0.6%, BS=8/1 no regression (>= -0.5%)",
+    "op002_kill_outcome": "FAIL (BS=32: -1.02% vs +0.6% required; BS=8: -1.06%, BS=1: -2.66%)",
+    "e2e_deflation_factor": 2.0,
+    "catastrophic_regression_threshold_pct": 5.0,
+    "noise_tolerance_pct": 0.5,
+    "campaign_final_decision": "No candidates passed. Round EXHAUSTED.",
+    "citations": [
+      {
+        "file_path": "debate/summary.md",
+        "line_start": 61,
+        "line_end": 63,
+        "claim": "OP-001 kill criteria: >=2.5% at BS=32, >=1.0% at BS=8, no regression at BS=1",
+        "quoted_content": "- Kill criteria: >=2.5% at BS=32, >=1.0% at BS=8, no regression at BS=1"
+      },
+      {
+        "file_path": "tracks/op001/validation_results.md",
+        "line_start": 74,
+        "line_end": 76,
+        "claim": "OP-001 kill criteria FAIL: BS=32 +0.066% vs +2.5% required; BS=8 -0.052% vs +1.0% required",
+        "quoted_content": "Kill criteria: **FAIL** (BS=32: +0.066% vs +2.5% required; BS=8: -0.052% vs +1.0% required)"
+      },
+      {
+        "file_path": "tracks/op002/validation_results.md",
+        "line_start": 78,
+        "line_end": 84,
+        "claim": "OP-002 kill criteria: all FAIL, BS=32 -1.02% vs +0.6% required, BS=1 -2.66% vs -0.5% required",
+        "quoted_content": "| 32 | E2E improvement | >=+0.6% | -1.02% | **FAIL** |\n| 8  | No regression | >=-0.5% | -1.06% | **FAIL** |\n| 1  | No regression | >=-0.5% | -2.66% | **FAIL** |"
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 103,
+        "line_end": 105,
+        "claim": "Integration final decision: No candidates passed, Round EXHAUSTED",
+        "quoted_content": "\"final_decision\": \"No candidates passed. Round EXHAUSTED.\", \"passing_candidates\": [], \"status\": \"exhausted\""
+      }
+    ]
+  },
+  "campaign_metrics": {
+    "overall_score": 3.56,
+    "overall_score_without_transcript": 2.82,
+    "cumulative_e2e_speedup": 1.0,
+    "shipped_optimizations": 0,
+    "total_rounds": 1,
+    "total_proposals": 3,
+    "total_tracks": 2,
+    "tracks_passed": 0,
+    "tracks_failed": 2,
+    "campaign_status": "campaign_exhausted",
+    "dimension_scores": {
+      "e2e_outcome": {
+        "score": 0.0,
+        "weight": 0.4,
+        "contribution": 0.0
+      },
+      "gate_pass_rates": {
+        "score": 1.0,
+        "weight": 0.15,
+        "contribution": 0.15
+      },
+      "debate_quality": {
+        "score": 9.0,
+        "weight": 0.15,
+        "contribution": 1.35
+      },
+      "campaign_efficiency": {
+        "score": 6.0,
+        "weight": 0.15,
+        "contribution": 0.9
+      },
+      "transcript_quality": {
+        "score": 7.75,
+        "weight": 0.15,
+        "contribution": 1.162
+      }
+    },
+    "debate_metrics": {
+      "grounding_rate": 1.0,
+      "micro_experiment_rate": 1.0,
+      "filtering_correct": false,
+      "component_diversity": true
+    },
+    "agent_costs": {
+      "total_tokens": 206191,
+      "total_duration_ms": 1701903,
+      "total_agent_invocations": 13
+    },
+    "delegation": {
+      "enabled": true,
+      "delegates_per_champion": 1,
+      "total_delegates_spawned": 3,
+      "delegate_artifacts_count": 12,
+      "delegate_citation_rate": 0.333,
+      "causality_chains": 2,
+      "causality_bonus": 1.0
+    },
+    "baseline_e2e": {
+      "bs1_s": 6.4935,
+      "bs8_s": 7.7388,
+      "bs32_s": 10.2237
+    },
+    "citations": [
+      {
+        "file_path": "scorecard.json",
+        "line_start": 2,
+        "line_end": 4,
+        "claim": "Overall score 3.56, without transcript 2.82",
+        "quoted_content": "\"overall_score\": 3.56, \"overall_score_without_transcript\": 2.82"
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 5,
+        "line_end": 8,
+        "claim": "Cumulative speedup 1.0x, campaign status campaign_exhausted, 1 round completed",
+        "quoted_content": "\"cumulative_e2e_speedup\": 1.0, \"current_round\": 1, \"diminishing_returns_threshold_pct\": 0.5"
+      },
+      {
+        "file_path": "constraints.md",
+        "line_start": 99,
+        "line_end": 106,
+        "claim": "Baseline E2E latency: BS=1 6.4935s, BS=8 7.7388s, BS=32 10.2237s with <0.2% stdev",
+        "quoted_content": "| 1 | 6.4935 | 6493.5 | 12.68 | 0.18% |\n| 8 | 7.7388 | 7738.8 | 15.11 | 0.03% |\n| 32 | 10.2237 | 10223.7 | 19.97 | 0.05% |"
+      }
+    ]
+  },
+  "anti_patterns": [
+    {
+      "pattern": "cold_to_production_overestimation",
+      "description": "Champion-1 claimed 2.8-3.4% E2E improvement at BS=32 based on isolated cold-cache kernel speedups of 1.085-1.107x. Even after 2x deflation the expected floor was 1.4%, versus measured +0.066% (21x below deflated floor, 40x below raw projection). Root cause: gate_up_proj weight (90 MB) fits in L40S L2 cache (96 MB) in isolation, creating measurement artifact; production 8 GB working set evicts L2 entirely.",
+      "deduction": -1.0,
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 119,
+          "line_end": 123,
+          "claim": "Champion-1 projected 3.4% E2E at BS=32 from 1.107x isolated kernel speedup",
+          "quoted_content": "**BS=32**:\n- f_decode(gate_up_proj) = 35.4% (from bottleneck_analysis.md: ampere_bf16_64x128 at 6097 us / 17226 us)\n- kernel_speedup = 1.107x (measured cold-cache, Tier 2)\n- E2E = 0.354 x (1 - 1/1.107) = 0.354 x 0.0966 = **3.4%**"
+        },
+        {
+          "file_path": "tracks/op001/validation_results.md",
+          "line_start": 83,
+          "line_end": 88,
+          "claim": "Severe Amdahl violation ratio < 0.01; standalone benchmarks measured L2-warm performance not production DRAM-bound",
+          "quoted_content": "Severe Amdahl violation (ratio < 0.01 at both BS). The kernel speedup measured in standalone benchmarks does not translate to E2E. Root cause: standalone kernel benchmarks measured L2-warm performance"
+        },
+        {
+          "file_path": "tracks/op001/validation_results.md",
+          "line_start": 66,
+          "line_end": 76,
+          "claim": "Actual E2E: BS=32 +0.066%, BS=8 -0.052%, both noise-level",
+          "quoted_content": "| 8  | 7.7388      | 7.7429  | -4.1       | -0.052%   | >= +1.0%       | NOISE   |\n| 32 | 10.2237     | 10.2170 | +6.8       | +0.066%   | >= +2.5%       | PASS    |"
+        }
+      ]
+    }
+  ],
+  "impact_classification": {
+    "op001": {
+      "classification": "null_effect",
+      "kernel_speedup_standalone": "1.05-1.19x (L2-warm artifact)",
+      "e2e_speedup": "noise (0.066% at BS=32)",
+      "root_cause": "Both cuBLAS and Triton equally DRAM-bound (~640 GB/s) under production 8 GB working set; L2-warm tiling advantage disappears",
+      "citations": [
+        {
+          "file_path": "REPORT.md",
+          "line_start": 297,
+          "line_end": 298,
+          "claim": "OP-001 verdict: FAIL -- 5-19% kernel-level speedup does not translate to E2E; both equally DRAM-bound at ~640 GB/s",
+          "quoted_content": "**Verdict**: FAIL. The 5--19% kernel-level speedup measured in standalone benchmarks does not translate to end-to-end performance. Under production conditions with the full 8 GB model working set, both cuBLAS and Triton are equally DRAM-bound at ~640 GB/s."
+        }
+      ]
+    },
+    "op002": {
+      "classification": "regression",
+      "kernel_speedup_cold": "0.84-0.98x (regressed)",
+      "e2e_speedup": "-1.02% to -2.66% (regressed at all BS)",
+      "root_cause": "GVA architecture (HV=32 > H=16) creates inter-program race on shared Q,K conv state; Triton lacks grid-level barriers; Python scatter workaround overhead exceeds fusion savings",
+      "citations": [
+        {
+          "file_path": "tracks/op002/validation_results.md",
+          "line_start": 91,
+          "line_end": 102,
+          "claim": "Root cause: inter-program race condition on shared Q,K conv state forced Python-level scatter workaround whose overhead exceeds savings",
+          "quoted_content": "The regression is caused by the Python-level Q,K conv state update. The implementation was forced to move the Q,K conv state update out of the Triton kernel due to an inter-program race condition...Without a grid-level barrier in Triton (which doesn't exist), there is no way to safely update shared Q,K conv state"
+        }
+      ]
+    }
+  },
+  "changelog_entries": {
+    "shipped_changes": [],
+    "implementation_branches": [
+      {
+        "op_id": "op001",
+        "worktree": "op001-triton-gemm-gate-up",
+        "commits": [
+          "73321bd56",
+          "61396467f"
+        ],
+        "files_modified": [
+          "vllm/model_executor/layers/triton_gemm_gate_up.py (NEW)",
+          "vllm/model_executor/layers/utils.py",
+          "vllm/model_executor/layers/linear.py",
+          "vllm/envs.py"
+        ],
+        "merged": false,
+        "reason_not_merged": "E2E kill criteria not met; kernel speedup vanishes under production DRAM-bound conditions",
+        "citations": [
+          {
+            "file_path": "tracks/op001/validation_results.md",
+            "line_start": 9,
+            "line_end": 16,
+            "claim": "OP-001 files: new triton_gemm_gate_up.py, modified utils.py, linear.py, envs.py",
+            "quoted_content": "**Files modified**:\n- `vllm/model_executor/layers/triton_gemm_gate_up.py` (NEW -- Triton kernel + helpers)\n- `vllm/model_executor/layers/utils.py` (dispatch routing)\n- `vllm/model_executor/layers/linear.py` (weight pre-transposition)\n- `vllm/envs.py` (env var `VLLM_TRITON_GATE_UP_GEMM`)"
+          }
+        ]
+      },
+      {
+        "op_id": "op002",
+        "worktree": "op002-gdn-fusion",
+        "commits": [
+          "af73f9a42"
+        ],
+        "files_modified": [
+          "vllm/model_executor/layers/fla/ops/fused_gdn_decode.py (NEW)",
+          "vllm/model_executor/models/qwen3_next.py"
+        ],
+        "merged": false,
+        "reason_not_merged": "All batch sizes regressed; inter-program race condition workaround overhead exceeded fusion savings",
+        "citations": [
+          {
+            "file_path": "tracks/op002/validation_results.md",
+            "line_start": 10,
+            "line_end": 17,
+            "claim": "OP-002 files: new fused_gdn_decode.py, modified qwen3_next.py",
+            "quoted_content": "**Commit:** af73f9a42\n**Scope:** Fuse the 3-kernel GDN decode sub-chain...\n**Files changed:**\n- New: `vllm/model_executor/layers/fla/ops/fused_gdn_decode.py`\n- Modified: `vllm/model_executor/models/qwen3_next.py`"
+          }
+        ]
+      }
+    ],
+    "notes": "No optimizations shipped. Campaign exhausted after Round 1 with zero merged changes.",
+    "citations": [
+      {
+        "file_path": "state.json",
+        "line_start": 29,
+        "line_end": 31,
+        "claim": "shipped_optimizations is empty; campaign status is campaign_exhausted",
+        "quoted_content": "\"shipped\": [], \"cumulative_speedup_after\": 1.0"
+      }
+    ]
+  }
+}

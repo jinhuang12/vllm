@@ -1,0 +1,275 @@
+{
+  "total": 41,
+  "passed": 34,
+  "failed": 7,
+  "failure_rate": 0.171,
+  "results": [
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "117-137",
+      "claim": "Validator independently ran co-located baseline comparison revealing Stage 1 numbers were misleading due to systematic drift",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.61 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "155-166",
+      "claim": "Validator produced independent root cause analysis for kernel-to-E2E translation failure",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "92-115",
+      "claim": "Validator independently confirmed optimization was executing under production parity",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "46-67",
+      "claim": "Validator independently tested 48 shapes across 6 GEMMs and 8 M values against cuBLAS baseline",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "57-91",
+      "claim": "Campaign completed 1 round, shipped OP-003 with 1.06x cumulative speedup, OP-002 failed",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "60-72",
+      "claim": "Round 2 candidates parked below 3% diminishing returns threshold",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "224-225",
+      "claim": "Campaign summary with cumulative speedup and termination rationale",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "145-147",
+      "claim": "Hardware: 1x NVIDIA L40S, 45 GiB",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "52-56",
+      "claim": "Champion-1 dismissed Triton based on single flawed experiment",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "11-11",
+      "claim": "GEMM at 88.6% f_decode is dominant component",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-3_critique_champion-1.md",
+      "line_range": "28-35",
+      "claim": "BLOCK_M=16 error was the sole cause; Champion-3 disproved it experimentally",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "9-18",
+      "claim": "Champion-1 conceded error in rebuttal",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "185-194",
+      "claim": "state.json claims +6.02% at BS=8",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.69 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "e2e_latency/json/baseline_bs8.json",
+      "line_range": "2-2",
+      "claim": "Stage 1 baseline BS=8 is 7.7976s",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_op003/json/opt_bs8.json",
+      "line_range": "2-2",
+      "claim": "Optimized BS=8 is 7.4242s; actual = 4.79%, not 6.02%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "133-135",
+      "claim": "Kill criterion explicitly forbids BS=1 regression",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.35 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "e2e_latency_op003/json/baseline_bs1.json",
+      "line_range": "2-2",
+      "claim": "Co-located BS=1 baseline is 6.4917s",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_op003/json/opt_bs1.json",
+      "line_range": "2-2",
+      "claim": "Optimized BS=1=6.6620s -- 2.63% regression",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "3-9",
+      "claim": "First researcher killed for running opt sweep unnecessarily",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "17-35",
+      "claim": "All three champions expired before rebuttal",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.65 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_gemm_research.md",
+      "line_range": "164-166",
+      "claim": "delegate-1a reported wrong dimensions",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_dimension_verification.md",
+      "line_range": "9-13",
+      "claim": "Corrective report needed: class defaults vs actual config",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_gemm_kernel_trace.md",
+      "line_range": "83-93",
+      "claim": "Delegate confirmed fusion feasibility with correct K=2560 dimensions",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.69 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_gdn_research.md",
+      "line_range": "52-58",
+      "claim": "Delegate provided runtime parameters not in bottleneck_analysis.md",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.63 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_dimension_verification.md",
+      "line_range": "9-13",
+      "claim": "Corrective report needed due to class defaults error",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_argument.md",
+      "line_range": "96-100",
+      "claim": "Champion-1 published BLOCK_M=16 as structural argument",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "9-18",
+      "claim": "Champion-1 retracted in rebuttal",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "37-42",
+      "claim": "Champion-2 selected as complementary due to disjoint target",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "48-54",
+      "claim": "Data conflict resolved through methodology disclosure",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_op003/json/opt_bs1.json",
+      "line_range": "2-2",
+      "claim": "Optimized BS=1=6.6620s -- 2.63% regression",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_op003/json/opt_bs4.json",
+      "line_range": "2-2",
+      "claim": "Optimized BS=4 is 7.0128s; actual = 4.87%, not 6.14%",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_op003/json/opt_bs8.json",
+      "line_range": "2-2",
+      "claim": "Optimized BS=8 is 7.4242s; actual = 4.79%, not 6.02%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "1-10",
+      "claim": "OP-002 failed: 1.64x kernel speedup but zero E2E benefit",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "139-149",
+      "claim": "Co-located baseline shows zero E2E benefit across tested batch sizes",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.64 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "155-166",
+      "claim": "Root cause: L2 cache effects, custom-op boundary overhead, ba_weight transpose",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "9-18",
+      "claim": "Champion-1 conceded BLOCK_M error after experimental disproof",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_gemm_kernel_trace.md",
+      "line_range": "83-93",
+      "claim": "Delegate-3a confirmed fusion feasibility",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "185-194",
+      "claim": "state.json claims +6.02% but actual is +4.79%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "155-166",
+      "claim": "1.64x kernel speedup but zero E2E benefit due to L2 cache effects",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "130-137",
+      "claim": "Stage 1 shows 0.5-1.0% drift, larger than claimed optimization effect",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "60-72",
+      "claim": "Round 2 candidates below threshold",
+      "verified": true
+    }
+  ]
+}

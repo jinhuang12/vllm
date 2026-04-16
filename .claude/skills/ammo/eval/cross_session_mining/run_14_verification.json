@@ -1,0 +1,308 @@
+{
+  "total": 45,
+  "passed": 35,
+  "failed": 10,
+  "failure_rate": 0.222,
+  "results": [
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "88-92",
+      "claim": "GEMM rows 1-3 combined are 67.3% f_decode at BS=32, all ranked higher than GDN recurrent at rank 4",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "152-158",
+      "claim": "GEMM BW utilization at BS=32 is 54-65%, well below 85% threshold indicating real unoptimized headroom",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "101-103",
+      "claim": "Debate summary dismissed GEMM as non-optimizable citing only champion-1's single thin-GEMM experiment",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "1-7",
+      "claim": "Champion-2 proposal targets only GDN recurrent kernel, no GEMM micro-experiment included",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "1-8",
+      "claim": "Champion-3 proposal also targets only GDN recurrent, zero GEMM experiments",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "123-125",
+      "claim": "Champion-1 extrapolated from 4 BW-bound shapes to claim GEMM is non-optimizable for all cases",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "116-122",
+      "claim": "Champion-1's thin-GEMM benchmark tested only 4 shapes showing cuBLAS ahead by 14-15%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_argument.md",
+      "line_range": "100-105",
+      "claim": "Champion-2 applied cold-cache 2.04x directly to get 7.0% E2E without production discount",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_argument.md",
+      "line_range": "4-5",
+      "claim": "Champion-2 argument labeled 5.9% as conservative and 6.9% as moderate E2E",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "136-141",
+      "claim": "Original proposal labeled conservative estimate as 4.6% (1.5x speedup), not 5.9%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "88-89",
+      "claim": "Debate judges corrected champion-2's E2E from 4.6-6.0% to 2.8-4.6%",
+      "verified": true
+    },
+    {
+      "file_path": "constraints.md",
+      "line_range": "78-80",
+      "claim": "constraints.md states GDN recurrent state uses FP32 accumulation, leading to misinterpretation as FP32 storage",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op002_bf16_state/validation_results.md",
+      "line_range": "5-5",
+      "claim": "op002 validation found the BF16 state optimization is already active by default in vLLM",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002_bf16_state/validation_results.md",
+      "line_range": "55-57",
+      "claim": "op002 clarified 'FP32 accumulation' in constraints.md meant compute precision, not storage dtype",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "80-86",
+      "claim": "Champion-2 reported cosine similarity 0.999986 at decay 0.95 using the wrong recurrence formula",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_critique_champion-2.md",
+      "line_range": "36-44",
+      "claim": "Champion-1 showed the actual formula includes S@k feedback, making champion-2's precision test invalid",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.33 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "38-47",
+      "claim": "Running the correct formula produced 3/5 divergences at steps 157-329",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.12 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/round_1/champion-2_argument.md",
+      "line_range": "4-5",
+      "claim": "Champion-2 argument claims 5.9% conservative and 6.9% moderate E2E at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "136-141",
+      "claim": "Original proposal used 4.6% as conservative (1.5x) and 6.0% as moderate (1.75x)",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "88-89",
+      "claim": "Judges corrected range to 2.8-4.6%, rejecting champion-2's inflated figures",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "15-16",
+      "claim": "SMEM single-buffered at 64KB because double-buffering 128KB exceeds L40S 100KB/SM limit",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "63-69",
+      "claim": "SMEM CTA kernel regressed at BS=32: 0.533x warm, 0.939x cold",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "100-102",
+      "claim": "Best Triton config achieves only 1.034x production speedup, below 1.1x kill criterion",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "38-50",
+      "claim": "Kernel correctness passed: state max diff 7.15e-07 across all batch sizes",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002_bf16_state/validation_results.md",
+      "line_range": "26-32",
+      "claim": "Default config resolution shows mamba_ssm_cache_dtype='auto' resolves to BF16 for BF16 models",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002_bf16_state/validation_results.md",
+      "line_range": "42-45",
+      "claim": "Stage 1 baseline command used no --mamba-ssm-cache-dtype flag, so default 'auto' = BF16 was used",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002_bf16_state/validation_results.md",
+      "line_range": "87-93",
+      "claim": "Benchmark confirmed FP32 vs BF16 cold speedup is 1.95x at BS=32 but already captured in baseline",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_rival_analysis.md",
+      "line_range": "5-8",
+      "claim": "Delegate-3a described champion-1 as Triton Skinny-M GEMM, not the actual CUDA C++ GDN rewrite",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.09 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_rival_analysis.md",
+      "line_range": "85-89",
+      "claim": "Delegate-3a described champion-2 as CUTLASS CuTe fused decode, not the actual BF16 state Triton modification",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.68 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "205-212",
+      "claim": "Champion-3's references section does not cite delegate-3a's rival analysis, confirming it was unused",
+      "verified": false,
+      "errors": [
+        "line_range_exceeds_file: 205-212 but file has 211 lines"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_gdn_kernel_analysis.md",
+      "line_range": "42-55",
+      "claim": "Delegate-1a documented grid=(1,4,1024), BV=32, num_warps=1, state = [BS,32,128,128] FP32",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.30 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_gdn_kernel_analysis.md",
+      "line_range": "40-52",
+      "claim": "Delegate-2a documented the same grid configuration, state shape, and kernel parameters",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_gdn_kernel_analysis.md",
+      "line_range": "129-136",
+      "claim": "Delegate-1a provided BW floor estimates not found in bottleneck_analysis.md",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "46-48",
+      "claim": "Champion-1 cited delegate-1a for roofline calculation in proposal",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "77-92",
+      "claim": "All 9 configs converge to ~212-216us cold, confirming 73% peak BW ceiling is invariant",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "76-82",
+      "claim": "BV sweep shows all working configs converge to ~630 GB/s cold BW (73% peak)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.16 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "58-63",
+      "claim": "Warm/cold ratio is 5.24x at BS=32 under CUDA graph capture",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.24 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "111-111",
+      "claim": "Campaign summary claims both GDN and GEMM are proven non-optimizable",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "15-17",
+      "claim": "op001 failed: SMEM budget exceeded, cold BW ceiling at 73%, best E2E 0.7%",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "18-18",
+      "claim": "op002 failed: optimization already deployed as vLLM default",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.10 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "11-24",
+      "claim": "Debate scoring rubric shows all champions provided grounded proposals with micro-experiments",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "96-103",
+      "claim": "Debate identified 5 key findings including cold BW ceiling, L2 lever, GEMM non-viability",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "7-9",
+      "claim": "Model is firmly in BW-bound regime at all batch sizes",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "22-27",
+      "claim": "E2E baseline measurements: 6.546s (BS=1), 7.836s (BS=8), 10.266s (BS=32)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "172-173",
+      "claim": "op001 validation recommends targeting GEMM at 67.3% over GDN at 13.8%",
+      "verified": true
+    }
+  ]
+}

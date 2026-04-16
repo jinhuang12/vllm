@@ -1,0 +1,596 @@
+{
+  "run_idx": 7,
+  "slug": "6da5e40a0_qwen35-4b-bf16-tp1-on-l40s-r7-tiered-evi",
+  "run_dir": "/home/jinhun/.claude/ammo-eval/versions/6da5e40a0_qwen35-4b-bf16-tp1-on-l40s-r7-tiered-evi/runs/qwen3-5-4b_l40s_bf16_tp1/run_1",
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "skill_version": "6da5e40a",
+  "has_monitor_logs": false,
+
+  "interventions": [],
+
+  "coaching_instances": [],
+
+  "intervention_timing": [],
+
+  "validator_independence": [
+    {
+      "track_id": "fused_gdn_decode",
+      "evidence_type": "independent_kernel_benchmark_with_cold_cache",
+      "summary": "Validator independently benchmarked the fused GDN decode kernel under CUDA graphs with 240MB L2 flush, producing authoritative cold-cache speedups (1.01-1.28x) that correctly predicted near-zero E2E improvement. Validator's 99.83us BS=32 baseline measurement matched nsys production trace (99.7us), while champion's 38.97us measurement was artificially fast due to small N_slots allowing L2 caching.",
+      "citation": {
+        "file_path": "tracks/fused_gdn_decode/validation_results.md",
+        "line_start": 42,
+        "line_end": 63,
+        "claim": "Validator independently benchmarked with L2 flush revealing champion BS=32 measurement was 156% divergent due to artificial L2 caching",
+        "quoted_content": "| 1  | 6.58 | 3.88 | 1.70x | 14.36 | 11.21 | 1.28x |\n| 8  | 14.61 | 12.73 | 1.15x | 46.40 | 45.88 | 1.01x |\n| 32 | 99.83 | 65.89 | 1.52x | 202.45 | 200.62 | 1.01x |\n...BS=32 divergence resolution: Champion used N_slots=BS+16=48, where 64MB active state partially fits in L2 (48MB usable). Validator used production-representative state sizing."
+      }
+    },
+    {
+      "track_id": "fused_gdn_decode",
+      "evidence_type": "independent_correctness_with_boundary_tests",
+      "summary": "Validator independently ran correctness tests (not shared with champion) including softplus boundary tests at a=19.9, 20.0, 20.1, -5.0, 100.0. All passed with output errors 1.2-2.4e-4 and state errors 1.5-2.5e-3, within tolerances.",
+      "citation": {
+        "file_path": "tracks/fused_gdn_decode/validation_results.md",
+        "line_start": 26,
+        "line_end": 37,
+        "claim": "Validator ran independent correctness tests with softplus boundary cases not shared with champion",
+        "quoted_content": "| 1  | 1.221e-04      | 1.463e-03     | —          | PASS    | PASS   |\n| 8  | 2.441e-04      | 1.782e-03     | PASS       | PASS    | PASS   |\n| 32 | 2.441e-04      | 2.483e-03     | —          | PASS    | PASS   |\n\n- Tolerances: output atol=1e-2, state atol=5e-3\n- Softplus boundary tests (a=19.9, 20.0, 20.1, -5.0, 100.0): all PASS"
+      }
+    },
+    {
+      "track_id": "fused_gdn_decode",
+      "evidence_type": "amdahl_coherence_cross_check",
+      "summary": "Validator independently verified kernel-to-E2E coherence by computing cold-cache Amdahl projections (f_decode * cold speedup) and confirming they correctly predicted the near-zero E2E results at all batch sizes.",
+      "citation": {
+        "file_path": "tracks/fused_gdn_decode/validation_results.md",
+        "line_start": 81,
+        "line_end": 89,
+        "claim": "Validator verified Amdahl coherence: cold projections correctly predict near-zero E2E within noise",
+        "quoted_content": "| 1  | 1.56% | 1.28x | 0.34% | -0.058% | Noise (3.8ms / 6490ms) |\n| 8  | 5.20% | 1.01x | 0.05% | +0.046% | YES |\n| 32 | 4.10% | 1.01x | 0.04% | -0.031% | Noise (3.2ms / 10219ms) |\n\nKernel-to-E2E coherence: PASS."
+      }
+    }
+  ],
+
+  "enforcement_instances": [],
+
+  "campaign_metrics": {
+    "total_rounds": 1,
+    "tracks_shipped": 0,
+    "tracks_failed": 0,
+    "shipped_optimization_ids": [],
+    "failed_optimization_ids": [],
+    "cumulative_speedup": 1.0,
+    "campaign_status": "campaign_exhausted",
+    "termination_reason": "All three champions independently concluded no kernel optimization can yield >1% E2E on Qwen3.5-4B / L40S / BF16 / TP=1. Best achieved: 1.7x kernel speedup on SSM recurrence yielding 0.046% E2E.",
+    "technology_classes": [
+      "Triton kernel fusion (fused GDN gating + recurrence)",
+      "Triton kernel fusion (fused l2norm + gate, withdrawn)",
+      "Custom Triton SiLU+Mul (eliminated, wrong baseline)"
+    ],
+    "debate_proposals": 3,
+    "debate_winners": 1,
+    "debate_quality_score": 10.0,
+    "overall_score": 4.12,
+    "transcript_quality_score": 6.5,
+    "total_agent_tokens": 70047,
+    "total_agent_invocations": 10,
+    "total_tracked_time_seconds": 5547.3,
+    "top_bottleneck_share_pct": 92.1,
+    "citations": [
+      {
+        "file_path": "state.json",
+        "line_start": 6,
+        "line_end": 24,
+        "claim": "Campaign exhausted after 1 round with 0 shipped optimizations, cumulative speedup 1.0x",
+        "quoted_content": "\"cumulative_e2e_speedup\": 1.0,\n    \"current_round\": 1,\n    ...\"shipped_optimizations\": [],\n    \"status\": \"campaign_exhausted\""
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 104,
+        "line_end": 104,
+        "claim": "Campaign summary: model operates at ~80% theoretical BW limit with no kernel path to >1% E2E",
+        "quoted_content": "\"summary\": \"CAMPAIGN EXHAUSTED. Qwen3.5-4B on L40S BF16 TP=1 operates at ~80% theoretical BW limit. No kernel optimization can yield >1% E2E. cuBLAS near-optimal (73-93% BW util), torch.compile near-optimal for elementwise ops, SSM decode chain too small (4.1% f).\""
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 47,
+        "line_end": 50,
+        "claim": "Hardware: 1x NVIDIA L40S, 45 GiB",
+        "quoted_content": "\"cuda_visible_devices\": \"0\",\n    \"gpu_count\": 1,\n    \"gpu_model\": \"NVIDIA L40S\",\n    \"memory_total_gib\": 45"
+      },
+      {
+        "file_path": "debate/summary.md",
+        "line_start": 57,
+        "line_end": 58,
+        "claim": "Solo winner fused_gdn_decode scored 5.25/10 with 0.30-0.59% E2E projection",
+        "quoted_content": "| 1 | champion-2 | fused_gdn_decode | 5.25 | 0.30-0.59% | Yes (strongest at BS=1) |"
+      }
+    ]
+  },
+
+  "anti_patterns": [
+    {
+      "pattern": "near_optimal_framing_trap",
+      "description": "bottleneck_analysis.md declares 'NO red flags detected. All GEMM kernels show healthy DRAM BW utilization (73-93% of L40S peak)' despite the BS=32 ampere_64x128 kernel achieving only 73% BW utilization -- below the 85% threshold in the rubric. All three champions treated GEMM at BS=32 as not worth optimizing based partly on this framing. Partial deduction because champion-1 ran independent Tier 2 micro-experiments (GEMV shapes) providing genuine empirical grounding for GEMM avoidance at BS=1, but the specific 73% BW CUTLASS kernels at BS=32 were never directly evaluated.",
+      "deduction": -0.5,
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 194,
+          "line_end": 195,
+          "claim": "ampere_64x128 kernel at BS=32 achieves 73% BW utilization, below the 85% near-optimal threshold",
+          "quoted_content": "| ampere_64x128 (gate_up/qkvz) | 633 | 73% | 8.3% | (288,1,1) |\n| ampere_128x64 (down/o_proj) | 748 | 87% | 8.3% | (96,1,1) |"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 212,
+          "line_end": 212,
+          "claim": "bottleneck_analysis.md uses 'NO red flags detected' framing covering the 73% BW component at BS=32",
+          "quoted_content": "**NO red flags detected.** All GEMM kernels show healthy DRAM BW utilization (73-93% of L40S peak 864 GB/s). The 8.33% SM occupancy at BS=32 is expected for BW-bound operations at small M and does not indicate a dispatch bug or pathological baseline."
+        },
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 147,
+          "line_end": 148,
+          "claim": "Champion-1 dismisses GEMM as near-optimal based on experiments at BS=1 gemvx shapes only, not the BS=32 CUTLASS kernels at 73% BW",
+          "quoted_content": "1. **GEMM (71.5-92.1% of decode)**: cuBLAS gemvx achieves 79-93% of L40S peak DRAM BW. Custom Triton GEMV was 14-55% slower in cold-cache pipeline tests. cuBLAS is near-optimal."
+        }
+      ]
+    },
+    {
+      "pattern": "wasted_retries",
+      "description": "The same --output-len 3 --num-iters 1 error occurred twice (2026-03-23 and 2026-03-24) in baseline E2E sweeps, producing invalid latency data that was discarded and re-run each time. The constraint spec (constraints.md) clearly requires output_len=512, num_iters=5. The repeat suggests no fix was applied after the first occurrence.",
+      "deduction": -1.0,
+      "citations": [
+        {
+          "file_path": "e2e_latency_2026-03-23T203809Z/logs/baseline_bs1.log",
+          "line_start": 2,
+          "line_end": 2,
+          "claim": "First baseline sweep used wrong --output-len 3 --num-iters 1 flags",
+          "quoted_content": "vllm bench latency --model Qwen/Qwen3.5-4B --tensor-parallel-size 1 --max-model-len 4096 --input-len 64 --output-len 3 --batch-size 1 --num-iters 1 --output-json /home/jinhun/vllm/kernel_opt_artifacts/Qwen3.5-4B_L40S_BF16_tp1/e2e_latency/json/baseline_bs1.json"
+        },
+        {
+          "file_path": "e2e_latency_2026-03-24T150534Z/logs/baseline_bs1.log",
+          "line_start": 2,
+          "line_end": 2,
+          "claim": "Second invalid baseline run on 2026-03-24 again used wrong --output-len 3 --num-iters 1 flags",
+          "quoted_content": "vllm bench latency --model Qwen/Qwen3.5-4B --tensor-parallel-size 1 --max-model-len 4096 --input-len 64 --output-len 3 --batch-size 1 --num-iters 1 --output-json /home/jinhun/vllm/kernel_opt_artifacts/Qwen3.5-4B_L40S_BF16_tp1/e2e_latency/json/baseline_bs1.json"
+        }
+      ]
+    },
+    {
+      "pattern": "hallucinated_data",
+      "description": "Two hallucinations: (1) Champion-2 claimed SSM decode-only f_decode ~2.5% at BS=1 attributed to delegate analysis; correct value is 1.56% derived from champion-2's own benchmark data (24 layers x 6.55us = 157.2us / 10,100us = 1.56%). (2) Champion-3 fabricated 0.38% BS=1 E2E for champion-1's proposal; the correct values are 0.30% (pre-concession) or 0.06% (post-concession).",
+      "deduction": -2.0,
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-2_proposal.md",
+          "line_start": 29,
+          "line_end": 29,
+          "claim": "Champion-2 claims SSM decode-only gating+recurrent is ~2.5% at BS=1 with no delegate citation supporting this number",
+          "quoted_content": "| SSM decode-only (gating + recurrent) | ~2.5% | ~5.5% | ~3.3% | Delegate analysis: prefill chunk/gather/scatter excluded |"
+        },
+        {
+          "file_path": "debate/round_2/champion-2_argument.md",
+          "line_start": 7,
+          "line_end": 9,
+          "claim": "Champion-2 accepts the corrected 1.56% f_decode at BS=1 in Round 2, confirming the 2.5% was wrong",
+          "quoted_content": "| 1 | 1.56% | 1.61x (nw=4) | **0.59%** |"
+        },
+        {
+          "file_path": "debate/round_2/champion-3_argument.md",
+          "line_start": 31,
+          "line_end": 31,
+          "claim": "Champion-3's Round 2 portfolio table claims champion-1 projects 0.38% E2E at BS=1, a fabricated number",
+          "quoted_content": "| Champion-1 (l2norm+gate) | SSM output normalization | 0.38% | ~0.2% | 0.06-0.32% |"
+        },
+        {
+          "file_path": "debate/round_2/champion-1_argument.md",
+          "line_start": 6,
+          "line_end": 9,
+          "claim": "Champion-1's own Round 2 argument states the corrected E2E is 0.06%, not 0.38%",
+          "quoted_content": "**My proposal (fused l2norm + RMSNormGated gate) is not viable.** After champion-3's critique and my full concession:\n\n- DRAM savings: ~0 us (intermediate is L2-resident)\n- Launch savings: ~12 us/step (24 x 0.5 us)\n- Revised E2E: **0.06%** (below any practical threshold)"
+        }
+      ]
+    },
+    {
+      "pattern": "off_track_reasoning",
+      "description": "Champion-3 proposed a custom Triton SiLU+Mul kernel and presented all speedup claims relative to the C++ act_and_mul_kernel, despite explicitly acknowledging (from delegate-3a) that the C++ kernel is 'never used under torch.compile.' The production baseline is the torch.compile-generated Triton kernel, against which champion-3's custom kernel was actually 19% slower.",
+      "deduction": -0.75,
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 9,
+          "line_end": 9,
+          "claim": "Champion-3 explicitly acknowledges C++ is never used in production, yet proceeds to benchmark against it",
+          "quoted_content": "**Production code path** (from delegate-3a analysis): `Qwen2MoeMLP.forward()` -> `SiluAndMul.forward_native()` (via `compile_native=True`) -> torch.compile Inductor generates `triton_poi_fused_mul_silu_slice_4`. The vLLM C++ `torch.ops._C.silu_and_mul` kernel is **never used** under torch.compile."
+        },
+        {
+          "file_path": "debate/round_2/champion-3_argument.md",
+          "line_start": 10,
+          "line_end": 13,
+          "claim": "Champion-3 retracts the 1.86x claim in Round 2, confirming the baseline was wrong",
+          "quoted_content": "| 1.86x kernel speedup | **RETRACTED** -- wrong baseline (C++ instead of production torch.compile) | Multi-trial benchmark: torch.compile is 0.67 us/layer faster than custom Triton (t=-12.79, p<0.001) |"
+        }
+      ]
+    },
+    {
+      "pattern": "wasted_effort_sub_threshold_implementation",
+      "description": "The debate protocol forwarded champion-2 (fused_gdn_decode) to Stage 4-5 implementation despite all three champions concluding no kernel optimization can yield >1% E2E, and champion-2's own projection of 0.30-0.59% being far below the 1.0% threshold. This consumed ~39 minutes of wall time and 2 agent sessions for a predictable sub-threshold result.",
+      "deduction": 0,
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 70,
+          "line_end": 71,
+          "claim": "Debate acknowledged the selected candidate projected below 1.0% threshold",
+          "quoted_content": "4. **Below E2E threshold**: Projected 0.30-0.59% is below the 1.0% min_e2e_improvement_pct. Stage 5 validation will be the ultimate arbiter."
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 15,
+          "line_end": 17,
+          "claim": "Implementation result confirmed sub-threshold: 0.046% E2E, status PASS_BELOW_THRESHOLD",
+          "quoted_content": "\"fused_gdn_decode\": {\"status\": \"PASS_BELOW_THRESHOLD\", \"e2e_speedup\": 1.00046, \"reason\": \"E2E 0.046% far below 1.0% threshold\"}"
+        }
+      ]
+    }
+  ],
+
+  "impact_classification": [
+    {
+      "category": "near_hw_ceiling",
+      "description": "Qwen3.5-4B on L40S BF16 operates at ~80% of theoretical DRAM BW limit. GEMM dominates 71-92% of decode GPU time with cuBLAS achieving 73-93% BW utilization. The model is deeply memory-bound at all tested batch sizes (AI=1-31 vs breakeven 419 FLOPS/Byte).",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 27,
+          "line_end": 39,
+          "claim": "All batch sizes deeply memory-bound with ~80% BW utilization",
+          "quoted_content": "All batch sizes are deeply memory-bound (AI << breakeven of 419). The GEMM kernels are limited by memory bandwidth, not compute throughput. Weight data (~7 GB BF16) must be streamed from DRAM for every decode step.\n\nTheoretical minimum per-step time (weights-only): ~8.1 ms (6.96 GB / 864 GB/s). Observed BS=1 per-step kernel time is ~10.1 ms, indicating ~80% BW utilization."
+        },
+        {
+          "file_path": "ncu_sanity_check_results.md",
+          "line_start": 116,
+          "line_end": 124,
+          "claim": "Per-kernel ncu measurements confirm 70-87% DRAM BW utilization across all shapes",
+          "quoted_content": "| BS=1 qkvz_proj | 33.2% | 716.7 | 83.0% | None |\n| BS=1 down_proj | 15.5% | 740.7 | 85.8% | None |\n| BS=8 gate_up_proj | 8.4% | 687.8 | 79.7% | None (occupancy explained) |\n| BS=32 gate_up_proj | 8.3% | 605.0 | 70.1% | None (occupancy explained) |\n| BS=32 down_proj | 8.3% | 750.0 | 87.0% | None (occupancy explained) |"
+        }
+      ]
+    },
+    {
+      "category": "torch_compile_superiority",
+      "description": "torch.compile-generated SiLU kernel outperforms hand-written Triton by 0.67 us/layer (statistically significant, t=-12.79, p<0.001). The C++ silu_and_mul kernel is never called under torch.compile.",
+      "citations": [
+        {
+          "file_path": "debate/round_2/champion-3_argument.md",
+          "line_start": 10,
+          "line_end": 13,
+          "claim": "torch.compile Triton is 0.67 us/layer faster than custom Triton with statistical significance",
+          "quoted_content": "| 1.86x kernel speedup | **RETRACTED** -- wrong baseline (C++ instead of production torch.compile) | Multi-trial benchmark: torch.compile is 0.67 us/layer faster than custom Triton (t=-12.79, p<0.001) |"
+        },
+        {
+          "file_path": "debate/delegate_work/delegate-3a_activation_kernel_identity.md",
+          "line_start": 53,
+          "line_end": 56,
+          "claim": "C++ silu_and_mul is NEVER called during production; torch.compile traces forward_native",
+          "quoted_content": "`SiluAndMul` has a custom CUDA kernel at `torch.ops._C.silu_and_mul` BUT:\n\n1. `SiluAndMul.__init__(compile_native=True)` -- default is True (`activation.py:130`)\n2. When torch.compile (level 3) is active, `dispatch_forward` routes to `forward_native`"
+        }
+      ]
+    },
+    {
+      "category": "cublas_near_optimal",
+      "description": "Custom Triton GEMV was 14-55% slower than cuBLAS gemvx at all tested shapes in cold-cache pipeline tests. cuBLAS already achieves 79-93% BW utilization at BS=1.",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 79,
+          "line_end": 79,
+          "claim": "cuBLAS is near-optimal: Custom Triton GEMV 14-55% slower at all tested shapes",
+          "quoted_content": "2. **cuBLAS is near-optimal**: Custom Triton GEMV is 14-55% slower than cuBLAS gemvx at all tested shapes (Tier 2)."
+        },
+        {
+          "file_path": "REPORT.md",
+          "line_start": 196,
+          "line_end": 199,
+          "claim": "BS=1 cuBLAS gemvx achieves 79-93% BW utilization across projection shapes",
+          "quoted_content": "| gate_up_proj (2560 to 18432) | 807 | 93% | 24.3% |\n| o_proj (4096 to 2560) | 789 | 91% | 24.2% |\n| qkvz_proj (2560 to 12288) | 745 | 86% | 22.2% |\n| down_proj (9216 to 2560) | 682 | 79% | 18.1% |"
+        }
+      ]
+    },
+    {
+      "category": "f_decode_correction",
+      "description": "The headline 20.4% SSM share at BS=32 was corrected to ~4.1% decode-only through delegate analysis showing gather/index/chunk kernels are prefill-only. This correction anchored all champions' Amdahl feasibility analyses.",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 77,
+          "line_end": 77,
+          "claim": "Corrected SSM f_decode: headline 20.4% is misleading, decode-only is ~4.1% at BS=32",
+          "quoted_content": "1. **Corrected SSM f_decode**: The headline 20.4% SSM share at BS=32 is misleading -- gather/index/chunk kernels are prefill-only. Decode-only SSM f is ~4.1% at BS=32."
+        },
+        {
+          "file_path": "debate/delegate_work/delegate-2a_ssm_chain_analysis.md",
+          "line_start": 34,
+          "line_end": 37,
+          "claim": "Delegate-2a established decode-only path uses only 3 kernels; gather/index are strictly prefill",
+          "quoted_content": "#### Decode Path (steady-state, `attn_metadata.num_decodes > 0`)\n\n| # | Kernel | File:Line | Library | Avg (BS=1) |\n|---|--------|-----------|---------|------------|\n| 1 | `fused_gdn_gating_kernel`"
+        }
+      ]
+    }
+  ],
+
+  "delegation_analysis": {
+    "enabled": true,
+    "delegates_per_champion": 1,
+    "total_delegates_spawned": 3,
+    "delegate_artifacts_count": 8,
+    "delegate_citation_rate": 1.0,
+    "causality_chains": [
+      {
+        "delegate": "delegate-2a",
+        "impact": "HIGH",
+        "summary": "Established that vectorized_gather_kernel and index_elementwise_kernel fire only during PREFILL steps, correcting the decode-only SSM f_decode to ~3.3-4.1% at BS=32 (vs misleading 20.4% headline). This correction was adopted by all three champions and anchored the Amdahl feasibility analyses throughout the debate.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-2a_ssm_chain_analysis.md",
+          "line_start": 34,
+          "line_end": 37,
+          "claim": "Delegate-2a establishes the decode-only path uses only 3 kernels and gather/index are strictly prefill",
+          "quoted_content": "#### Decode Path (steady-state, `attn_metadata.num_decodes > 0`)\n\n| # | Kernel | File:Line | Library | Avg (BS=1) |\n|---|--------|-----------|---------|------------|\n| 1 | `fused_gdn_gating_kernel`"
+        }
+      },
+      {
+        "delegate": "delegate-3a",
+        "impact": "HIGH",
+        "summary": "Traced SiluAndMul dispatch path and confirmed torch.ops._C.silu_and_mul is NEVER called under torch.compile. This gave champion-2 the evidence to deliver the fatal critique against champion-3's wrong-baseline proposal, reducing viable candidates from 3 to 1.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-3a_activation_kernel_identity.md",
+          "line_start": 53,
+          "line_end": 62,
+          "claim": "Delegate-3a confirms C++ silu_and_mul is never called; production always uses Inductor-generated Triton",
+          "quoted_content": "`SiluAndMul` has a custom CUDA kernel at `torch.ops._C.silu_and_mul` BUT:\n\n1. `SiluAndMul.__init__(compile_native=True)` -- default is True (`activation.py:130`)\n2. When torch.compile (level 3) is active, `dispatch_forward` routes to `forward_native`\n3. torch.compile traces `forward_native` and generates fused Triton kernel\n4. **Result**: `torch.ops._C.silu_and_mul` is NEVER called during production inference"
+        }
+      },
+      {
+        "delegate": "delegate-1a",
+        "impact": "MEDIUM",
+        "summary": "Traced exact Python lines (qwen3_next.py:774, 791) for prefill-only gather/index operations, providing line-level specificity that cross-validated delegate-2a's finding independently. Champion-1 cited this for characterizing the decode-only SSM path.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-1a_ssm_state_code.md",
+          "line_start": 22,
+          "line_end": 38,
+          "claim": "Delegate-1a provides exact Python line numbers showing prefill-only gather/index",
+          "quoted_content": "**During PREFILL steps** (when `attn_metadata.num_prefills > 0`):\n\n```python\n# Line ~774: fancy-index READ from ssm_state -> vectorized_gather_kernel\ninitial_state = ssm_state[non_spec_state_indices_tensor].contiguous()\n\n# Line ~775: masked bool-index WRITE -> index_elementwise_kernel\ninitial_state[~has_initial_state, ...] = 0\n\n# Line ~791: fancy-index WRITE back to ssm_state -> index_elementwise_kernel\nssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)\n```"
+        }
+      }
+    ],
+    "efficiency_issues": [
+      {
+        "description": "Delegate-1a and delegate-2a both independently analyzed the vectorized_gather_kernel and index_elementwise_kernel prefill-only question, producing substantially overlapping conclusions about the same code path (qwen3_next.py:774, 791). A single shared research task would have sufficed.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-1a_ssm_state_code.md",
+          "line_start": 26,
+          "line_end": 31,
+          "claim": "Delegate-1a identifies gather/index as prefill-only at lines 774/791 -- overlapping with delegate-2a",
+          "quoted_content": "**During PREFILL steps** (when `attn_metadata.num_prefills > 0`):\n\n```python\n# Line ~774: fancy-index READ from ssm_state -> vectorized_gather_kernel\ninitial_state = ssm_state[non_spec_state_indices_tensor].contiguous()\n```"
+        }
+      }
+    ],
+    "utilization_failures": [
+      {
+        "description": "Champion-3 explicitly cited delegate-3a's finding that C++ silu_and_mul is 'NEVER called during production inference' under torch.compile, yet built all E2E projections using the C++ kernel as baseline. The realistic pipeline benchmark actually showed torch.compile was faster than custom Triton, but champion-3 buried this data and highlighted only the C++ comparison.",
+        "citation": {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 9,
+          "line_end": 9,
+          "claim": "Champion-3 states the delegate finding that C++ is never used, then proceeds to use C++ as baseline",
+          "quoted_content": "**Production code path** (from delegate-3a analysis): [...] The vLLM C++ `torch.ops._C.silu_and_mul` kernel is **never used** under torch.compile."
+        }
+      }
+    ]
+  },
+
+  "causal_postmortem": {
+    "critical_path": ["bottleneck_mining", "debate"],
+    "trajectory_changing_decisions": 0,
+    "actionable_fixes": [
+      {
+        "target": "debate protocol",
+        "fix": "VIABILITY GATE: Compute cold-cache Amdahl E2E for each winner before forwarding to implementation. If max projected E2E < 0.5 * min_e2e_improvement_pct, terminate with NO_VIABLE_CANDIDATE verdict and skip Stages 4-5.",
+        "citation": {
+          "file_path": "state.json",
+          "line_start": 15,
+          "line_end": 17,
+          "claim": "Implementation confirmed the predictable sub-threshold result: 0.046% E2E",
+          "quoted_content": "\"fused_gdn_decode\": {\"status\": \"PASS_BELOW_THRESHOLD\", \"e2e_speedup\": 1.00046, \"reason\": \"E2E 0.046% far below 1.0% threshold\"}"
+        }
+      },
+      {
+        "target": "parallel-tracks Gate 5.3",
+        "fix": "KERNEL EXECUTION PROOF: Require nsys trace, dispatch log, or kernel-count diff confirming the optimized kernel actually executed during the E2E sweep. Without this proof, E2E results are inadmissible.",
+        "citation": {
+          "file_path": "tracks/fused_gdn_decode/validation_results.md",
+          "line_start": 69,
+          "line_end": 78,
+          "claim": "E2E results are indistinguishable from noise with no kernel execution proof",
+          "quoted_content": "| 1  | 6.489715 | 6.493497 | -3.8 | -0.058% | 0.9994 | NOISE |\n| 8  | 7.740088 | 7.736555 | +3.5 | +0.046% | 1.0005 | PASS |\n| 32 | 10.218688 | 10.221890 | -3.2 | -0.031% | 0.9997 | NOISE |"
+        }
+      }
+    ],
+    "wasted_effort": {
+      "description": "The debate stage forwarded a candidate to implementation despite all champions concluding no kernel optimization can yield >1% E2E. Implementation consumed ~39 minutes and 2 agent sessions for a predictable 0.046% result. An early-termination gate would have saved this effort.",
+      "estimated_waste_minutes": 39,
+      "citation": {
+        "file_path": "state.json",
+        "line_start": 78,
+        "line_end": 102,
+        "claim": "Stage 4-5 implementation ran from 16:24 to 17:05 (~39 minutes) for a result below threshold",
+        "quoted_content": "\"4_5_parallel_tracks\": {\n      \"completed_at\": \"2026-03-24T17:04:13Z\",\n      \"started_at\": \"2026-03-24T16:24:59Z\"\n    }"
+      }
+    }
+  },
+
+  "verified_e2e_results": [
+    {
+      "batch_size": 1,
+      "baseline_e2e_s": 6.489715,
+      "optimized_e2e_s": 6.493497,
+      "delta_pct": -0.058,
+      "verdict": "NOISE",
+      "technique": "fused_gdn_decode: fused gating + recurrence, BS-adaptive num_warps (4 at BS<=2)",
+      "citation": {
+        "file_path": "tracks/fused_gdn_decode/validation_results.md",
+        "line_start": 73,
+        "line_end": 73,
+        "claim": "BS=1 E2E is -0.058%, verdict NOISE",
+        "quoted_content": "| 1  | 6.489715 | 6.493497 | -3.8 | -0.058% | 0.9994 | NOISE |"
+      }
+    },
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 7.740088,
+      "optimized_e2e_s": 7.736555,
+      "delta_pct": 0.046,
+      "verdict": "PASS",
+      "technique": "fused_gdn_decode: fused gating + recurrence, BS-adaptive num_warps (2 at BS<=16)",
+      "citation": {
+        "file_path": "tracks/fused_gdn_decode/validation_results.md",
+        "line_start": 74,
+        "line_end": 74,
+        "claim": "BS=8 E2E is +0.046%, verdict PASS",
+        "quoted_content": "| 8  | 7.740088 | 7.736555 | +3.5 | +0.046% | 1.0005 | PASS |"
+      }
+    },
+    {
+      "batch_size": 32,
+      "baseline_e2e_s": 10.218688,
+      "optimized_e2e_s": 10.221890,
+      "delta_pct": -0.031,
+      "verdict": "NOISE",
+      "technique": "fused_gdn_decode: fused gating + recurrence, BS-adaptive num_warps (1 at BS>16)",
+      "citation": {
+        "file_path": "tracks/fused_gdn_decode/validation_results.md",
+        "line_start": 75,
+        "line_end": 75,
+        "claim": "BS=32 E2E is -0.031%, verdict NOISE",
+        "quoted_content": "| 32 | 10.218688 | 10.221890 | -3.2 | -0.031% | 0.9997 | NOISE |"
+      }
+    }
+  ],
+
+  "debate_evidence": {
+    "total_proposals": 3,
+    "debate_rounds": 2,
+    "convergence": "All three champions independently concluded no kernel optimization can yield >1% E2E on this target",
+    "key_findings": [
+      {
+        "finding": "Corrected SSM f_decode from misleading 20.4% headline to ~4.1% decode-only at BS=32",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 77,
+          "line_end": 77,
+          "claim": "Decode-only SSM f is ~4.1% at BS=32, not 20.4%",
+          "quoted_content": "1. **Corrected SSM f_decode**: The headline 20.4% SSM share at BS=32 is misleading -- gather/index/chunk kernels are prefill-only. Decode-only SSM f is ~4.1% at BS=32."
+        }
+      },
+      {
+        "finding": "Custom Triton GEMV is 14-55% slower than cuBLAS gemvx at all tested shapes",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 79,
+          "line_end": 79,
+          "claim": "cuBLAS gemvx outperforms custom Triton GEMV by 14-55%",
+          "quoted_content": "2. **cuBLAS is near-optimal**: Custom Triton GEMV is 14-55% slower than cuBLAS gemvx at all tested shapes (Tier 2)."
+        }
+      },
+      {
+        "finding": "torch.compile-generated SiLU outperforms custom Triton by 0.67 us/layer (p<0.001)",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 81,
+          "line_end": 81,
+          "claim": "Inductor-generated SiLU outperforms custom Triton with statistical significance",
+          "quoted_content": "3. **torch.compile generates efficient code**: The Inductor-generated SiLU kernel outperforms custom Triton by 0.67 us/layer (statistically significant)."
+        }
+      },
+      {
+        "finding": "Model at ~80% BW ceiling with limited kernel optimization headroom",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 83,
+          "line_end": 83,
+          "claim": "Model extracts ~80% of theoretical DRAM bandwidth",
+          "quoted_content": "4. **Model at ~80% BW ceiling**: Qwen3.5-4B on L40S BF16 extracts ~80% of theoretical DRAM bandwidth. Limited headroom for kernel optimization."
+        }
+      },
+      {
+        "finding": "Bimodal SiLU outlier: 23% of invocations take ~100 us vs 3.9 us median, root cause unexplained",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 85,
+          "line_end": 85,
+          "claim": "23% of SiLU invocations show ~100 us vs 3.9 us median -- unexplained",
+          "quoted_content": "5. **Bimodal outlier pattern**: 23% of SiLU invocations in production take ~100 us (vs 3.9 us median). Root cause unexplained."
+        }
+      }
+    ],
+    "notable_critiques": [
+      {
+        "from": "champion-1",
+        "to": "champion-2",
+        "effect": "Reduced BS=1 f_decode from inflated 2.5% to correct 1.56%, dropping E2E projection from 0.95% to 0.59%",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 89,
+          "line_end": 89,
+          "claim": "Champion-1 corrected champion-2's f_decode inflation",
+          "quoted_content": "- **Champion-1 -> Champion-2**: f_decode inflated from 2.5% to 1.56%, extended fusion unmeasured. Reduced champion-2's E2E from 0.95% to 0.59% at BS=1."
+        }
+      },
+      {
+        "from": "champion-2",
+        "to": "champion-3",
+        "effect": "Exposed wrong baseline (C++ not production torch.compile), fatal to champion-3's proposal",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 90,
+          "line_end": 90,
+          "claim": "Champion-2 delivered fatal wrong-baseline critique to champion-3",
+          "quoted_content": "- **Champion-2 -> Champion-3**: Wrong baseline (C++ not production torch.compile). Fatal -- custom Triton regresses against production."
+        }
+      },
+      {
+        "from": "champion-3",
+        "to": "champion-1",
+        "effect": "Revealed DRAM savings were zero (L2-resident tensors), reduced E2E from 0.32% to 0.06%",
+        "citation": {
+          "file_path": "debate/summary.md",
+          "line_start": 91,
+          "line_end": 91,
+          "claim": "Champion-3 revealed champion-1's DRAM savings are zero",
+          "quoted_content": "- **Champion-3 -> Champion-1**: DRAM savings zero (L2-resident tensors), launch savings overestimated. Reduced champion-1's E2E from 0.32% to 0.06%."
+        }
+      }
+    ]
+  },
+
+  "environment": {
+    "gpu_model": "NVIDIA L40S",
+    "gpu_count": 1,
+    "cuda_version": "12.8",
+    "vllm_version": "0.16.0rc2.dev479+g35aec4a44.d20260305",
+    "git_commit": "6da5e40a0c2d8d79408ba3c8244ced9a2d11c96a",
+    "git_branch": "main",
+    "torch_version": "2.10.0+cu128",
+    "python_version": "3.12.11",
+    "citation": {
+      "file_path": "env.md",
+      "line_start": 6,
+      "line_end": 21,
+      "claim": "Environment: L40S, CUDA 12.8, torch 2.10.0, vLLM 0.16.0rc2.dev479",
+      "quoted_content": "- NVIDIA L40S (CC 8.9), 46068 MiB, driver 580.126.16\n...- Torch: 2.10.0+cu128\n- vLLM version: 0.16.0rc2.dev479+g35aec4a44.d20260305"
+    }
+  }
+}

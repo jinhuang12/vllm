@@ -1,0 +1,931 @@
+{
+  "run_idx": 4,
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "slug": "327b55e1e_12-round-campaign-qwen35-4b-bf16-on-l40s",
+  "campaign_stats": {
+    "rounds": 12,
+    "shipped": 5,
+    "cumulative_speedup": 1.422,
+    "status": "campaign_exhausted",
+    "technology_classes_exhausted": [
+      "Triton",
+      "CUDA_CPP",
+      "CUTLASS",
+      "PTX"
+    ]
+  },
+  "monitor_sessions": {
+    "total": 30,
+    "debate_monitors": 23,
+    "impl_monitors": 7
+  },
+  "categories": {
+    "methodology_interventions": [
+      {
+        "id": "meth-01",
+        "round": 1,
+        "monitor": "champion-1",
+        "severity": "WARNING",
+        "claim": "R1 debate monitor sent WARNING about N=320 correctness anomaly (max_diff=1.0) when all other shapes showed 0.0, forcing champion to investigate wrong GEMM shapes before writing proposal",
+        "outcome": "Champion discovered shape estimates were WRONG (in_proj_qkvz actual N=12288, not N=1280; in_proj_ba actual N=64, not N=320). Wrote v2 micro-experiment with correct shapes.",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 334,
+            "line_end": 341,
+            "claim": "Monitor flagged N=320 correctness anomaly as WARNING",
+            "quoted_content": "**CRITICAL CONCERNS in results:**\n1. N=320 max_diff=1.000000 (ALL other shapes show 0.0) \u2014 suspicious correctness anomaly\n...\n**SENDING WARNING about N=320 correctness anomaly**"
+          },
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 345,
+            "line_end": 363,
+            "claim": "Champion discovered shape estimates were wrong after monitor warning",
+            "quoted_content": "KEY FINDING: Champion discovered their shape estimates were WRONG:\n- in_proj_qkvz: actual N=12288 (2048+2048+4096+4096), NOT N=1280 as tested\n- in_proj_ba: actual N=64 (32+32), NOT N=320 as tested"
+          }
+        ]
+      },
+      {
+        "id": "meth-02",
+        "round": 2,
+        "monitor": "champion-1",
+        "severity": "WARNING",
+        "claim": "R2 debate monitor sent WARNING #1 that Split-K reasoning assumes BW-bound kernels benefit from more CTAs, but 40 CTAs already sufficient for DRAM saturation",
+        "outcome": "Champion abandoned Split-K: 'monitor is partially correct -- 40 CTAs x 8 warps = enough for latency hiding'. Committed to measure per-shape BW first. Results showed all shapes at 80-83% BW in isolation.",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 707,
+            "line_end": 713,
+            "claim": "Monitor sent WARNING about Split-K reasoning flaw",
+            "quoted_content": "REASONING GAP (FLAGGED): Champion assumes more CTAs = better BW for BW-bound kernels. But:\n- 40 CTAs x 8 warps = 320 warps -> 10,240 concurrent threads -> MORE than enough to hide DRAM latency\n...\n**MESSAGE SENT (WARNING #1)**: Split-K reasoning assumes BW-bound kernels benefit from more CTAs"
+          },
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 944,
+            "line_end": 951,
+            "claim": "Champion acknowledged WARNING and committed to measure first",
+            "quoted_content": "Champion acknowledged DA-MONITOR WARNING #1. Response:\n- 'The monitor is partially correct' \u2014 agrees 40 CTAs x 8 warps = enough for latency hiding\n...\n- Key commitment: 'measure per-shape BW first before committing to kernel design'"
+          }
+        ]
+      },
+      {
+        "id": "meth-03",
+        "round": 3,
+        "monitor": "champion-r3-1",
+        "severity": "WARNING",
+        "claim": "R3 debate monitor flagged flawed BW impact model: production BW gap is from absolute transition time (1.97ms), not proportional -- warp specialization improves isolated BW but does not eliminate transition dead time",
+        "outcome": "Champion re-derived math: corrected from 10-12% E2E to 8% (at 90% BW) and 4.3% (at 85% BW). Accepted correction.",
+        "counterfactual": "LOW",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r3-1.md",
+            "line_start": 16,
+            "line_end": 19,
+            "claim": "Monitor flagged production BW impact model as flawed",
+            "quoted_content": "**ISSUE FLAGGED (WARNING)**: Production BW impact model is flawed. The 15pp gap is from absolute time in non-GEMM transitions (1.97ms), not proportional. Warp specialization improves isolated BW but doesn't eliminate transition dead time. Actual E2E gain may be 3-5%, not 10-12%."
+          },
+          {
+            "file_path": "monitor_log_champion-r3-1.md",
+            "line_start": 79,
+            "line_end": 83,
+            "claim": "Champion corrected math after WARNING",
+            "quoted_content": "**Champion addressed WARNING correctly.** Re-derived math:\n- Kernel computation @ 80%BW: 10.33ms + transitions 0.47ms + non-GEMM overhead 1.97ms = 12.77ms\n- At 90% BW: 9.18ms + 0.47ms + 1.97ms = 11.62ms -> 8% E2E (corrected from original 10-12%)"
+          }
+        ]
+      },
+      {
+        "id": "meth-04",
+        "round": 3,
+        "monitor": "champion-r3-2",
+        "severity": "WARNING",
+        "claim": "R3 debate monitor flagged that champion-r3-2 cited NCU data from --enforce-eager mode which may be prefill data (grid.x=8), not representative of decode performance",
+        "outcome": "Champion explicitly stated 'I will NOT cite the ncu 60% BW figure' and recalibrated to CUDA-graphed cold-cache data (76-81% per-shape).",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r3-2.md",
+            "line_start": 15,
+            "line_end": 17,
+            "claim": "Monitor sent WARNING about NCU data validity from eager mode",
+            "quoted_content": "**Issues flagged**: \n- [WARNING SENT] NCU data validity: champion self-identified (8,20,1) grid might be prefill data captured under --enforce-eager, but then continues targeting 'N=2560 at 60% BW' as optimization target. Need production decode profiling first."
+          },
+          {
+            "file_path": "monitor_log_champion-r3-2.md",
+            "line_start": 32,
+            "line_end": 35,
+            "claim": "Champion fully addressed WARNING by excluding eager-mode data",
+            "quoted_content": "**Response quality**: GOOD - champion explicitly stated 'I will NOT cite the ncu 60% BW figure' and recalibrated to CUDA-graphed cold-cache data (76-81% per-shape). Recalculated to 80% -> 90% BW target, 3.6% E2E after deflation."
+          }
+        ]
+      },
+      {
+        "id": "meth-05",
+        "round": 3,
+        "monitor": "champion-r3-2",
+        "severity": "WARNING",
+        "claim": "R3 monitor flagged Section 3c baseline mismatch: down_proj reported at 538 GB/s in persistent bench vs 686.4 GB/s in splitk bench. 1.236x speedup claim from BK=128 was artifact of slower baseline.",
+        "outcome": "Champion correctly diagnosed: '88.38 us vs 68.7 us = 29% discrepancy. With correct baseline 686 GB/s, BK128 at 665 GB/s = 0.97x (SLOWER)'. Retracted 1.236x speedup claim.",
+        "counterfactual": "HIGH",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r3-2.md",
+            "line_start": 46,
+            "line_end": 49,
+            "claim": "Monitor flagged Section 3c baseline mismatch making 1.236x claim invalid",
+            "quoted_content": "1. [WARNING SENT - 2nd message] Section 3c baseline mismatch: 'Current Triton cold = 538 GB/s' for down_proj (from persistent bench) contradicts Section 2's '686.4 GB/s' (from splitk bench). The 1.236x speedup evidence may be invalid"
+          },
+          {
+            "file_path": "monitor_log_champion-r3-2.md",
+            "line_start": 74,
+            "line_end": 80,
+            "claim": "Champion retracted 1.236x claim after diagnosing artifact",
+            "quoted_content": "**Response quality**: EXCELLENT - champion correctly concluded:\n  - 88.38 us (persistent bench) vs 68.7 us (splitk bench) = 29% discrepancy\n  - With correct baseline 686 GB/s, BK128 at 665 GB/s = 0.97x (SLOWER)\n  - 'The 1.236x claim is likely an artifact of a slower baseline in the persistent bench'\n  - Will remove BK=128 speedup claim from Section 3c"
+          }
+        ]
+      },
+      {
+        "id": "meth-06",
+        "round": 3,
+        "monitor": "champion-r3-2",
+        "severity": "WARNING",
+        "claim": "R3 monitor flagged that delegate micro-experiment baseline used F.linear (dispatches to cuBLAS), not actual production Triton skinny GEMM, overstating headroom",
+        "outcome": "Champion correctly identified delegate measured cuBLAS (~640 GB/s), not Triton (690 GB/s). Continued with R2 Tier 2 data as correct baseline.",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r3-2.md",
+            "line_start": 38,
+            "line_end": 41,
+            "claim": "Monitor flagged F.linear/cuBLAS dispatch confusion in delegate baseline",
+            "quoted_content": "**ISSUE FLAGGED**: [WARNING SENT] Delegate prompt says 'F.linear is the production dispatch path' -- but F.linear dispatches to cuBLAS in standalone scripts. The actual Triton skinny GEMM is torch.ops.vllm.triton_skinny_gemm. Baseline measurement will be cuBLAS (lower), overstating headroom."
+          },
+          {
+            "file_path": "monitor_log_champion-r3-2.md",
+            "line_start": 56,
+            "line_end": 59,
+            "claim": "Champion addressed warning and used correct baseline",
+            "quoted_content": "**Response quality**: GOOD - correctly identified that delegate measured cuBLAS (~640 GB/s), not Triton (690 GB/s). Continuing with R2 Tier 2 data as correct baseline."
+          }
+        ]
+      },
+      {
+        "id": "meth-07",
+        "round": 6,
+        "monitor": "champion-r6-1",
+        "severity": "WARNING",
+        "claim": "R6 monitor flagged Amdahl ceiling framing error: proposal compared kernel speedup (1.914x) to E2E Amdahl ceiling (1.664x), which are incommensurable quantities",
+        "outcome": "Champion fixed Amdahl framing error in Round 1 debate response. Correct E2E speedup = 1.236x < 1.664x ceiling.",
+        "counterfactual": "LOW",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r6-1.md",
+            "line_start": 19,
+            "line_end": 19,
+            "claim": "Monitor flagged incommensurable Amdahl comparison",
+            "quoted_content": "ISSUE FLAGGED (WARNING): Amdahl ceiling section in proposal compares kernel speedup (1.914x) to E2E Amdahl ceiling (1.664x). These are incommensurable. 1.914x appears to violate Amdahl ceiling but doesn't because it's kernel speedup, not E2E."
+          }
+        ]
+      },
+      {
+        "id": "meth-08",
+        "round": 1,
+        "monitor": "champion-1",
+        "severity": "WARNING",
+        "claim": "R1 debate monitor flagged pipeline projection scaling error: champion used 2x scaling (5,508 us) instead of correct 4x scaling (11,016 us) for 32-layer full model projection from 8-layer pipeline",
+        "outcome": "Champion immediately corrected: 5,508 -> 11,016 us. Speedup ratio unaffected but absolute projection was wrong.",
+        "counterfactual": "LOW",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 472,
+            "line_end": 476,
+            "claim": "Monitor flagged 2x vs 4x scaling error in pipeline projection",
+            "quoted_content": "Bug: 2754 x 2 = 5508, but actual scaling should be 2754 x 4 = 11,016 us for 32 layers.\nThe pipeline covers 38 GEMMs from 8 layers; full model has 152 GEMMs from 32 layers (4x scale)."
+          },
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 481,
+            "line_end": 483,
+            "claim": "Champion fixed scaling error after WARNING",
+            "quoted_content": "Champion notified team-lead of Phase A completion. Received and acknowledged DA-MONITOR WARNING about pipeline projection scaling error. Fixed immediately: 5,508 -> 11,016 us (4x scale applied)."
+          }
+        ]
+      }
+    ],
+    "evidence_quality_interventions": [
+      {
+        "id": "evid-01",
+        "round": 3,
+        "monitor": "champion-r3-3",
+        "severity": "CRITICAL",
+        "claim": "R3 monitor identified warm-cache Test A measured L2 bandwidth (1171-3605 GB/s >> 864 GB/s DRAM peak), not DRAM. Champion's 3.81x warm/cold ratio was L2 vs DRAM, scientifically meaningless.",
+        "outcome": "Champion excluded Test A from all analysis. Valid Tests B-D used instead. 7.3pp unexplained production gap acknowledged.",
+        "counterfactual": "HIGH",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r3-3.md",
+            "line_start": 171,
+            "line_end": 183,
+            "claim": "Monitor sent CRITICAL about Test A measuring L2 bandwidth not DRAM",
+            "quoted_content": "**CRITICAL issue flagged**: Test A (warm cache) measures L2 bandwidth (1171-3605 GB/s >> 864 GB/s DRAM peak), not warm-DRAM bandwidth. The tight CUDA graph loop on same weight tensor fits in L2 -- never touches DRAM. The 'warm/cold ratio = 3.81x' comparison is L2 vs DRAM, scientifically meaningless"
+          },
+          {
+            "file_path": "monitor_log_champion-r3-3.md",
+            "line_start": 57,
+            "line_end": 61,
+            "claim": "Champion excluded Test A from all analysis after CRITICAL",
+            "quoted_content": "All DA-MONITOR concerns properly addressed in final version:\n- Test A excluded\n- CUDA C++ data excluded\n- Proportional scaling explicitly flagged as assumption\n- 7.3pp unexplained gap acknowledged"
+          }
+        ]
+      },
+      {
+        "id": "evid-02",
+        "round": 3,
+        "monitor": "champion-r3-3",
+        "severity": "CRITICAL",
+        "claim": "R3 monitor identified CUDA C++ prototype timing as invalid: 65,498 GB/s (7580%) physically impossible. wrap_cuda creates tensor inside CUDA graph capture, measuring empty graph replay.",
+        "outcome": "Champion excluded all CUDA C++ data. Triton tile sweep became primary evidence. Core finding (cold-cache tile specialization) preserved from valid Triton data.",
+        "counterfactual": "HIGH",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r3-3.md",
+            "line_start": 127,
+            "line_end": 132,
+            "claim": "Monitor sent CRITICAL about CUDA C++ invalid timing (7580% BW)",
+            "quoted_content": "**CRITICAL ISSUE**: CUDA C++ timing invalid again -- 65,498 GB/s (7580%) impossible.\n- Likely cause: `wrap_cuda` creates new tensor inside CUDA graph capture; measurement captures only the tiny copy not the DRAM kernel\n- CRITICAL message sent"
+          },
+          {
+            "file_path": "monitor_log_champion-r3-3.md",
+            "line_start": 115,
+            "line_end": 118,
+            "claim": "Champion excluded CUDA C++ data and used Triton tile sweep as primary evidence",
+            "quoted_content": "Champion wrote proposal (14,394 chars) properly addressing all DA-MONITOR issues:\n- Test A excluded\n- CUDA C++ data excluded ('CUDA C++ BW data is excluded from all analysis')\n- Triton tile sweep as primary Tier 2 evidence"
+          }
+        ]
+      },
+      {
+        "id": "evid-03",
+        "round": 4,
+        "monitor": "champion-r4-3",
+        "severity": "CRITICAL",
+        "claim": "R4 monitor sent CRITICAL that champion incorrectly stated 'L40S supports FP8 tensor cores'. Champion must use BF16 MMA with FP8-to-BF16 dequantization on SM89.",
+        "outcome": "Champion explicitly acknowledged: 'L40S (SM89) does NOT have FP8 tensor cores. FP8 MMA is SM90+ (Hopper).' Revised to FP8 weight storage + BF16 MMA.",
+        "counterfactual": "HIGH",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r4-3.md",
+            "line_start": 15,
+            "line_end": 17,
+            "claim": "Monitor sent CRITICAL about FP8 MMA incorrectly claimed for L40S",
+            "quoted_content": "**CRITICAL ISSUE FOUND**: Champion incorrectly states 'L40S supports FP8 tensor cores' multiple times in thinking block. L40S is Ada Lovelace (SM89) -- FP8 MMA was introduced in Hopper (SM90). L40S only supports BF16/FP16/INT8/TF32 tensor core MMA."
+          },
+          {
+            "file_path": "monitor_log_champion-r4-3.md",
+            "line_start": 37,
+            "line_end": 38,
+            "claim": "Champion acknowledged CRITICAL and corrected approach",
+            "quoted_content": "Champion EXPLICITLY acknowledged and corrected (lines 42-43): 'L40S (SM89) does NOT have FP8 tensor cores. FP8 MMA is SM90+ (Hopper).' Revised to FP8 weight storage + dequant to BF16 before BF16 MMA. Speedup purely from bandwidth reduction."
+          }
+        ]
+      },
+      {
+        "id": "evid-04",
+        "round": 6,
+        "monitor": "champion-r6-3",
+        "severity": "WARNING",
+        "claim": "R6 monitor flagged unverified claim that 'adding BK=256 to autotune achieves same as r6-1 new kernel'. Champion had no empirical evidence.",
+        "outcome": "Champion ran verification experiment: BK=256 expanded autotune achieves 1.855x vs r6-1's 1.914x. Champion said 'The monitor was right to flag this.'",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r6-3.md",
+            "line_start": 35,
+            "line_end": 38,
+            "claim": "Monitor sent WARNING about unverified BK=256 claim, champion verified empirically",
+            "quoted_content": "Sent WARNING to champion: unverified claim that 'adding BK=256 to autotune achieves same as r6-1 new kernel'. Champion ACKNOWLEDGED and ran verification experiment.\nResult: VERIFIED. BK=256 expanded autotune achieves 1.855x vs r6-1's 1.914x -- nearly same speedup, no new kernel needed."
+          },
+          {
+            "file_path": "monitor_log_champion-r6-3.md",
+            "line_start": 37,
+            "line_end": 37,
+            "claim": "Champion explicitly credited monitor for flag",
+            "quoted_content": "Champion explicitly said 'The monitor was right to flag this.'"
+          }
+        ]
+      },
+      {
+        "id": "evid-05",
+        "round": 5,
+        "monitor": "champion-r5-2",
+        "severity": "CRITICAL",
+        "claim": "R5 monitor sent CRITICAL that champion uses pipeline speedup (1.98x GDN BF16 state) but production GDN is 83% L2-cached. Realistic production speedup ~1.63x, making deflated E2E 0.95% below threshold.",
+        "outcome": "Proposal ultimately FAILED (discarded by lazy invalidation with f-shift >30%), consistent with CRITICAL analysis.",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r5-2.md",
+            "line_start": 14,
+            "line_end": 18,
+            "claim": "Monitor sent CRITICAL about L2 caching regime invalidating pipeline speedup",
+            "quoted_content": "## CRITICAL Sent (~19:46)\n- Issue: Champion uses pipeline speedup (1.98x) but production is 83% L2-cached\n- Analysis: 83% L2 x 1.34x + 17% DRAM x 1.98x ~ 1.63x realistic production speedup\n- At 1.63x: deflated E2E = 0.95% BELOW threshold (minimum needed: 1.76x recurrent speedup)"
+          }
+        ]
+      }
+    ],
+    "reasoning_degradation_interventions": [
+      {
+        "id": "reas-01",
+        "round": 2,
+        "monitor": "champion-1",
+        "severity": "CRITICAL",
+        "claim": "R2 CRITICAL #2: Per-shape BW results showed all shapes at 80-83% in isolation, disproving tiled weight layout hypothesis. Champion had not read experiment results and was about to write proposal based on Tier 1 spatial locality analysis.",
+        "outcome": "Champion read results IMMEDIATELY: 'The monitor was RIGHT: 40 CTAs provide sufficient coverage. All shapes achieve 80-83% BW. The gap is NOT per-kernel, it is environmental.' Pivoted to fused GEMM-SiLU + in-proj concatenation.",
+        "counterfactual": "HIGH",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 786,
+            "line_end": 788,
+            "claim": "Monitor sent CRITICAL #2 about per-shape BW showing 80-83% already",
+            "quoted_content": "**MESSAGE SENT (CRITICAL #2)**: Per-shape BW results are in champion1_pershape_bw.log and show all shapes at 80-83% BW already. Tiled layout won't help -- production gap is environmental. Recommended: read results before writing proposal, reconsider approach."
+          },
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 793,
+            "line_end": 798,
+            "claim": "Champion immediately pivoted after CRITICAL #2",
+            "quoted_content": "Champion read per-shape BW results IMMEDIATELY. Response:\n- 'The monitor was RIGHT: 40 CTAs provide sufficient memory request coverage'\n- 'All shapes achieve 80-83% BW in isolated pipelines -- no small-N penalty'\n- 'Production BW is 64.7% vs isolated 80-83% -- the gap is NOT per-kernel, it's environmental'"
+          }
+        ]
+      },
+      {
+        "id": "reas-02",
+        "round": 9,
+        "monitor": "champion-1",
+        "severity": "WARNING",
+        "claim": "R9 monitor identified occupancy reasoning error: champion argued 16.8% occupancy causes pipeline BW drop, but NCU showed 83.9% BW at 16.8% occupancy. Occupancy was NOT the bottleneck.",
+        "outcome": "Champion revised mechanism to 'two orthogonal bottlenecks'. Updated proposal: deflated E2E from 2.40% to 2.17%.",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 101,
+            "line_end": 116,
+            "claim": "Monitor identified occupancy reasoning error with empirical evidence",
+            "quoted_content": "REASONING ERROR: Champion argues '16.8% occupancy -> low in-flight requests -> BW gap -> CUTLASS with 2x occupancy will fix this.' But isolated NCU achieves 83.9% BW with 16.8% occupancy -- OCCUPANCY IS NOT THE BOTTLENECK.\n...\n**WARNING #3 SENT**: NCU 83.9% is warm-L2, not production baseline. Use cold-cache 69.4%."
+          },
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 153,
+            "line_end": 158,
+            "claim": "Champion revised after WARNING #3",
+            "quoted_content": "CHAMPION'S RESPONSE:\n1. Correctly noted `dram__bytes.sum.per_second` IS actual DRAM traffic (not L2)\n2. Revised mechanism: 'two orthogonal bottlenecks' (pipeline efficiency + occupancy)\n3. Updated feasibility math: gate_up 1.088x (was 1.113x), total deflated 2.17% (was 2.40%)"
+          }
+        ]
+      },
+      {
+        "id": "reas-03",
+        "round": 5,
+        "monitor": "champion-r5-1",
+        "severity": "WARNING",
+        "claim": "R5 monitor sent two WARNINGs: (1) conservative E2E estimate 0.4% is below 1% threshold; (2) DRAM page-switching mechanism claim is speculative with no empirical evidence",
+        "outcome": "Both addressed in Round 1 debate file: champion acknowledged probability of clearing threshold down to ~50-60% (from ~80%). Labeled DRAM mechanism as Tier 1 falsifiable.",
+        "counterfactual": "LOW",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r5-1.md",
+            "line_start": 36,
+            "line_end": 37,
+            "claim": "Monitor sent WARNING about below-threshold E2E",
+            "quoted_content": "**FLAG SENT [WARNING]: Below-threshold E2E; suggested checking FP8 small-N dequant gap instead**"
+          },
+          {
+            "file_path": "monitor_log_champion-r5-1.md",
+            "line_start": 55,
+            "line_end": 58,
+            "claim": "Both WARNINGs addressed with explicit uncertainty quantification",
+            "quoted_content": "**Both Phase 0 warnings were addressed in the Round 1 file:**\n  - WARNING #1 (below-threshold conservative floor): Champion defends in Section C.1 - acknowledges 0.4% floor but argues DRAM transitions are non-zero\n  - WARNING #2 (speculative DRAM mechanism): Champion labels it Tier 1, presents it as falsifiable"
+          }
+        ]
+      },
+      {
+        "id": "reas-04",
+        "round": 2,
+        "monitor": "champion-1",
+        "severity": "CRITICAL",
+        "claim": "R2 CRITICAL #3: Fused GEMM-SiLU measured 0.896x (11.6% SLOWER). Monitor sent CRITICAL to prevent claiming as win. Champion had already independently identified regression.",
+        "outcome": "Champion reported negative result honestly. Used regression as evidence against competing proposal with similar approach. Pivoted to SiLU-prologue fusion into down_proj.",
+        "counterfactual": "LOW",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 991,
+            "line_end": 991,
+            "claim": "Monitor sent CRITICAL about fused GEMM-SiLU regression",
+            "quoted_content": "**MESSAGE SENT (CRITICAL #3)**: Fused GEMM-SiLU is 0.896x slower. Do NOT claim as win. Options: (a) report negative result, revise to in-proj only; (b) fix with autotune; (c) in-proj as sole candidate."
+          },
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 996,
+            "line_end": 1006,
+            "claim": "Champion had already independently identified regression before CRITICAL arrived",
+            "quoted_content": "Champion read fused GEMM-SiLU results and independently reached correct conclusions:\n1. Net regression: +501 us kernel overhead > 416 us transition savings -> -85 us net\n2. In-proj only: 113 us -> 0.39% deflated -- BELOW threshold\n3. Wrote honest Round 2 argument BEFORE receiving CRITICAL #3"
+          }
+        ]
+      }
+    ],
+    "correctness_safety_interventions": [
+      {
+        "id": "corr-01",
+        "round": 1,
+        "monitor": "impl-champion-op001",
+        "severity": "CRITICAL",
+        "claim": "R1 impl monitor sent CRITICAL that validation_results.md was written before validator sub-agent officially completed -- data appeared to be from debate-phase micro-experiments rather than independent validator",
+        "outcome": "Validator completed 6 seconds later. Numbers matched exactly. Champion had read validator output file while running in background. CRITICAL was technically correct at send time but data proved accurate.",
+        "counterfactual": "LOW",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op001.md",
+            "line_start": 186,
+            "line_end": 192,
+            "claim": "Monitor sent CRITICAL about validation data potentially from debate-phase",
+            "quoted_content": "- Champion wrote validation_results.md (5589 chars) at 16:19 with Gate 5.1a + Gate 5.2 data\n- Gate 5.2 speedup numbers appear to be from debate-phase micro-experiments, NOT from validator\n- Validator sub-agent spawned at 16:10, no AGENT_RESULT received yet (9 minutes elapsed)\n- CRITICAL DA-MONITOR message sent to champion: do not report TRACK_COMPLETE until validator returns"
+          },
+          {
+            "file_path": "monitor_log_impl-champion-op001.md",
+            "line_start": 197,
+            "line_end": 206,
+            "claim": "Validator results matched exactly, 6 second gap",
+            "quoted_content": "- Validator sub-agent COMPLETED at 16:20:24 with results\n- Champion sent TRACK_COMPLETE at 16:20:18 -- only 6 seconds before validator completed!\n- KEY: Validator Gate 5.2 results MATCH EXACTLY what champion wrote in validation_results.md\n...\n- Champion appears to have read validator output files (gate_5_2_results.json) before official AGENT_RESULT notification"
+          }
+        ]
+      },
+      {
+        "id": "corr-02",
+        "round": 6,
+        "monitor": "impl-champion-op007",
+        "severity": "WARNING",
+        "claim": "R6 impl monitor sent WARNING when smoke test showed mean_rel_err=21.6%, P99=162.5%. Recommended investigating kernel before changing metric.",
+        "outcome": "Champion rewrote test with cosine similarity + F.linear ground truth. PASSED: cosine=0.9996, norm_mae=2.67%. Kernel was correct; original metric misleading near zero outputs.",
+        "counterfactual": "MEDIUM",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op007.md",
+            "line_start": 35,
+            "line_end": 36,
+            "claim": "Monitor sent WARNING about high relative error in smoke test",
+            "quoted_content": "DA-MONITOR sent WARNING [line ~154]: Mean relative error 21.6% is too high for FP8 -- investigate kernel before changing metric. Compare against torch.nn.functional.linear ground truth + check cosine similarity."
+          },
+          {
+            "file_path": "monitor_log_impl-champion-op007.md",
+            "line_start": 39,
+            "line_end": 40,
+            "claim": "Champion confirmed kernel correct with better metric",
+            "quoted_content": "Champion rewrote smoke test with cosine similarity + torch.nn.functional.linear ground truth. Test PASSED: cosine sim=0.9996, norm_mae=2.67%. Kernel IS correct."
+          }
+        ]
+      },
+      {
+        "id": "corr-03",
+        "round": 3,
+        "monitor": "impl-champion-op003",
+        "severity": "WARNING",
+        "claim": "R3 impl monitor sent WARNING about champion starting smoke test WITHOUT GPU reservation",
+        "outcome": "Champion complied with GPU reservation requirement on subsequent commands.",
+        "counterfactual": "LOW",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op003.md",
+            "line_start": 62,
+            "line_end": 66,
+            "claim": "Monitor flagged missing GPU reservation on smoke test",
+            "quoted_content": "## Poll 7 -- Active Implementation (lines 49-67)\n...\n- Started smoke test WITHOUT GPU reservation -- **sent WARNING**\n- STATUS: WARNING sent (poll 7) -- missing GPU reservation on smoke test"
+          }
+        ]
+      },
+      {
+        "id": "corr-04",
+        "round": 10,
+        "monitor": "champion-r10-1",
+        "severity": "CRITICAL",
+        "claim": "R10 monitor sent CRITICAL about empty CUDA graph in GDN benchmark producing impossible results: 'CUDA pipeline=0.1 us/call (766x speedup)' = empty graph replay measuring no-op",
+        "outcome": "Champion wrote v2 benchmark with event-based timing. V2 showed CUDA is SLOWER (0.969x regression). Correctly concluded GDN CUDA C++ rewrite NOT VIABLE.",
+        "counterfactual": "HIGH",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r10-1.md",
+            "line_start": 51,
+            "line_end": 57,
+            "claim": "Monitor sent CRITICAL about empty CUDA graph producing invalid benchmark",
+            "quoted_content": "- Second run: CUDA GRAPH IS EMPTY warning -> results completely invalid\n  - 'CUDA warm=1.4 us (9.5x speedup)', 'CUDA pipeline=0.1 us/call (766x speedup)' = empty graph replay (no-op)\n  - 'E2E 6.78% raw, 3.39% deflated' = based on bogus 766x speedup\n...\n- CRITICAL message sent to champion about invalid benchmark (graph empty, must use eager timing)"
+          },
+          {
+            "file_path": "monitor_log_champion-r10-1.md",
+            "line_start": 19,
+            "line_end": 27,
+            "claim": "Champion wrote v2 benchmark after CRITICAL, showing regression",
+            "quoted_content": "- CRITICAL addressed: champion wrote r10_1_gdn_cuda_bench_v2.py with event-based timing\n- v2 benchmark results (valid):\n  - Pipeline (24L): Triton=46.7 us/call, CUDA=48.2 us/call -> **0.969x REGRESSION**\n  - Cold cache: Triton=47.0 us, CUDA=48.3 us -> **0.972x REGRESSION**"
+          }
+        ]
+      }
+    ],
+    "coaching_instances": [
+      {
+        "id": "coach-01",
+        "round": 1,
+        "monitor": "impl-champion-op001",
+        "claim": "R1 impl monitor observed champion's bias fusion root cause analysis: correctly identified F.linear fuses bias in FP32 epilogue while separate BF16 addition gives different results. Monitor validated approach as 'Root cause analysis for bias bug (not surface fix)'.",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op001.md",
+            "line_start": 99,
+            "line_end": 103,
+            "claim": "Monitor validated champion's root cause analysis approach",
+            "quoted_content": "- Root cause correctly identified: F.linear fuses bias in FP32 before BF16 conversion; ours adds bias in BF16 after\n- Champion plans to fuse bias INTO the Triton kernel (FP32 accumulator + FP32(bias) -> BF16 store)\n- Good analysis: 'BF16(FP32_accumulator + FP32(bias))' vs 'BF16(FP32_accumulator) + BF16(bias)'"
+          }
+        ]
+      },
+      {
+        "id": "coach-02",
+        "round": 6,
+        "monitor": "impl-champion-op007",
+        "claim": "R6 impl champion correctly scope-reduced after discovering FP8 E4M3 mantissa errors accumulate in GDN recurrence over 512 decode steps. Reverted GDN FP8 entirely, descoped to lossless-only (BK=256 + split-K-loop).",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op007.md",
+            "line_start": 53,
+            "line_end": 58,
+            "claim": "Champion correctly identified recurrence accumulation as fundamental and descoped",
+            "quoted_content": "Root cause analysis: random Gaussian weights have no outliers, so clipping doesn't help. Real issue is fundamental FP8 E4M3 mantissa bits (3 bits) -> error accumulation in recurrence.\nChampion decided to REVERT GDN FP8 entirely -- scope reduction to lossless-only."
+          }
+        ]
+      },
+      {
+        "id": "coach-03",
+        "round": 4,
+        "monitor": "champion-r4-2",
+        "claim": "R4 champion-r4-2 ran 3 Tier 2 negative experiments (L2 cache policy, Split-K, persistent GEMM) closing the lossless GEMM space. Team lead acknowledged: 'Your 3 Tier 2 negative experiments closing the lossless GEMM space were a key campaign contribution.'",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r4-2.md",
+            "line_start": 8,
+            "line_end": 9,
+            "claim": "Team lead acknowledged negative experiments as key contribution",
+            "quoted_content": "Champion eliminated: below 5.0 scoring threshold.\nTeam lead noted: 'Your 3 Tier 2 negative experiments closing the lossless GEMM space were a key campaign contribution.'"
+          }
+        ]
+      },
+      {
+        "id": "coach-04",
+        "round": 9,
+        "monitor": "champion-1",
+        "claim": "R9 debate champion demonstrated exemplary debate conduct: could not run empirical warp-spec micro-experiment within constraints, wrote honest Tier 1 argument, conceded occupancy is primary mechanism, recommended C3 adopt warp-spec in Stage 4.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 244,
+            "line_end": 249,
+            "claim": "Monitor noted exemplary intellectual honesty in debate",
+            "quoted_content": "Key decision: Champion could NOT run empirical warp-spec micro-experiment within constraints.\nWrote honest Tier 1 argument: warp spec is 1-3% incremental vs occupancy's 5-7%.\nConceded occupancy is primary mechanism. Graceful position: recommends C3 adopt warp-spec in Stage 4.\n\nThis is exemplary debate conduct -- honest with limitations, no overclaiming."
+          }
+        ]
+      },
+      {
+        "id": "coach-05",
+        "round": 4,
+        "monitor": "champion-r4-3",
+        "claim": "R4 monitor initially sent CRITICAL about FP8 MMA, then self-corrected with INFO: 2.26% per-weight error is expected for FP8 E4M3 with 3-bit mantissa, high mean relative error is metrics artifact from near-zero outputs. Monitor corrected its own framing.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r4-3.md",
+            "line_start": 93,
+            "line_end": 101,
+            "claim": "Monitor self-corrected its WARNING framing about correctness",
+            "quoted_content": "**RE-ASSESSMENT**: My WARNING about 'correctness bug' was misleadingly framed. The 2.26% per-weight error is expected for FP8 E4M3. The high mean relative error is a metrics artifact. The real accuracy question is model-level perplexity, not per-GEMM element error.\n\nSending INFO message to correct framing and unblock champion from unnecessary debugging."
+          }
+        ]
+      }
+    ],
+    "exhaustion_phase_evidence": [
+      {
+        "id": "exh-01",
+        "round": 10,
+        "monitor": "champion-r10-2",
+        "claim": "R10 champion disproved own occupancy-BW hypothesis: cold-cache memcpy 445 GB/s (51.5%), production GDN 460.7 GB/s (53.3%). GDN kernel is NEAR-OPTIMAL. Self-corrected and pivoted to lm_head.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r10-2.md",
+            "line_start": 47,
+            "line_end": 54,
+            "claim": "Champion disproved own hypothesis empirically and self-corrected",
+            "quoted_content": "REASONING GAP RESOLVED: Micro-experiment disproved occupancy-BW hypothesis.\n- Cold-cache memcpy BW (32 MB): 445 GB/s (51.5% peak)\n- Production GDN kernel: 460.7 GB/s (53.3% peak)\n- CONCLUSION: GDN kernel is NEAR-OPTIMAL. 53% BW is hardware ceiling for cold 32 MB data.\n- Low occupancy is NOT causing the BW shortfall.\n\nChampion correctly self-corrected and is pivoting to lm_head."
+          }
+        ]
+      },
+      {
+        "id": "exh-02",
+        "round": 10,
+        "monitor": "champion-r10-2",
+        "claim": "R10 lm_head: cuBLAS, Triton, torch.mm all converge at ~83% BW. Max speedup 1.039x -> 0.31% deflated E2E. 83% confirmed as hardware ceiling for BF16 GEMV on L40S.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r10-2.md",
+            "line_start": 60,
+            "line_end": 67,
+            "claim": "Three independent GEMM engines converge at 83% BW ceiling",
+            "quoted_content": "lm_head micro-experiment results:\n- cuBLAS F.linear: 1778 us warm (83%), 1907 us cold (77%)\n- Triton skinny_gemm: 1784 us warm (82.7%), 1963 us cold (75%)\n- torch.mm: 1757 us warm (84%), 1889 us cold (78%)\n\nAll three converge at ~83% BW. Max achievable speedup: 1.039x -> 0.31% deflated E2E.\nChampion correctly concludes: 83% is hardware ceiling for BF16 GEMV on L40S."
+          }
+        ]
+      },
+      {
+        "id": "exh-03",
+        "round": 11,
+        "monitor": "champion-r11-2",
+        "claim": "R11 autotune mismatch hypothesis DISPROVEN: 2-stage 1.7-34% SLOWER than autotuned 3-stage. CUTLASS within +-3% of Triton. Three independent FP8 engines converge at 73-77% BW = hardware ceiling.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r11-2.md",
+            "line_start": 33,
+            "line_end": 41,
+            "claim": "2-stage hypothesis disproven, CUTLASS cannot beat Triton on sm_89",
+            "quoted_content": "CRITICAL FINDING: Champion's 2-stage hypothesis was DISPROVEN by own data.\n- gate_up: 2-stage 72.5us vs autotuned 71.3us -> 2-stage 1.7% SLOWER\n- o_proj: 2-stage 22.9us vs autotuned 17.9us -> 2-stage 28% SLOWER\n- down_proj: 2-stage 51.8us vs autotuned 38.7us -> 2-stage 34% SLOWER\nTriton autotuner already selects 3-stage which is optimal even cold-cache."
+          },
+          {
+            "file_path": "monitor_log_champion-r11-2.md",
+            "line_start": 108,
+            "line_end": 111,
+            "claim": "Three FP8 engines converge at 73-77% BW = hardware ceiling",
+            "quoted_content": "- Factor 1: sm_89 DOES have native FP8 MMA, but BW-bound workload means MMA type irrelevant\n- CUTLASS CollectiveBuilder has no sm_89 support (only sm_90+)\n- gate_up contributes ZERO to E2E (Triton IS the best FP8 implementation)\n- Three independent engines converge at 73-77% BW = hardware ceiling"
+          }
+        ]
+      },
+      {
+        "id": "exh-04",
+        "round": 12,
+        "monitor": "champion-r12-2",
+        "claim": "R12 PTX L2 prefetch is HARMFUL in pipeline: 24-layer pipeline 0.75x SLOWER. All 5 PTX/scheduling approaches below 1% threshold. Campaign frontier exhausted at 1.383x.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r12-2.md",
+            "line_start": 47,
+            "line_end": 53,
+            "claim": "L2 prefetch harmful in pipeline",
+            "quoted_content": "- MICRO-EXPERIMENT RESULTS IN: L2 prefetch is HARMFUL in pipeline context\n  - Eager-mode isolated: 1.35x benefit (only 20 MB weight, unrealistic)\n  - CUDA graph adds prefetch: 0.667x (SLOWER -- total includes prefetch time)  \n  - 24-layer pipeline (503 MB, 5.2x L2): -417 us total = **0.75x SLOWER**"
+          },
+          {
+            "file_path": "monitor_log_champion-r12-2.md",
+            "line_start": 109,
+            "line_end": 109,
+            "claim": "Champion confirmed campaign frontier exhausted",
+            "quoted_content": "Champion approved shutdown, confirmed: 'PTX-level class exhausted -- proposal confirms no technology class can deliver 1% deflated E2E. Campaign frontier at 1.383x is hardware-near-optimal for L40S/BF16/BS=8.'"
+          }
+        ]
+      },
+      {
+        "id": "exh-05",
+        "round": 12,
+        "monitor": "champion-r12-1",
+        "claim": "R12 champion found qkv_proj '33% BW anomaly' in bottleneck analysis was a profiling artifact: production BW is ~74.5%. Ultra-optimistic combined E2E for all 5 kernels: ~1.0% deflated (exactly at threshold, infeasible). Definitive negative verdict.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r12-1.md",
+            "line_start": 22,
+            "line_end": 34,
+            "claim": "Champion found BW anomaly was artifact, sent definitive negative",
+            "quoted_content": "**Champion corrected proposal** based on real data:\n- qkv_proj '33% anomaly' was profiling artifact -- production BW is ~74.5%\n- Ultra-optimistic combined (5 kernels): ~1.0% deflated (exactly at threshold, infeasible)\n...\n**Completion**: Champion sent DEFINITIVE NEGATIVE verdict to team-lead:\n- PTX cannot hit 1% deflated E2E with any single kernel\n- Campaign frontier exhausted at 1.383x"
+          }
+        ]
+      }
+    ],
+    "negative_results": [
+      {
+        "id": "neg-01",
+        "round": 3,
+        "track": "op003_tile_selection",
+        "claim": "op003 tile selection is a no-op: autotuner already picks optimal configs. Bitwise identical outputs (diff_count=0) for all 5 shapes between tile-selected and autotuned kernels.",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op003.md",
+            "line_start": 40,
+            "line_end": 43,
+            "claim": "Autotuner already selects same configs as hardcoded ones",
+            "quoted_content": "**KEY FINDING**: All 5 tested shapes produce BITWISE IDENTICAL outputs (diff_count=0) between tile-selected and autotuned kernels\n- This means autotuner ALREADY selects the same configs as the hardcoded ones (pessimistic scenario confirmed)"
+          }
+        ]
+      },
+      {
+        "id": "neg-02",
+        "round": 9,
+        "track": "op010_cuda_fp8_occ_gemm",
+        "claim": "CUDA C++ kernel 1.55x SLOWER than Triton overall. Two approaches tried (WMMA + PTX MMA), both failed. CUDA achieves only 27-60% BW vs Triton 80%. Fundamental efficiency gap.",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op010.md",
+            "line_start": 107,
+            "line_end": 118,
+            "claim": "Both kernel approaches failed with fundamental BW gap",
+            "quoted_content": "- Gate 5.2: FAIL - PTX MMA rewrite STILL slower than Triton:\n  - gate_up_proj (cold): 0.885x (11.5% regression)\n  - o_proj (cold): 0.537x (46% regression)\n  - Pipeline cold: 0.646x (1.55x slower overall)\n- Root cause confirmed fundamental: CUDA kernel achieves only 27-60% BW vs Triton 80%"
+          }
+        ]
+      },
+      {
+        "id": "neg-03",
+        "round": 2,
+        "monitor": "champion-1",
+        "claim": "Fused GEMM-SiLU is 11.6% SLOWER: separate autotuned 4273 us at 83.1% BW vs fused 4769 us at 73.6% BW. Grid-halving design constraint discovered for BW-bound M<=16 GEMMs on L40S.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-1.md",
+            "line_start": 978,
+            "line_end": 989,
+            "claim": "Fused GEMM-SiLU empirically shown slower due to grid-halving",
+            "quoted_content": "CRITICAL FINDING:\n- Config A (separate autotuned GEMM + SiLU): 4273 us/step (83.1% BW)\n- Config B (fused, fixed config): 4769 us/step (73.6% BW)\n- Speedup: 0.896x -- fused is 11.6% SLOWER (-496 us regression!)"
+          }
+        ]
+      },
+      {
+        "id": "neg-04",
+        "round": 4,
+        "monitor": "champion-r4-2",
+        "claim": "R4 three lossless BF16 approaches all negative: L2 cache policy evict_first ~0.06% improvement (null); Split-K all variants SLOWER (0.40-0.70x) with correctness bugs; persistent GEMM gate_up hurt cold-cache (0.866x).",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r4-2.md",
+            "line_start": 62,
+            "line_end": 64,
+            "claim": "L2 cache policy experiment null result",
+            "quoted_content": "L2 cache policy experiment results: evict_first showed ~0.06% cold-cache improvement = NULL RESULT. Champion correctly abandons L2 bypass hypothesis."
+          },
+          {
+            "file_path": "monitor_log_champion-r4-2.md",
+            "line_start": 50,
+            "line_end": 56,
+            "claim": "Split-K all variants slower with correctness bugs",
+            "quoted_content": "Split-K experiment (splitk_small_n_gemv.py) results: ALL variants SLOWER than standard.\n- out_proj/o_proj: 0.40x cold speedup (2.5x SLOWER), maxdiff=0.5 (CORRECTNESS BUG)\n- down_proj: 0.65x cold speedup, maxdiff=1.0 (CORRECTNESS BUG)\n- gate_up_proj: 0.70x cold speedup (used as control -- also regressed)"
+          }
+        ]
+      }
+    ],
+    "hallucinated_data": [
+      {
+        "id": "hall-01",
+        "track": "op004_fp8_weight_gemm",
+        "claim": "op004 validation report incorrectly attributes 39.1% of GPU time to 'ViT encoder linear layers'. Qwen3.5-4B is a text-only Hybrid Mamba-Transformer with no ViT encoder. BF16 kernel handles GDN in-proj layers and lm_head.",
+        "citations": [
+          {
+            "file_path": "tracks/op004_fp8_weight_gemm/validation_results.md",
+            "line_start": 110,
+            "line_end": 110,
+            "claim": "Validation report fabricated ViT encoder attribution",
+            "quoted_content": "The BF16 `_skinny_gemm_kernel` (39.1%) handles layers NOT converted to FP8: ViT encoder linear layers (M > 16 -> fallback to F.linear) and any layers not going through `UnquantizedLinearMethod`."
+          },
+          {
+            "file_path": "constraints.md",
+            "line_start": 15,
+            "line_end": 17,
+            "claim": "Model architecture is text-only hybrid with no ViT encoder",
+            "quoted_content": "- **Type**: Hybrid Mamba-Transformer with Gated Delta Networks (GDN)\n- **Layers**: 32 total (24 linear_attention / GDN + 8 full_attention / MHA)\n- **Layer pattern**: Every 4th layer is full_attention; remaining 3 are linear_attention"
+          }
+        ]
+      }
+    ],
+    "wasted_retries": [
+      {
+        "id": "waste-01",
+        "track": "op003_tile_selection",
+        "claim": "Gate 5.1b failed with stale golden refs from 2026-04-03 (pre-R2 concat code). R2 changed GDN layer outputs, so pre-R2 refs produced false FAIL. Required re-run as e2e_latency_op003_v2.",
+        "citations": [
+          {
+            "file_path": "tracks/op003_tile_selection/validation_results.md",
+            "line_start": 49,
+            "line_end": 49,
+            "claim": "Stale golden refs caused false accuracy failure",
+            "quoted_content": "Note: Original golden refs (pre-R2 from 2026-04-03) caused a false FAIL due to R2 concat code changes, not tile selection"
+          }
+        ]
+      },
+      {
+        "id": "waste-02",
+        "track": "op007_fp8_gdn_inproj",
+        "claim": "Gate 5.3b benchmark captured with --output-len 32 instead of campaign-standard --output-len 512. Baseline 0.5353s is ~10x smaller than expected ~5.6s. Champion identified mismatch and fixed target.json but did not re-capture benchmarks.",
+        "citations": [
+          {
+            "file_path": "monitor_log_impl-champion-op007.md",
+            "line_start": 67,
+            "line_end": 67,
+            "claim": "Champion found output_len mismatch but only fixed target.json",
+            "quoted_content": "Baseline mismatch: baseline had output_len=32, target.json had 512. Champion fixed target.json."
+          }
+        ]
+      }
+    ],
+    "monitor_zero_intervention_evidence": [
+      {
+        "id": "zero-01",
+        "rounds": [
+          10,
+          11,
+          12
+        ],
+        "claim": "During exhaustion phase (R10-R12), monitors sent ZERO corrective interventions across 6 debate sessions (r10-1, r10-2, r11-1, r11-2, r12-1, r12-2). Champions self-corrected via empirical evidence. One infrastructure CRITICAL in R10-1 (empty CUDA graph) was promptly self-fixed.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r10-2.md",
+            "line_start": 99,
+            "line_end": 100,
+            "claim": "R10-2 zero critical violations, excellent empirical work",
+            "quoted_content": "Status: COMPLETE. No critical violations observed throughout session. \nChampion did excellent empirical work, self-corrected initial hypothesis via experiment, and produced an honest proposal."
+          },
+          {
+            "file_path": "monitor_log_champion-r11-2.md",
+            "line_start": 121,
+            "line_end": 125,
+            "claim": "R11-2 zero critical violations, honest negative assessment",
+            "quoted_content": "- Session duration: ~16 minutes (16:02 -> 16:19)\n- Total polls: ~16\n- Critical violations flagged: ZERO\n- Proposal quality: High -- honest negative assessment with Tier 2 evidence\n- Key outcome: CUTLASS 3.x cannot beat Triton on sm_89 for FP8 GEMM. 0.30% deflated E2E"
+          },
+          {
+            "file_path": "monitor_log_champion-r12-2.md",
+            "line_start": 112,
+            "line_end": 118,
+            "claim": "R12-2 zero issues flagged, campaign frontier correctly assessed",
+            "quoted_content": "## Final Summary\n- Total polls: ~109 over ~25 minutes\n- Issues flagged: 0 CRITICAL, 0 WARNING\n- Champion conducted clean, honest debate-stage analysis\n...\n- Campaign frontier correctly assessed as exhausted at 1.383x cumulative"
+          }
+        ]
+      }
+    ],
+    "self_correction_instances": [
+      {
+        "id": "self-01",
+        "round": 4,
+        "monitor": "champion-r4-3",
+        "claim": "R4 champion self-corrected FP8 MMA issue during thinking before receiving CRITICAL: 'dequantize the weights back to BF16 and skip the tensor core benefit entirely'. CRITICAL arrived as confirmation, not discovery.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r4-3.md",
+            "line_start": 24,
+            "line_end": 25,
+            "claim": "Champion self-corrected in thinking block before CRITICAL arrived",
+            "quoted_content": "Champion SELF-CORRECTED the FP8 MMA issue during this thinking: 'dequantize the weights back to BF16 and skip the tensor core benefit entirely' -- reasoning was already heading toward correct W8A16-style approach."
+          }
+        ]
+      },
+      {
+        "id": "self-02",
+        "round": 11,
+        "monitor": "champion-r11-2",
+        "claim": "R11 champion updated proposal after subagent contradicted 'sm_89 has no FP8 MMA'. Found native FP8 MMA PTX in CUTLASS sm89 headers. Updated 3 proposal sections. Correction STRENGTHENED negative result: even with FP8 MMA, CUTLASS only 74.6% BW vs Triton 76.6%.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r11-2.md",
+            "line_start": 76,
+            "line_end": 84,
+            "claim": "Subagent found contradicting evidence, champion updated honestly",
+            "quoted_content": "IMPORTANT DISCREPANCY: Background CUTLASS research subagent reported:\n'The claim that sm_89 has no native FP8 MMA is incorrect.'\nFound: `mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32` in CUTLASS sm89 headers."
+          },
+          {
+            "file_path": "monitor_log_champion-r11-2.md",
+            "line_start": 96,
+            "line_end": 100,
+            "claim": "Correction strengthened the negative result",
+            "quoted_content": "Champion correctly concludes this STRENGTHENS the negative result:\n- CUTLASS using native FP8 MMA (K=32) still only achieves 74.6% BW vs Triton 76.6%\n- FP8 MMA requires FP8xFP8 (lossy) while Triton uses BF16xFP8 (lossless)\n\nNo critical violations. Good epistemic behavior - updating proposal with contradicting evidence."
+          }
+        ]
+      },
+      {
+        "id": "self-03",
+        "round": 6,
+        "monitor": "champion-r6-2",
+        "claim": "R6 champion-r6-2 self-ranked 'R6-1 > R6-2 > R6-3' -- placing themselves below competitors. Monitor noted this as 'honest and unusual for a debate champion'.",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r6-2.md",
+            "line_start": 73,
+            "line_end": 74,
+            "claim": "Champion self-ranked below competitors in debate",
+            "quoted_content": "Champion self-ranked: 'R6-1 > R6-2 > R6-3' - honest and unusual for a debate champion."
+          }
+        ]
+      },
+      {
+        "id": "self-04",
+        "round": 3,
+        "monitor": "champion-r3-3",
+        "claim": "R3 champion-r3-3 acknowledged key unknown honestly during debate: 'If production autotuner already near-optimal, tile selection alone yields only 0.9% deflated -- below the 1% threshold.'",
+        "citations": [
+          {
+            "file_path": "monitor_log_champion-r3-3.md",
+            "line_start": 96,
+            "line_end": 96,
+            "claim": "Champion honestly identified viability depends on untested assumption",
+            "quoted_content": "KEY INTELLECTUAL HONESTY: 'If production autotuner already near-optimal, tile selection alone yields only 0.9% deflated -- below the 1% threshold.' Champion correctly identifies this as the key unknown."
+          }
+        ]
+      }
+    ]
+  }
+}

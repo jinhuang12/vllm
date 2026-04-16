@@ -1,0 +1,257 @@
+{
+  "total": 40,
+  "passed": 37,
+  "failed": 3,
+  "failure_rate": 0.075,
+  "results": [
+    {
+      "file_path": "debate/round_1/champion-2_argument.md",
+      "line_range": "3-3",
+      "claim": "Champion-2 claimed 9.1% E2E at BS=32 in Round 1 argument based on inflated 838 GB/s measurement",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.05 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "82-87",
+      "claim": "OP-001 showed extreme Amdahl violation with 0.01x measured-vs-predicted ratio due to L2-warm micro-benchmarks",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "39-49",
+      "claim": "GEMV/GEMM projections dominate 78-94% of GPU time at all batch sizes",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "118-123",
+      "claim": "All batch sizes are deeply memory-bound with AI far below 419 FLOPs/byte crossover",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "76-87",
+      "claim": "Each decode step reads 7.6 GB of model weights through 152 linear projection GEMMs",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "46-49",
+      "claim": "All three champions independently converged on 676-693 GB/s Triton BW, resolving the 838 GB/s artifact",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_bw_discrepancy_analysis.md",
+      "line_range": "10-11",
+      "claim": "Delegate-2a identified L2 re-warming as root cause of inflated BW numbers before Round 1 critique",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_rebuttal.md",
+      "line_range": "11-15",
+      "claim": "Champion-2 self-corrected in rebuttal: BS=32 speedup revised from 1.383x to 1.141x with 608 GB/s matching ncu ground truth",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "5-6",
+      "claim": "Champion-1 conceded and corrected L2 size from 48 MB to 96 MB after Champion-3 identified error",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "89-95",
+      "claim": "OP-002 post-gating E2E: BS=32 +5.51%, BS=8 +1.86%, BS=1 -0.57% (memory overhead, not kernel)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "60-69",
+      "claim": "Validator independent kernel benchmark shows 1.097x at BS=8 and 1.197x at BS=32 with 400 MB L2 flush",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "36-53",
+      "claim": "11/11 correctness tests passed including CUDA graph capture/replay and adversarial inputs",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "255-259",
+      "claim": "SiLU fusion eliminates 75.5 MB intermediate tensor per layer at BS=32, saving 2.4 GB per decode step",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "25-34",
+      "claim": "State.json records OP-002 as GATED_PASS with 1.0551x E2E speedup and M>=8 dispatch",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "66-77",
+      "claim": "OP-001 E2E showed near-zero improvement: BS=1 +0.057%, BS=8 -0.052%, BS=32 +0.066%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "101-111",
+      "claim": "Root cause: debate micro-experiments measured L2-warm standalone torch.mm, not production DRAM-bound F.linear",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "20-23",
+      "claim": "State records OP-001 failure: torch.mm vs F.linear dispatch gap",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "48-52",
+      "claim": "Champion-2 proposal claims 838 GB/s and 1.383x at BS=32 cold-cache",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_rebuttal.md",
+      "line_range": "11-15",
+      "claim": "Champion-2 corrected in rebuttal: actual BS=32 speedup is 1.141x at 689 GB/s",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "57-60",
+      "claim": "Baseline cold BW reported at 1029 GB/s exceeding L40S DRAM peak",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "122-123",
+      "claim": "Champion-1 states L40S L2 is 48 MB, working set / L2 = 158x",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.38 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "5-6",
+      "claim": "Champion-1 conceded L40S has 96 MB L2 in Round 1 rebuttal",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_2026-03-23T203809Z/e2e_latency_results.md",
+      "line_range": "14-18",
+      "claim": "First baseline run produced sub-second latencies indicating configuration error",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "26-27",
+      "claim": "OP-001 required two commits, second being a critical torch.compile fix",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "68-69",
+      "claim": "Validator kernel benchmark went through multiple iterations",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_bw_discrepancy_analysis.md",
+      "line_range": "10-11",
+      "claim": "Delegate identified L2 re-warming as root cause of inflated BW numbers",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_gemm_dispatch_research.md",
+      "line_range": "57-67",
+      "claim": "Delegate mapped the dispatch interception point at utils.py:298-304",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_projection_analysis.md",
+      "line_range": "76-77",
+      "claim": "Delegate confirmed ba_proj is only 327 KB, not significant optimization target",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.47 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_bw_discrepancy_analysis.md",
+      "line_range": "22-22",
+      "claim": "Delegate-3a incorrectly states L40S L2 is 48 MB",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_bw_discrepancy_analysis.md",
+      "line_range": "1-4",
+      "claim": "Delegate-2a investigated BW discrepancy between champion-2 and champion-3",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_bw_discrepancy_analysis.md",
+      "line_range": "1-5",
+      "claim": "Delegate-3a independently investigated the same BW discrepancy",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency/e2e_latency_results.json",
+      "line_range": "70-78",
+      "claim": "Final e2e_latency baselines have returncode=1 (failed to run)",
+      "verified": true
+    },
+    {
+      "file_path": "runs/baseline_bs32.json",
+      "line_range": "2-2",
+      "claim": "Stage 1 baseline for BS=32 is 10.224s, not 10.270s from constraints.md",
+      "verified": true
+    },
+    {
+      "file_path": "runs/baseline_bs1.json",
+      "line_range": "2-2",
+      "claim": "Stage 1 baseline for BS=1 is 6.494s, not 6.548s from constraints.md",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "393-396",
+      "claim": "Isolated benchmarks measured cuBLAS at 493-636 GB/s; production achieves 680-750 GB/s due to L2 pre-warming",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "398-400",
+      "claim": "torch.mm vs F.linear dispatch difference caused 10x overestimation of optimization opportunity for OP-001",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "402-404",
+      "claim": "All three candidates initially assumed L40S L2 = 48 MB; empirical measurement revealed 96 MB",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "406-408",
+      "claim": "Pre-transposing weights added 2.81 GB causing 0.57% BS=1 regression despite fused kernel never executing at BS=1",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "193-216",
+      "claim": "Campaign ran from 21:50 to 00:15 UTC across 7 stages",
+      "verified": true
+    },
+    {
+      "file_path": "constraints.md",
+      "line_range": "15-19",
+      "claim": "Qwen3.5-4B is a hybrid transformer with 24 DeltaRule and 8 full attention layers, dense SiLU-gated MLP",
+      "verified": true
+    }
+  ]
+}

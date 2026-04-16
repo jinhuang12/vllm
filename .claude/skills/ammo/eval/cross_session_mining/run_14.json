@@ -1,0 +1,500 @@
+{
+  "run_idx": 14,
+  "run_dir": "/home/jinhun/.claude/ammo-eval/versions/c08b370fc_test-campaign-qwen35-4b-bf16-tp1-on-l40s/runs/qwen3-5-4b_l40s_bf16_tp1/run_1",
+  "artifact_dir": "/home/jinhun/.claude/ammo-eval/versions/c08b370fc_test-campaign-qwen35-4b-bf16-tp1-on-l40s/runs/qwen3-5-4b_l40s_bf16_tp1/run_1/changes_snapshot/campaign_artifacts",
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "overall_score": 2.89,
+  "campaign_status": "campaign_exhausted",
+  "cumulative_speedup": 1.0,
+  "shipped_optimizations": 0,
+  "total_rounds": 1,
+  "findings": [
+    {
+      "id": "f14_01",
+      "category": "anti_pattern",
+      "sub_category": "dominant_component_avoidance",
+      "severity": "critical",
+      "title": "All 3 champions targeted GDN recurrent (f=13.8%) while ignoring GEMM (f=67.3%)",
+      "description": "All three debate champions proposed optimizations exclusively for the GDN recurrent kernel (rank 4 at BS=32, f=13.8%) while GEMM kernels occupying ranks 1-3 (combined f=67.3% layer-internal, 88.1% including lm_head) had zero optimization tracks proposed. GEMM BW utilization at BS=32 ranged 54-65%, well below the 85% threshold, leaving substantial unexplored headroom.",
+      "deduction": -2.0,
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 88,
+          "line_end": 92,
+          "claim": "GEMM rows 1-3 combined are 67.3% f_decode at BS=32, all ranked higher than GDN recurrent at rank 4",
+          "quoted_content": "| 1 | ampere_bf16_64x128 | 81,760 | 184.7 | 15,097 | 29.8 | MLP gate_up_proj |\n| 2 | cutlass wmma_bf16_32x32_128x2 | 225,080 | 47.6 | 10,705 | 21.1 | Attn projections |\n| 3 | ampere_bf16_128x64 | 81,760 | 101.8 | 8,322 | 16.4 | MLP down_proj |\n| 4 | fused_recurrent_gated_delta_rule_fwd | 61,320 | 113.6 | 6,968 | 13.8 |"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 152,
+          "line_end": 158,
+          "claim": "GEMM BW utilization at BS=32 is 54-65%, well below 85% threshold indicating real unoptimized headroom",
+          "quoted_content": "| MLP gate_up [2560x18432] | 15,097 | 29.8 | 94.4 MB | 109 | 185 | 59% |\n| Attn projections (all) | 10,705 | 21.1 | varies | varies | 48 | ~65% |\n| MLP down [9216x2560] | 8,322 | 16.4 | 47.2 MB | 55 | 102 | 54% |"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 101,
+          "line_end": 103,
+          "claim": "Debate summary dismissed GEMM as non-optimizable citing only champion-1's single thin-GEMM experiment",
+          "quoted_content": "**GEMM is NOT a viable custom kernel target**: Champion-1's thin-GEMM experiment proved cuBLAS wins by 14-15% for BW-bound shapes at M=32. The \"wasted\" tile rows are on idle tensor cores."
+        },
+        {
+          "file_path": "debate/proposals/champion-2_proposal.md",
+          "line_start": 1,
+          "line_end": 7,
+          "claim": "Champion-2 proposal targets only GDN recurrent kernel, no GEMM micro-experiment included",
+          "quoted_content": "# Champion-2 Proposal: BF16-State GDN Recurrent Kernel\n\n## Candidate Specification\n\n**Target kernel**: `fused_recurrent_gated_delta_rule_fwd_kernel` (Triton)\n**Source**: `vllm/model_executor/layers/fla/ops/fused_recurrent.py:27`"
+        },
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 1,
+          "line_end": 8,
+          "claim": "Champion-3 proposal also targets only GDN recurrent, zero GEMM experiments",
+          "quoted_content": "# Champion-3 Proposal: Optimized GDN Recurrent CUDA Kernel with State Prefetch Pipeline\n\n## Candidate Specification\n\n**Target kernel**: `fused_recurrent_gated_delta_rule_fwd_kernel` (Triton)\n**Source**: `vllm/model_executor/layers/fla/ops/fused_recurrent.py:27`"
+        }
+      ]
+    },
+    {
+      "id": "f14_02",
+      "category": "anti_pattern",
+      "sub_category": "single_experiment_dismissal",
+      "severity": "high",
+      "title": "GEMM category (f=67.3%) dismissed based on a single 4-shape thin-GEMM experiment by champion-1",
+      "description": "The entire GEMM category was ruled out based solely on champion-1's thin-GEMM Triton vs cuBLAS micro-experiment across 4 shapes. No replication by other champions, no alternative approaches tested (CUTLASS tuning, grouped GEMM, weight prefetch, split-K), and no acknowledgment that 54-65% BW utilization leaves >1.3x headroom. Champions 2 and 3 ran zero GEMM micro-experiments.",
+      "deduction": -1.5,
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 123,
+          "line_end": 125,
+          "claim": "Champion-1 extrapolated from 4 BW-bound shapes to claim GEMM is non-optimizable for all cases",
+          "quoted_content": "**This negative result eliminates GEMM optimization as a viable candidate**, confirming that GDN recurrent is the best custom kernel target."
+        },
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 116,
+          "line_end": 122,
+          "claim": "Champion-1's thin-GEMM benchmark tested only 4 shapes showing cuBLAS ahead by 14-15%",
+          "quoted_content": "| gate_up [32,2560,18432] | 203.3 | 237.5 | 0.86x |\n| down [32,9216,2560] | 107.1 | 125.1 | 0.86x |\n| QKVZ [32,2560,12288] | 131.2 | 155.1 | 0.85x |\n| out_proj [32,4096,2560] | 80.4 | 74.5 | 1.08x |"
+        }
+      ]
+    },
+    {
+      "id": "f14_03",
+      "category": "anti_pattern",
+      "sub_category": "cold_to_production_overestimation",
+      "severity": "moderate",
+      "title": "Champion-2 applied cold-cache 2.04x ratio directly to project 7.0% E2E without cold-to-production discount",
+      "description": "Champion-2's Round 1 argument applied the cold-cache kernel speedup ratio (2.04x) directly to f_decode=13.8% to project 7.0% E2E, calling this the 'most likely' scenario. The debate judges corrected the expected range to 2.8-4.6%. The 7.0% figure exceeded 2x the judges' corrected upper bound.",
+      "deduction": -1.0,
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-2_argument.md",
+          "line_start": 100,
+          "line_end": 105,
+          "claim": "Champion-2 applied cold-cache 2.04x directly to get 7.0% E2E without production discount",
+          "quoted_content": "Champion-3 correctly argues that GEMM weight streaming (200-400 MB) evicts state from L2 between GDN invocations. If state is always cold:\n\n- FP32 cold: 207.7 us -> BF16 cold: 101.6 us -> **2.04x kernel speedup**\n- E2E at BS=32: 0.138 x (1 - 1/2.04) = 0.138 x 0.510 = **7.0%**"
+        },
+        {
+          "file_path": "debate/round_1/champion-2_argument.md",
+          "line_start": 4,
+          "line_end": 5,
+          "claim": "Champion-2 argument labeled 5.9% as conservative and 6.9% as moderate E2E",
+          "quoted_content": "yielding a measured **2.04x kernel speedup** on the actual GDN kernel under CUDA graph capture with cold cache. Conservative E2E improvement: **5.9% at BS=32**; moderate: **6.9%**."
+        },
+        {
+          "file_path": "debate/proposals/champion-2_proposal.md",
+          "line_start": 136,
+          "line_end": 141,
+          "claim": "Original proposal labeled conservative estimate as 4.6% (1.5x speedup), not 5.9%",
+          "quoted_content": "| BS | f_decode | 1.5x speedup | 1.75x speedup | Impact qualification |\n|----|---------|-------------|-------------|---------------------|\n| 32 | 0.138   | 4.6%        | 6.0%        | **Significant**     |"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 88,
+          "line_end": 89,
+          "claim": "Debate judges corrected champion-2's E2E from 4.6-6.0% to 2.8-4.6%",
+          "quoted_content": "**Expected E2E**: 2.8-4.6% at BS=32 (corrected from original 4.6-6.0%)\n- **Conceded weaknesses**: Proxy measurements inflate speedup; constraints.md FP32 requirement must be validated"
+        }
+      ]
+    },
+    {
+      "id": "f14_04",
+      "category": "hallucinated_data",
+      "severity": "critical",
+      "title": "constraints.md FP32 state misreading led all champions astray and caused op002 to be a no-op",
+      "description": "constraints.md documented GDN recurrent state as 'FP32', which all three champions interpreted as the storage format baseline. In reality, vLLM's default mamba_ssm_cache_dtype='auto' resolves to BF16 for BF16 models. The constraint referred to compute precision (FP32 in registers), not storage dtype. This caused op002 to be a no-op optimization already deployed in the baseline.",
+      "citations": [
+        {
+          "file_path": "constraints.md",
+          "line_start": 78,
+          "line_end": 80,
+          "claim": "constraints.md states GDN recurrent state uses FP32 accumulation, leading to misinterpretation as FP32 storage",
+          "quoted_content": "The GDN recurrent state (`ssm_state`) uses FP32 accumulation (`mamba_ssm_dtype: float32`). ...The state is `[batch, num_v_heads, key_head_dim, value_head_dim]` in FP32."
+        },
+        {
+          "file_path": "tracks/op002_bf16_state/validation_results.md",
+          "line_start": 5,
+          "line_end": 5,
+          "claim": "op002 validation found the BF16 state optimization is already active by default in vLLM",
+          "quoted_content": "The proposed BF16 state optimization is **already active by default** in vLLM's production configuration. The `mamba_ssm_cache_dtype=\"auto\"` default resolves to BF16 for BF16 models like Qwen3.5-4B."
+        },
+        {
+          "file_path": "tracks/op002_bf16_state/validation_results.md",
+          "line_start": 55,
+          "line_end": 57,
+          "claim": "op002 clarified 'FP32 accumulation' in constraints.md meant compute precision, not storage dtype",
+          "quoted_content": "This refers to the **compute precision** (FP32 in registers inside the Triton kernel), NOT the **storage precision**. The storage dtype is determined by `mamba_ssm_cache_dtype` which defaults to \"auto\" = model dtype = BF16."
+        }
+      ]
+    },
+    {
+      "id": "f14_05",
+      "category": "hallucinated_data",
+      "severity": "high",
+      "title": "Champion-2's precision test used wrong recurrence formula (S = decay*S + v x k instead of actual delta rule)",
+      "description": "Champion-2's proposal precision test used the simplified formula S = decay*S + v x k instead of the actual GDN delta rule S = exp(g)*S + beta*(v - S@k) x k, omitting the critical S@k feedback term. The test reported safe precision (cosine 0.999986) that was later shown to diverge with the correct formula.",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-2_proposal.md",
+          "line_start": 80,
+          "line_end": 86,
+          "claim": "Champion-2 reported cosine similarity 0.999986 at decay 0.95 using the wrong recurrence formula",
+          "quoted_content": "| 0.95      | 0.000002 | 0.0003 | 0.67% | 0.999986 |\n\nFor typical decay rates (0.90-0.95), BF16 state introduces <1% relative error with cosine similarity >0.99998."
+        },
+        {
+          "file_path": "debate/round_1/champion-1_critique_champion-2.md",
+          "line_start": 36,
+          "line_end": 44,
+          "claim": "Champion-1 showed the actual formula includes S@k feedback, making champion-2's precision test invalid",
+          "quoted_content": "Champion-2's precision test in `champion2_gdn_bw_analysis.py:71-90` uses:\n```python\nstate_fp32 *= decay\nstate_fp32 += v_t.unsqueeze(-1) * k_t.unsqueeze(2)  # S = decay*S + v x k\n```\nThis is `S = decay*S + v x k` -- a simple linear accumulation. The **actual** GDN recurrence is:\n```\nS = exp(g)*S + beta*(v - S@k) x k\n```"
+        },
+        {
+          "file_path": "debate/round_1/champion-1_rebuttal.md",
+          "line_start": 38,
+          "line_end": 47,
+          "claim": "Running the correct formula produced 3/5 divergences at steps 157-329",
+          "quoted_content": "--- Exact model gating formula: g = -exp(A_log)*softplus(a+dt_bias) ---\n  Trial 0: DIVERGED at step 187 (last g=-0.2282)\n  Trial 1: OK step 512\n  Trial 3: DIVERGED at step 329 (last g=-0.1938)\n  Trial 4: DIVERGED at step 157 (last g=-0.3726)"
+        }
+      ]
+    },
+    {
+      "id": "f14_06",
+      "category": "hallucinated_data",
+      "severity": "moderate",
+      "title": "Champion-2 inflated conservative E2E estimate from 4.6% (proposal) to 5.9% (argument) without derivation",
+      "description": "Champion-2's Round 1 argument labeled 5.9% as the 'conservative' E2E estimate, but the original proposal's conservative estimate was 4.6% (at 1.5x kernel speedup). The debate judges corrected the expected range to 2.8-4.6%.",
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-2_argument.md",
+          "line_start": 4,
+          "line_end": 5,
+          "claim": "Champion-2 argument claims 5.9% conservative and 6.9% moderate E2E at BS=32",
+          "quoted_content": "yielding a measured **2.04x kernel speedup** on the actual GDN kernel under CUDA graph capture with cold cache. Conservative E2E improvement: **5.9% at BS=32**; moderate: **6.9%**."
+        },
+        {
+          "file_path": "debate/proposals/champion-2_proposal.md",
+          "line_start": 136,
+          "line_end": 141,
+          "claim": "Original proposal used 4.6% as conservative (1.5x) and 6.0% as moderate (1.75x)",
+          "quoted_content": "| 32 | 0.138   | 4.6%        | 6.0%        | **Significant**     |"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 88,
+          "line_end": 89,
+          "claim": "Judges corrected range to 2.8-4.6%, rejecting champion-2's inflated figures",
+          "quoted_content": "**Expected E2E**: 2.8-4.6% at BS=32 (corrected from original 4.6-6.0%)"
+        }
+      ]
+    },
+    {
+      "id": "f14_07",
+      "category": "track_failure",
+      "sub_category": "op001_persistent_cta",
+      "severity": "critical",
+      "title": "op001 persistent CTA kernel correct but SMEM budget exceeded and cold BW at ceiling",
+      "description": "The persistent CTA CUDA kernel passed correctness (state diff 7.15e-07) but failed all performance criteria. Double-buffered SMEM design required 128 KB but L40S limit is 100 KB/SM, forcing single-buffering which eliminated the core prefetch overlap benefit. Cold BW was invariant at 73% peak across all 9 tested configs. Best production speedup: 1.034x (below 1.1x kill criterion), projecting only 0.7% E2E (below 1.0% kill criterion).",
+      "citations": [
+        {
+          "file_path": "tracks/op001_persistent_cta/validation_results.md",
+          "line_start": 15,
+          "line_end": 16,
+          "claim": "SMEM single-buffered at 64KB because double-buffering 128KB exceeds L40S 100KB/SM limit",
+          "quoted_content": "Full [128, 128] FP32 state in SMEM (64 KB, single-buffered -- double-buffering exceeds 100 KB SMEM/SM limit)"
+        },
+        {
+          "file_path": "tracks/op001_persistent_cta/validation_results.md",
+          "line_start": 63,
+          "line_end": 69,
+          "claim": "SMEM CTA kernel regressed at BS=32: 0.533x warm, 0.939x cold",
+          "quoted_content": "| 32 | 37.6 | 215.5 | 70.5 | 229.4 | 0.533x | 0.939x |\n\n**BS=32 result**: 0.533x warm (REGRESSION), 0.939x cold (REGRESSION)"
+        },
+        {
+          "file_path": "tracks/op001_persistent_cta/validation_results.md",
+          "line_start": 100,
+          "line_end": 102,
+          "claim": "Best Triton config achieves only 1.034x production speedup, below 1.1x kill criterion",
+          "quoted_content": "Even the best Triton config at production warm/cold mix: `0.58 x 33.8 + 0.42 x 212.8 = 108.8us` vs baseline `0.58 x 37.7 + 0.42 x 215.7 = 112.5us` -> **1.034x production speedup**. Below 1.1x."
+        },
+        {
+          "file_path": "tracks/op001_persistent_cta/validation_results.md",
+          "line_start": 38,
+          "line_end": 50,
+          "claim": "Kernel correctness passed: state max diff 7.15e-07 across all batch sizes",
+          "quoted_content": "| 1 | True | 2.44e-04 | 7.15e-07 | PASS |\n...\n| 32 | True | 1.95e-03 | 7.15e-07 | PASS |"
+        }
+      ]
+    },
+    {
+      "id": "f14_08",
+      "category": "track_failure",
+      "sub_category": "op002_bf16_state",
+      "severity": "critical",
+      "title": "op002 BF16 state was already the vLLM production default -- optimization was a no-op",
+      "description": "The BF16 state optimization was already active by default. vLLM's mamba_ssm_cache_dtype='auto' resolves to BF16 for BF16 models. The Stage 1 baseline was captured with BF16 state already in use. The optimization's measured benefit (1.95x cold kernel speedup for FP32->BF16) was real but already captured in the baseline measurement.",
+      "citations": [
+        {
+          "file_path": "tracks/op002_bf16_state/validation_results.md",
+          "line_start": 26,
+          "line_end": 32,
+          "claim": "Default config resolution shows mamba_ssm_cache_dtype='auto' resolves to BF16 for BF16 models",
+          "quoted_content": "When `mamba_ssm_cache_dtype=\"auto\"` (the default), `_mamba_state_dtype` resolves the SSM state dtype to `conv_state_dtype`, which is `get_kv_cache_torch_dtype(\"auto\", model_dtype)` = **torch.bfloat16** for BF16 models."
+        },
+        {
+          "file_path": "tracks/op002_bf16_state/validation_results.md",
+          "line_start": 42,
+          "line_end": 45,
+          "claim": "Stage 1 baseline command used no --mamba-ssm-cache-dtype flag, so default 'auto' = BF16 was used",
+          "quoted_content": "```\nvllm bench latency --model Qwen/Qwen3.5-4B --tensor-parallel-size 1 ...\n```\nNo `--mamba-ssm-cache-dtype` flag was passed, so the default \"auto\" was used, which resolves to BF16."
+        },
+        {
+          "file_path": "tracks/op002_bf16_state/validation_results.md",
+          "line_start": 87,
+          "line_end": 93,
+          "claim": "Benchmark confirmed FP32 vs BF16 cold speedup is 1.95x at BS=32 but already captured in baseline",
+          "quoted_content": "| 32 | 37.7 | 22.2 | 214.0 | 109.9 | 1.95x |\n\nThis confirms the BF16 state benefit IS real -- it's just already captured in the baseline."
+        }
+      ]
+    },
+    {
+      "id": "f14_09",
+      "category": "delegation_issue",
+      "sub_category": "utilization_failure",
+      "severity": "moderate",
+      "title": "Delegate-3a produced rival analysis for wrong proposals from a different campaign context",
+      "description": "Delegate-3a's rival analysis described champion-1 as 'Triton Autotuned Skinny-M GEMM' and champion-2 as 'Fused GDN Decode Core (CUTLASS CuTe)' -- neither matching the actual proposals. The delegate was apparently recycled from a different campaign. Champion-3 correctly ignored the analysis entirely.",
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-3a_rival_analysis.md",
+          "line_start": 5,
+          "line_end": 8,
+          "claim": "Delegate-3a described champion-1 as Triton Skinny-M GEMM, not the actual CUDA C++ GDN rewrite",
+          "quoted_content": "## Champion-1 Analysis: Triton Autotuned Skinny-M GEMM\n\n### Core Claim\nReplace `default_unquantized_gemm` -> `F.linear` with a custom Triton GEMM kernel family specialized for M<=16 shapes on SM 8.9."
+        },
+        {
+          "file_path": "debate/delegate_work/delegate-3a_rival_analysis.md",
+          "line_start": 85,
+          "line_end": 89,
+          "claim": "Delegate-3a described champion-2 as CUTLASS CuTe fused decode, not the actual BF16 state Triton modification",
+          "quoted_content": "## Champion-2 Analysis: Fused GDN Decode Core (CUTLASS CuTe)\n\n### Core Claim\nFuse `fused_gdn_gating_kernel` + `fused_recurrent_gated_delta_rule_fwd_kernel` into a single CUTLASS CuTe kernel"
+        },
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 205,
+          "line_end": 212,
+          "claim": "Champion-3's references section does not cite delegate-3a's rival analysis, confirming it was unused",
+          "quoted_content": "- `bottleneck_analysis.md`: f_decode values, kernel timing\n- `constraints.md`: Model dimensions (H=16, HV=32, K=128, V=128), FP32 state constraint\n- `debate/micro_experiments/gdn_recurrent_bench.py`: Warm/cold cache timing\n- `debate/micro_experiments/gdn_bv_sweep.py`: BV/warps sweep"
+        }
+      ]
+    },
+    {
+      "id": "f14_10",
+      "category": "delegation_issue",
+      "sub_category": "efficiency_issue",
+      "severity": "low",
+      "title": "Delegate-1a and delegate-2a produced substantially overlapping GDN kernel analyses",
+      "description": "Both delegates independently produced GDN kernel analyses with overlapping content: same kernel signature, grid configuration (BV=32, num_warps=1, grid=(1,4,N*HV)), state shape, per-block memory access breakdown, and FLOP analysis. Delegate-2a produced no materially new findings beyond delegate-1a's earlier work.",
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-1a_gdn_kernel_analysis.md",
+          "line_start": 42,
+          "line_end": 55,
+          "claim": "Delegate-1a documented grid=(1,4,1024), BV=32, num_warps=1, state = [BS,32,128,128] FP32",
+          "quoted_content": "| BV     | 32    | `min(next_power_of_2(V), 32)` = **hardcoded max 32** |\n| NK     | 1     | K/BK = 1 |\n| NV     | 4     | V/BV = 128/32 = 4 |"
+        },
+        {
+          "file_path": "debate/delegate_work/delegate-2a_gdn_kernel_analysis.md",
+          "line_start": 40,
+          "line_end": 52,
+          "claim": "Delegate-2a documented the same grid configuration, state shape, and kernel parameters",
+          "quoted_content": "BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)\n# With K=128, V=128: BK=128, BV=32\nNK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)\n# NK=1 (K fits in BK), NV=4 (128/32=4)\n\ngrid = (NK, NV, N * HV)  # (1, 4, N * 32)\nnum_warps = 1"
+        }
+      ]
+    },
+    {
+      "id": "f14_11",
+      "category": "delegation_positive",
+      "sub_category": "causality_chain",
+      "severity": "positive",
+      "title": "Delegate-1a provided roofline data that champion-1 directly cited in proposal",
+      "description": "Delegate-1a produced BW floor estimates and state size analysis not found in bottleneck_analysis.md. Champion-1 directly cited delegate-1a for roofline calculations, producing more precise feasibility math. The read-only floor of 77.5 us informed champion-1's 68% BW utilization claim.",
+      "bonus": 0.5,
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-1a_gdn_kernel_analysis.md",
+          "line_start": 129,
+          "line_end": 136,
+          "claim": "Delegate-1a provided BW floor estimates not found in bottleneck_analysis.md",
+          "quoted_content": "| All HBM (cold cache) | 864 GB/s | 136.9 MB / 864 GB/s = **158 us** |\n| State from L2, rest HBM | ~4,000 GB/s (L2) + 864 (HBM) | ~32-40 us for state + 3 us activations ~ **35-43 us** |\n| **Measured at BS=32** | -- | **113.6 us** |"
+        },
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 46,
+          "line_end": 48,
+          "claim": "Champion-1 cited delegate-1a for roofline calculation in proposal",
+          "quoted_content": "[Source: delegate-1a_gdn_kernel_analysis.md, my roofline calculation]"
+        }
+      ]
+    },
+    {
+      "id": "f14_12",
+      "category": "key_measurement",
+      "severity": "informational",
+      "title": "Cold BW ceiling proven invariant at 73% peak across all 9 Triton configs",
+      "description": "Champion-3's BV/warps sweep tested 9 configurations at BS=32 under CUDA graph capture. All working configs converged to ~630 GB/s cold BW (73% of L40S peak 864 GB/s). This proves the cold-cache BW ceiling is a physical limit independent of tiling strategy.",
+      "citations": [
+        {
+          "file_path": "tracks/op001_persistent_cta/validation_results.md",
+          "line_start": 77,
+          "line_end": 92,
+          "claim": "All 9 configs converge to ~212-216us cold, confirming 73% peak BW ceiling is invariant",
+          "quoted_content": "| 32 | 1 | 4096 | 37.7 | 215.7 | 1.000x (baseline) | 1.000x |\n| **32** | **8** | **4096** | **33.8** | **212.8** | **1.114x** | **1.013x** |\n...\n| 128 | 8 | 1024 | 46.3 | 212.1 | 0.815x | 1.017x |"
+        },
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 76,
+          "line_end": 82,
+          "claim": "BV sweep shows all working configs converge to ~630 GB/s cold BW (73% peak)",
+          "quoted_content": "| BV=32, nw=1 (baseline) | 4096 | 40.6 | 214.9 | 628 | 72.7% |\n| BV=32, nw=2 | 4096 | 36.8 | 214.2 | 630 | 73.0% |\n| BV=64, nw=4 | 2048 | 38.1 | 215.2 | 627 | 72.6% |\n| BV=128, nw=4 | 1024 | 45.8 | 213.7 | 632 | 73.1% |"
+        }
+      ]
+    },
+    {
+      "id": "f14_13",
+      "category": "key_measurement",
+      "severity": "informational",
+      "title": "5.24x warm/cold ratio at BS=32 proves extreme L2 cache sensitivity",
+      "description": "The baseline GDN kernel shows 40.9us warm vs 214.2us cold at BS=32 under CUDA graph capture, a 5.24x ratio. Production nsys measured 113.6us, indicating 58% L2 benefit retained. This confirms L2 state management is the dominant performance lever, not cold-cache BW improvement.",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 58,
+          "line_end": 63,
+          "claim": "Warm/cold ratio is 5.24x at BS=32 under CUDA graph capture",
+          "quoted_content": "| 32 | 40.9 | 214.2 | **5.24x** | 630 GB/s | **72.9%** |\n\n**Critical finding**: The warm/cold ratio is **5.24x at BS=32**, indicating extreme cache sensitivity."
+        }
+      ]
+    },
+    {
+      "id": "f14_14",
+      "category": "campaign_outcome",
+      "severity": "critical",
+      "title": "Campaign exhausted with 0 shipped optimizations, both tracks failed, 100% implementation failure rate",
+      "description": "Campaign concluded after Round 1 with 0 shipped optimizations. Both selected tracks failed: op001 (persistent CTA) due to SMEM budget and cold BW ceiling, op002 (BF16 state) due to being already deployed. The state.json summary claims 'GDN recurrent at 13.8% is proven unreachable' and 'GEMM at 67.3% proven non-optimizable' but the GEMM claim rests on a single experiment.",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 111,
+          "line_end": 111,
+          "claim": "Campaign summary claims both GDN and GEMM are proven non-optimizable",
+          "quoted_content": "CAMPAIGN EXHAUSTED after Round 1. Both tracks failed: op002 (BF16 state already default), op001 (persistent CTA correct but cold BW ceiling prevents reaching kill criteria). GDN recurrent at 13.8% is proven unreachable. GEMM at 67.3% proven non-optimizable via custom kernels."
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 15,
+          "line_end": 17,
+          "claim": "op001 failed: SMEM budget exceeded, cold BW ceiling at 73%, best E2E 0.7%",
+          "quoted_content": "\"op001_persistent_cta\": {\"status\": \"FAILED\", \"reason\": \"SMEM budget exceeded, cold BW ceiling at 73%, best achievable E2E 0.7% (below 1.0% kill criterion)\"}"
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 18,
+          "line_end": 18,
+          "claim": "op002 failed: optimization already deployed as vLLM default",
+          "quoted_content": "\"op002_bf16_state\": {\"status\": \"FAILED\", \"reason\": \"Optimization already deployed as vLLM default (mamba_ssm_cache_dtype=auto)\"}"
+        }
+      ]
+    },
+    {
+      "id": "f14_15",
+      "category": "debate_quality",
+      "severity": "informational",
+      "title": "Debate scored 9.0/10 with strong micro-experiment methodology despite strategic failure",
+      "description": "Despite the campaign's strategic failure, the debate showed high quality: 100% grounding rate, 100% micro-experiment rate, component diversity achieved. The micro-experiment methodology was rigorous (CUDA graph capture, cold-cache cycling, warm/cold decomposition, honest kill criteria). The failure was strategic (dominant_component_avoidance) not methodological.",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 11,
+          "line_end": 24,
+          "claim": "Debate scoring rubric shows all champions provided grounded proposals with micro-experiments",
+          "quoted_content": "| Proposal quality | 15% | 7 | 8 | 9 |\n| Feasibility evidence | 25% | 6 | 5 | 7 |\n| E2E impact potential | 20% | 5 | 7 | 5 |\n| Survived critiques | 25% | 6 | 4 | 8 |"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 96,
+          "line_end": 103,
+          "claim": "Debate identified 5 key findings including cold BW ceiling, L2 lever, GEMM non-viability",
+          "quoted_content": "1. **Cold BW is at ceiling**: Both champion-1 (77%) and champion-3 (73%) independently confirmed that Triton config changes have no effect on cold-cache BW.\n2. **L2 management is the lever**: The 5.24x warm/cold ratio at BS=32 is the dominant performance factor.\n3. **GEMM is NOT a viable custom kernel target**: Champion-1's thin-GEMM experiment proved cuBLAS wins by 14-15%"
+        }
+      ]
+    },
+    {
+      "id": "f14_16",
+      "category": "key_measurement",
+      "severity": "informational",
+      "title": "Model is deeply BW-bound at all batch sizes: AI 1-32 FLOP/byte vs 424 crossover",
+      "description": "Qwen3.5-4B decode is deeply memory-bandwidth-bound at all tested batch sizes. Arithmetic intensity ranges from 1 FLOP/byte (BS=1) to 32 FLOP/byte (BS=32), far below the L40S roofline crossover at 424 FLOP/byte. BW utilization ranges 49-78%.",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 7,
+          "line_end": 9,
+          "claim": "Model is firmly in BW-bound regime at all batch sizes",
+          "quoted_content": "The model is firmly in the BW-bound regime for all tested batch sizes (arithmetic intensity 1-32 FLOP/byte vs. roofline crossover at 424 FLOP/byte). Measured BW utilization ranges from 49% (BS=32) to 78% (BS=1)."
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 22,
+          "line_end": 27,
+          "claim": "E2E baseline measurements: 6.546s (BS=1), 7.836s (BS=8), 10.266s (BS=32)",
+          "quoted_content": "| 1 | 6.546 | 12.78 | 12.54 | 77.6 |\n| 8 | 7.836 | 15.30 | 14.98 | 65.0 |\n| 32 | 10.266 | 20.05 | 19.78 | 49.2 |"
+        }
+      ]
+    },
+    {
+      "id": "f14_17",
+      "category": "missed_opportunity",
+      "severity": "high",
+      "title": "op001 validation itself identified GEMM as higher-impact target than GDN",
+      "description": "The op001 validation results explicitly recommend targeting GEMM instead: 'At BS=32, GEMM/GEMV is 67.3% of decode time. Even small GEMM improvements (1-2%) yield more E2E impact than large GDN improvements.' This confirms the dominant_component_avoidance anti-pattern was recognized too late.",
+      "citations": [
+        {
+          "file_path": "tracks/op001_persistent_cta/validation_results.md",
+          "line_start": 172,
+          "line_end": 173,
+          "claim": "op001 validation recommends targeting GEMM at 67.3% over GDN at 13.8%",
+          "quoted_content": "3. **Target different kernels**: At BS=32, GEMM/GEMV is 67.3% of decode time. Even small GEMM improvements (1-2%) yield more E2E impact than large GDN improvements."
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "what_went_wrong": "Three interrelated failures: (1) All champions converged on the GDN recurrent kernel (f=13.8%) while ignoring the dominant GEMM component (f=67.3%), a textbook dominant_component_avoidance anti-pattern. (2) constraints.md's ambiguous 'FP32 state' wording was misread as storage dtype when it meant compute precision, causing op002 to be a no-op already deployed in the baseline. (3) Champion-2 used the wrong recurrence formula for precision testing and applied cold-cache speedup ratios directly to E2E projections without production discount.",
+    "score_breakdown": "Overall 2.89/10: E2E outcome 0.0 (40% weight, no speedup shipped), gate pass rates 1.0 (15%, 1/4 gates passed), debate quality 9.0 (15%, rigorous micro-experiments), campaign efficiency 6.0 (15%, but 100% implementation failure), transcript quality 3.25 (15%, three anti-patterns totaling -4.5 plus three hallucinated data instances at -3.0).",
+    "root_cause": "Strategic: the debate phase was methodologically rigorous but strategically failed by not requiring independent verification before dismissing the dominant GEMM component. The campaign's single negative GEMM experiment by champion-1 was accepted without replication, allowing all optimization effort to flow to a 13.8% component while 67.3% of GPU time went unaddressed."
+  }
+}

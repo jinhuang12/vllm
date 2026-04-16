@@ -1,0 +1,542 @@
+{
+  "run_idx": 16,
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "overall_score": 8.65,
+  "overall_score_without_transcript": 9.29,
+  "campaign_status": "campaign_complete",
+  "cumulative_e2e_speedup": 1.262,
+  "total_rounds": 2,
+  "shipped_optimizations": [
+    "OP-002",
+    "OP-R2-001"
+  ],
+  "findings": [
+    {
+      "category": "e2e_outcome",
+      "subcategory": "cumulative_speedup",
+      "summary": "Campaign achieved 1.262x cumulative E2E speedup at BS=8 across 2 rounds, with Round 2 contributing the vast majority (1.227x) via FP8 W8A16 weight compression",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 3,
+          "line_end": 5,
+          "claim": "Campaign completed with 1.262x cumulative E2E speedup across 2 rounds",
+          "quoted_content": "\"cumulative_e2e_speedup\": 1.262,\n\"current_round\": 2,\n\"diminishing_returns_threshold_pct\": 3,"
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 97,
+          "line_end": 98,
+          "claim": "Summary confirms 26.2% improvement at BS=8",
+          "quoted_content": "\"summary\": \"Campaign complete. 2 rounds, 2 shipped optimizations. Cumulative speedup: 1.262x (26.2%) at BS=8.\""
+        }
+      ]
+    },
+    {
+      "category": "e2e_outcome",
+      "subcategory": "round1_speedup",
+      "summary": "Round 1 shipped OP-002 (fused GDN preprocess + in_proj_ba inline) delivering 1.0346x E2E at BS=8, targeting linear attention overhead (7% of decode) rather than the dominant GEMM bottleneck (89%)",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 11,
+          "line_end": 19,
+          "claim": "Round 1 shipped OP-002 with 1.0346x E2E speedup, selected from 2 candidates",
+          "quoted_content": "\"round_id\": 1,\n\"profiling_baseline_path\": \"e2e_latency/\",\n\"top_bottleneck_share_pct\": 89.0,\n...\"shipped\": [\"OP-002\"],\n\"cumulative_speedup_after\": 1.0346"
+        },
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 123,
+          "line_end": 127,
+          "claim": "OP-002 delivered 3.46% E2E improvement at BS=8, best at BS=4 (4.03%), no regressions",
+          "quoted_content": "| 8  | 7.782 | 7.513 | 1.0358x | **3.46%** |\n| 16 | 8.417 | 8.262 | 1.0188x | 1.84% |\n| 32 | 10.270 | 10.116 | 1.0152x | 1.50% |"
+        }
+      ]
+    },
+    {
+      "category": "e2e_outcome",
+      "subcategory": "round2_speedup",
+      "summary": "Round 2 shipped OP-R2-001 (FP8 W8A16 weight-only dequant GEMM) delivering 1.227x E2E over patched R2 baseline at BS=8, the largest single optimization in the campaign",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 21,
+          "line_end": 32,
+          "claim": "Round 2 shipped OP-R2-001 with 1.227x E2E speedup over patched R2 baseline",
+          "quoted_content": "\"round_id\": 2,\n\"profiling_baseline_path\": \"e2e_latency_patched_r2/\",\n\"top_bottleneck_share_pct\": 89.2,\n...\"shipped\": [\"OP-R2-001\"],\n\"cumulative_speedup_after\": 1.262"
+        },
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 109,
+          "line_end": 115,
+          "claim": "OP-R2-001 delivered 18.5% improvement at BS=8, consistent 14-18% across all batch sizes",
+          "quoted_content": "| 1 | 6.5248 | 5.5826 | **1.169x** | 14.4% |\n| 4 | 7.1239 | 5.8711 | **1.213x** | 17.6% |\n| 8 | 7.5657 | 6.1642 | **1.227x** | 18.5% |\n| 16 | 8.3343 | 6.8611 | **1.215x** | 17.7% |\n| 32 | 10.1372 | 8.3409 | **1.215x** | 17.7%"
+        }
+      ]
+    },
+    {
+      "category": "e2e_outcome",
+      "subcategory": "combined_improvement",
+      "summary": "Combined OP-002 + OP-R2-001 vs original baseline: 1.262x at BS=8, 1.256x at BS=4, 1.231x at BS=32. Orthogonal optimizations (linear attn overhead + GEMM weight compression)",
+      "citations": [
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 119,
+          "line_end": 125,
+          "claim": "Combined speedup table shows consistent improvement across all batch sizes with peak at BS=8 (1.262x)",
+          "quoted_content": "| 1 | 6.5579 | 6.5248 | 5.5826 | **1.175x** |\n| 4 | 7.3744 | 7.1239 | 5.8711 | **1.256x** |\n| 8 | 7.7816 | 7.5657 | 6.1642 | **1.262x** |\n| 16 | 8.4166 | 8.3343 | 6.8611 | **1.227x** |\n| 32 | 10.2696 | 10.1372 | 8.3409 | **1.231x** |"
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 55,
+          "line_end": 56,
+          "claim": "Integration analysis confirmed orthogonality between R1 and R2 optimizations",
+          "quoted_content": "\"conflict_analysis\": \"R2: Single candidate (OP-R2-001). Ship directly. Different component (GEMM) from R1 (linear attn). Orthogonal.\""
+        }
+      ]
+    },
+    {
+      "category": "profiling_quality",
+      "subcategory": "bottleneck_analysis",
+      "summary": "Bottleneck analysis correctly identified GEMM as 89% of decode at BS=8 with 68.8% BW utilization, and computed accurate Amdahl ceilings showing FP8 as the primary lever (2.41x E2E ceiling at BS=8). Analysis covered all 5 batch sizes with full kernel breakdown.",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 397,
+          "line_end": 413,
+          "claim": "GEMM identified as rank 1 bottleneck: 89.0% of decode at BS=8, 68.8% BW utilization, 1.38x Amdahl ceiling at BF16 peak BW",
+          "quoted_content": "### Rank 1: GEMM (Weight Projections)\n| f_decode at BS=8 | 89.0% |\n| BW utilization at BS=8 | 68.8% (504.3 / 733 GB/s) |\n| Physical ceiling (BF16 peak BW) | 1.45x at BS=8 |\n| Amdahl ceiling (BF16 peak BW) | 1.38x at BS=8 |"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 387,
+          "line_end": 392,
+          "claim": "Weight compression ceilings computed: FP8 at peak BW yields 2.91x GEMM speedup, 2.41x Amdahl E2E at BS=8",
+          "quoted_content": "| BF16 at peak BW | 6,710.9 | 9,155 | 1.45x | 1.38x |\n| FP8 at peak BW | 3,355.5 | 4,578 | 2.91x | 2.41x |\n| INT4 at peak BW | 1,677.7 | 2,289 | 5.81x | 3.85x |"
+        }
+      ]
+    },
+    {
+      "category": "profiling_quality",
+      "subcategory": "post_round1_reprofiling",
+      "summary": "Post-OP-002 reprofiling (Sections 11-18 of bottleneck analysis) showed GEMM share essentially unchanged (89.0% -> 89.2%), confirming the dominant bottleneck persisted and correctly guiding Round 2 to target GEMM with FP8",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 640,
+          "line_end": 653,
+          "claim": "Post-OP-002 GEMM share unchanged at 89.2%, FP8 Amdahl ceiling recalculated at 2.34x E2E for BS=8",
+          "quoted_content": "#### Rank 1: GEMM (Weight Projections) -- UNCHANGED\n| f_decode at BS=8 | 89.0% | 89.2% |\n| BW utilization at BS=8 | 68.8% | 70.8% |\n| **FP8 Amdahl E2E at BS=8** | **2.41x** | **2.34x** |"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 689,
+          "line_end": 700,
+          "claim": "Summary of what changed after OP-002: GEMM is still 89.2% at BS=8, FP8 at peak BW gives 2.34x E2E",
+          "quoted_content": "**What remains unchanged**:\n- **GEMM is still 89.2% at BS=8** with BW utilization at 70.8%. Amdahl ceilings by weight format: BF16 at peak BW gives 1.34x E2E; FP8 at peak BW gives 2.34x E2E; INT4 at peak BW gives 3.73x E2E."
+        }
+      ]
+    },
+    {
+      "category": "profiling_quality",
+      "subcategory": "kernel_chain_analysis",
+      "summary": "Bottleneck analysis included per-layer kernel chain mapping with source code correlation, identifying two distinct layer patterns (24 linear attention + 8 full attention) with exact timings per kernel in the decode chain",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 194,
+          "line_end": 219,
+          "claim": "Linear attention layer kernel chain mapped with per-kernel timings: ~423 us total per layer at BS=8 (GEMM 359us, linear attn 42us, overhead 22us)",
+          "quoted_content": "**Per linear-attn layer total: ~423 us** (GEMM: ~359 us, linear attn core: ~42 us, overhead: ~22 us)"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 296,
+          "line_end": 334,
+          "claim": "Source code to kernel mapping links each projection in Qwen3_5DecoderLayer.forward() to specific CUDA kernels with measured timings",
+          "quoted_content": "### 6. Source Code to Kernel Mapping\n### Qwen3_5DecoderLayer.forward() (qwen3_5.py line 207, qwen3_next.py line 1031)\n...gate_up_proj(hidden) --> WMMA_128x2 (~155 us) [2560 -> 18432]\n...down_proj(hidden) --> WMMA_128x2 (~74 us) [9216 -> 2560]"
+        }
+      ]
+    },
+    {
+      "category": "debate_quality",
+      "subcategory": "round1_debate",
+      "summary": "Round 1 debate had 3 champions producing 6 proposals total, with 100% grounding rate and 100% micro-experiment rate. Key findings included BV=128 being invalid, in_proj_ba inline as highest-ROI, and Triton unable to beat CUTLASS for BW-bound skinny GEMMs",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 1,
+          "line_end": 16,
+          "claim": "Round 1 debate scored 3 champions: Champion-1 at 8.15, Champion-2 at 6.65, Champion-3 at 7.00",
+          "quoted_content": "## Scoring\n| **Weighted Total** | | **8.15** | **6.65** | **7.00** |\n### Champion-1: Fused Linear Attention Decode Kernel (Full Fusion, NV=1) -- **8.15**"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 65,
+          "line_end": 76,
+          "claim": "Six key debate findings including BV=128 invalidation, in_proj_ba as highest ROI, and Triton vs CUTLASS conclusion",
+          "quoted_content": "1. **BV=128 tile optimization is NOT real in production**...\n2. **in_proj_ba inline is the highest-ROI single optimization** -- 15.3 us/layer saved...\n4. **Triton cannot beat CUTLASS for BW-bound skinny GEMMs**...\n6. **Inter-kernel gaps under CUDA graphs are ~0.22 us median** (not 3 us)."
+        }
+      ]
+    },
+    {
+      "category": "debate_quality",
+      "subcategory": "round2_debate",
+      "summary": "Round 2 debate correctly identified FP8 W8A16 as the dominant GEMM optimization, with Champions 1 and 2 converging on the same technique. The merged winner (OP-R2-001) combined Champion-1's autotuning with Champion-2's N-major layout",
+      "citations": [
+        {
+          "file_path": "debate/campaign_round_2/summary.md",
+          "line_start": 38,
+          "line_end": 47,
+          "claim": "Round 2 selected merged FP8 W8A16 kernel combining best elements from Champions 1 and 2, expected 1.35-1.50x E2E",
+          "quoted_content": "### Winner: Merged FP8 W8A16 Kernel (OP-R2-001)\n**Rationale**: Champions 1 and 2 converged on the same technique (FP8 weight-only dequant Triton GEMM). The implementation should merge the best elements:\n- Champion-1's autotuning strategy (8 tile configs per shape)\n- Champion-2's N-major weight layout (universal improvement)"
+        },
+        {
+          "file_path": "debate/campaign_round_2/summary.md",
+          "line_start": 66,
+          "line_end": 72,
+          "claim": "Key Round 2 findings: FP8 W8A16 is dominant optimization, N-major layout universally better, benchmark methodology matters",
+          "quoted_content": "1. **FP8 W8A16 is the dominant GEMM optimization**: Halving weight bytes from BF16->FP8 directly addresses the BW bottleneck. Measured 1.55-2.13x kernel speedups across all projection shapes.\n2. **N-major weight layout is universally better**"
+        }
+      ]
+    },
+    {
+      "category": "debate_quality",
+      "subcategory": "filtering_correctness",
+      "summary": "Debate filtering was scored as incorrect: Round 1 collectively avoided the dominant 89% GEMM component based on a single non-FP8 negative experiment, missing the campaign's largest optimization opportunity",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 71,
+          "line_end": 72,
+          "claim": "Round 1 debate concluded Triton cannot beat CUTLASS, eliminating GEMM as optimization target based on single SwiGLU fusion test",
+          "quoted_content": "4. **Triton cannot beat CUTLASS for BW-bound skinny GEMMs** -- Champion-3's negative result eliminates the GEMM component (89% of decode) as a kernel-level optimization target on this hardware."
+        },
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 59,
+          "line_end": 72,
+          "claim": "Champion-1 dismissed GEMM using L2-warmed benchmarks showing physically impossible BW utilization (115%, 156%, 171%)",
+          "quoted_content": "### Why not target GEMM?\nGEMM is 89% of decode, but the large GEMMs already achieve high BW utilization:\n| gate_up_proj | 94.4 | 128.7 | 111.5 | 846 | 115%* |\n| down_proj | 47.2 | 64.4 | 41.2 | 1144 | 156%* |"
+        }
+      ]
+    },
+    {
+      "category": "campaign_efficiency",
+      "subcategory": "convergence",
+      "summary": "Campaign converged in 2 rounds with 0 failed implementation tracks (3/3 passed). Zero failed implementations and convergence earned maximum campaign efficiency score (10.0)",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 63,
+          "line_end": 93,
+          "claim": "All 3 parallel tracks (OP-001, OP-002, OP-R2-001) passed validation with correctness=true",
+          "quoted_content": "\"OP-001\": {\"status\": \"PASSED\", \"correctness\": true, \"kernel_speedup\": 1.30, \"e2e_speedup\": 1.0117},\n\"OP-002\": {\"status\": \"PASSED\", \"correctness\": true, \"kernel_speedup\": 4.67, \"e2e_speedup\": 1.0346},\n\"OP-R2-001\": {\"status\": \"PASSED\", \"correctness\": true, \"kernel_speedup\": 1.81, \"e2e_speedup\": 1.227}"
+        }
+      ]
+    },
+    {
+      "category": "campaign_efficiency",
+      "subcategory": "round1_track_selection",
+      "summary": "Round 1 selected OP-002 over OP-001 for shipping despite OP-001 having higher debate score (8.15 vs 7.00), because OP-002 delivered higher E2E improvement (3.46% vs 1.17% at BS=8) with simpler phased implementation",
+      "citations": [
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 12,
+          "line_end": 12,
+          "claim": "OP-002 delivered 3.46% E2E improvement at BS=8 with no regressions on any batch size",
+          "quoted_content": "All three validation gates pass. The optimization delivers 3.46% E2E improvement at BS=8 with no regressions on any batch size."
+        },
+        {
+          "file_path": "tracks/OP-001/validation_results.md",
+          "line_start": 3,
+          "line_end": 5,
+          "claim": "OP-001 passed all gates but delivered lower 1.17% E2E at BS=8 with 1.30x kernel speedup",
+          "quoted_content": "| 5.2 Kernel Perf | PASS | 1.30x avg speedup (warm); 1.12x at BS=8 cold; no regression at target BS |\n| 5.3 E2E Latency | PASS | 1.17% improvement at BS=8; positive at all BS; no regression at BS=32 (p50) |"
+        }
+      ]
+    },
+    {
+      "category": "optimization_technique",
+      "subcategory": "op002_fused_gdn_preprocess",
+      "summary": "OP-002 fused 5 micro-kernels into a single Triton kernel per linear attention layer: conv1d update + Q/K/V split + gating + in_proj_ba inline. Achieved 4.67x kernel speedup, eliminated WMMA 128x1 GEMM from decode, removed 72 copy operations per decode step",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 510,
+          "line_end": 512,
+          "claim": "OP-002 shipped fused Triton kernel combining in_proj_ba inline, 3x BF16 copy elimination, and gating fusion",
+          "quoted_content": "**What changed**: OP-002 shipped a fused Triton kernel (`_fused_gdn_preprocess_kernel`) that combines the pre-recurrence operations in each of the 24 linear attention layers:\n1. **Inlined `in_proj_ba`** (beta/alpha projection, 2560->64) -- eliminated the WMMA 128x1 GEMM from decode"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 527,
+          "line_end": 537,
+          "claim": "Kernel-level verification: net savings of 971.6ms at BS=8, WMMA 128x1 decode instances eliminated, 72 copies/step removed",
+          "quoted_content": "| WMMA 128x1 (in_proj_ba decode) | 5496.2 ms (63,857 inst) | 4553.0 ms (2,564 inst) | -943.2 ms |\n| elementwise_copy BFloat16 | 377.4 ms (225,256 inst) | 75.7 ms (41,600 inst) | -301.7 ms |\n| **Net kernel savings** | | | **-971.6 ms** |"
+        },
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 87,
+          "line_end": 99,
+          "claim": "Kernel performance: Phase 2 at BS=8 saves 34.96 us per call, 4.67x average speedup, 839 us/decode step across 24 layers",
+          "quoted_content": "| 8  | 44.49 | 10.68 | 9.53 | 4.16x | 4.67x |\n...The Phase 2 kernel at BS=8 saves **34.96 us** per call (44.49 - 9.53 = 34.96 us), which across 24 GDN layers = **839 us/decode step**. This is ~5.6% of the 14,944 us total decode GPU time at BS=8."
+        }
+      ]
+    },
+    {
+      "category": "optimization_technique",
+      "subcategory": "op_r2_001_fp8_w8a16",
+      "summary": "OP-R2-001 implemented FP8 weight-only dequant-fused GEMM (W8A16) via Triton, halving weight memory traffic for all linear projections. Achieved 1.81x weighted kernel speedup at BS=8 with per-shape speedups from 1.32x to 1.97x",
+      "citations": [
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 1,
+          "line_end": 5,
+          "claim": "FP8 W8A16 delivered 1.81x weighted kernel speedup, 1.227x E2E over patched R2, 1.262x combined over original baseline",
+          "quoted_content": "# OP-R2-001: FP8 Weight-Only Dequant-Fused GEMM (W8A16) Validation Results\n## Overall: PASS\nAll validation gates passed. The FP8 W8A16 decode GEMM optimization delivers 1.81x weighted kernel speedup at BS=8, 1.227x E2E improvement over the patched R2 baseline"
+        },
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 76,
+          "line_end": 83,
+          "claim": "Per-shape kernel speedups: gate_up_proj 1.97x, down_proj 1.85x, in_proj_qkvz 1.88x, out_proj 1.32x, qkv_proj 1.73x",
+          "quoted_content": "| gate_up_proj | 18432 | 2560 | 32 | 144.6 | 73.6 | **1.97x** | 2273.5 |\n| down_proj | 2560 | 9216 | 32 | 75.3 | 40.7 | **1.85x** | 1107.2 |\n| in_proj_qkvz | 12288 | 2560 | 24 | 105.7 | 56.2 | **1.88x** | 1187.7 |\n| out_proj | 2560 | 4096 | 32 | 39.0 | 29.6 | **1.32x** | 302.0 |\n| **WEIGHTED TOTAL** | | | | **11,235** | **6,191** | **1.81x** | **5,044** |"
+        }
+      ]
+    },
+    {
+      "category": "optimization_technique",
+      "subcategory": "fp8_efficiency_analysis",
+      "summary": "FP8 kernel-to-E2E efficiency was 34.4% (1.227x actual vs 1.66x theoretical). Gap explained by prefill not being accelerated, CUDA graph overhead, varying cache behavior, and torch.compile boundary overhead",
+      "citations": [
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 134,
+          "line_end": 152,
+          "claim": "Delta math verification: f_GEMM=0.89, kernel_speedup=1.81x, expected 1.66x E2E but actual 1.227x (34.4% efficiency) due to prefill, graph overhead, cache, compile boundaries",
+          "quoted_content": "Expected speedup = 14.78 / 8.90 = 1.66x\nActual E2E: 1.227x\nEfficiency: (1.227 - 1) / (1.66 - 1) = 0.227 / 0.66 = 34.4%\nThe ~34% efficiency is expected because:\n1. Prefill steps are NOT accelerated\n2. CUDA graph overhead and dispatch overhead reduce the per-kernel speedup"
+        }
+      ]
+    },
+    {
+      "category": "gate_quality",
+      "subcategory": "correctness_gates",
+      "summary": "All 3 tracks passed correctness with rigorous testing: OP-001 bit-exact Q/K/V with g error <4e-6, OP-002 bit-exact Q/K/V/conv_state with g_rel_err <1.5e-3, OP-R2-001 kernel error <2.0 (BF16 rounding). All passed CUDA graph capture/replay",
+      "citations": [
+        {
+          "file_path": "tracks/OP-001/validation_results.md",
+          "line_start": 36,
+          "line_end": 43,
+          "claim": "OP-001 correctness: Q/K/V bit-exact (zero error), gating error <4e-6, all batch sizes pass",
+          "quoted_content": "Q/K/V are bit-exact (no rounding). Gating error is < 4e-6 (float32 precision for softplus computation)."
+        },
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 28,
+          "line_end": 29,
+          "claim": "OP-002 correctness: Q/K/V and conv state bit-exact, g/beta errors well within 0.01 relative error kill criterion",
+          "quoted_content": "- Q/K/V: **Bit-exact** with production `causal_conv1d_update` + `rearrange_mixed_qkv`\n- g/beta: Errors < 1e-5 (well under 0.01 relative error kill criterion)"
+        },
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 59,
+          "line_end": 61,
+          "claim": "OP-R2-001 CUDA graph correctness: all 15 tests passed with exact match (max_diff=0.000000)",
+          "quoted_content": "**CUDA Graph Capture/Replay**: All 15 tests passed with max_diff = 0.000000 (exact match between eager and graph replay)."
+        }
+      ]
+    },
+    {
+      "category": "transcript_quality",
+      "subcategory": "hallucinated_data",
+      "summary": "Two hallucinated data instances: (1) Champion-3 claimed 1,107 GB/s GDR BW using wrong dtype (FP32 vs BF16 state), exceeding DRAM peak of 733 GB/s; (2) Champion-1 claimed 1.13x BV=128 speedup from flawed cold-cache methodology. Both self-corrected during debate.",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 83,
+          "line_end": 94,
+          "claim": "Champion-3 claimed 1,107 GB/s GDR BW at BS=8 using wrong dtype (FP32 instead of BF16 state), physically impossible on L40S",
+          "quoted_content": "| 8 | 32 MB | 1,107 GB/s | Yes (66% of L2) | 30.8 us |\n...The recurrence itself is NOT the optimization target."
+        },
+        {
+          "file_path": "debate/round_1/champion-1_argument.md",
+          "line_start": 5,
+          "line_end": 18,
+          "claim": "Champion-1 self-withdrew BV=128 claim: methodology copied fresh data after L2 flush, corrected experiment shows BV=128 is 3% SLOWER",
+          "quoted_content": "### 1a. BV=128 Tile Optimization: WITHDRAWN\nMy Phase 0 claim of 1.13x cold-cache GDR speedup from BV=128 is **invalidated**. The original `champion1_gdr_tilesweep.py` used a flawed cold-cache methodology: after flushing L2, it copied fresh random data into the state tensor"
+        }
+      ]
+    },
+    {
+      "category": "transcript_quality",
+      "subcategory": "anti_pattern",
+      "summary": "Dominant component avoidance anti-pattern: all Round 1 champions targeted 7% linear attention overhead while avoiding 89% GEMM. A single SwiGLU fusion negative result was generalized to exclude the entire GEMM component. This led to Round 1 best of 3.46% E2E when Round 2's FP8 approach delivered 22.7%",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 481,
+          "line_end": 488,
+          "claim": "Bottleneck analysis Section 10 explicitly identified GEMM + weight compression as primary target, yet Round 1 champions ignored it",
+          "quoted_content": "### Primary Optimization Target: GEMM BW Utilization + Weight Compression\n- GEMM dominates at 79-94% across all batch sizes\n- BW utilization is 59-78%, leaving headroom\n- Weight format reduction (BF16 -> FP8 -> INT4) is the primary lever (up to 3.85x Amdahl ceiling with INT4)"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 71,
+          "line_end": 72,
+          "claim": "Round 1 debate generalized from single negative result to exclude all GEMM optimization",
+          "quoted_content": "4. **Triton cannot beat CUTLASS for BW-bound skinny GEMMs** -- Champion-3's negative result eliminates the GEMM component (89% of decode) as a kernel-level optimization target on this hardware."
+        }
+      ]
+    },
+    {
+      "category": "transcript_quality",
+      "subcategory": "wasted_retries",
+      "summary": "Two wasted retries: (1) Stage 1 baseline had 2 aborted E2E sweeps before successful run, (2) OP-001 BS=32 needed a second 10-iteration run to resolve first-iteration outlier",
+      "citations": [
+        {
+          "file_path": "e2e_latency_2026-03-10T151508Z/json/baseline_bs1.json",
+          "line_start": 1,
+          "line_end": 1,
+          "claim": "Second aborted baseline sweep produced only BS=1 JSON before stopping mid-sweep",
+          "quoted_content": "(only baseline_bs1.json and baseline_bs1.runner.json present in json/ -- no BS=4/8/16/32 JSONs despite BS=4 log existing)"
+        },
+        {
+          "file_path": "tracks/OP-001/validation_results.md",
+          "line_start": 121,
+          "line_end": 128,
+          "claim": "OP-001 BS=32 first-iteration outlier (10.91s) required second 10-iteration benchmark run to confirm p50 improvement",
+          "quoted_content": "Note on BS=32: The avg_latency for the first 5-iter run was 10.316s (+0.45% vs baseline) due to a single outlier first iteration (10.91s). The p50 is 10.173s showing 0.77% improvement. A 10-iter re-run confirmed p50=10.169s"
+        }
+      ]
+    },
+    {
+      "category": "implementation_quality",
+      "subcategory": "enablement_guards",
+      "summary": "Both shipped optimizations are gated behind environment variables: OP-002 via VLLM_FUSED_GDN_PREPROCESS=1, OP-R2-001 via VLLM_FP8_DECODE_GEMM=1. Both have full fallback paths and rollback by unsetting the variable",
+      "citations": [
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 208,
+          "line_end": 211,
+          "claim": "OP-002 gated behind VLLM_FUSED_GDN_PREPROCESS=1, default disabled, no production risk",
+          "quoted_content": "### Enablement guard\nGated behind `VLLM_FUSED_GDN_PREPROCESS=1`. Default: disabled (0). No risk to production without explicit opt-in."
+        },
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 227,
+          "line_end": 229,
+          "claim": "OP-R2-001 enable flags: VLLM_FP8_DECODE_GEMM=1 for FP8 kernel, VLLM_FUSED_GDN_PREPROCESS=1 for OP-002",
+          "quoted_content": "### Enable Flags\n- `VLLM_FP8_DECODE_GEMM=1` -- Enable FP8 W8A16 decode GEMM\n- `VLLM_FUSED_GDN_PREPROCESS=1` -- Enable OP-002 fused GDN preprocess (Round 1)"
+        }
+      ]
+    },
+    {
+      "category": "implementation_quality",
+      "subcategory": "cuda_graph_safety",
+      "summary": "Both optimizations verified CUDA graph compatible: no allocations in fused kernels, shapes stable per bucket, Triton JIT on current CUDA stream. OP-002 verified graph capture+replay produces identical results. OP-R2-001 confirmed 51 piecewise + 35 full graphs captured",
+      "citations": [
+        {
+          "file_path": "tracks/OP-001/validation_results.md",
+          "line_start": 173,
+          "line_end": 180,
+          "claim": "CUDA graph safety: no allocations within fused kernel, shapes stable per bucket, verified capture+replay identical",
+          "quoted_content": "### CUDA Graph Safety\n- No allocations within the fused kernel itself (all outputs pre-allocated by wrapper)\n- Shapes are stable per bucket (determined by batch_size, num_heads, head_dim)\n- Verified: CUDA graph capture + replay produces identical results to eager"
+        },
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 162,
+          "line_end": 163,
+          "claim": "OP-R2-001 CUDA graph compatibility: 51 piecewise + 35 full graphs captured successfully, no graph breaks",
+          "quoted_content": "| CUDA graph compatibility | No graph breaks | CUDA graph capture/replay produces identical results; 51 piecewise + 35 full graphs captured successfully | **PASS** |"
+        }
+      ]
+    },
+    {
+      "category": "environment",
+      "subcategory": "hardware_and_software",
+      "summary": "Campaign ran on NVIDIA L40S (CC 8.9, 46GB GDDR6X, 733 GB/s peak BW), CUDA 12.8, PyTorch 2.10.0+cu128, vLLM 0.16.0rc2.dev479, git commit faaac90ef on main branch",
+      "citations": [
+        {
+          "file_path": "constraints.md",
+          "line_start": 12,
+          "line_end": 16,
+          "claim": "Hardware: L40S with 733 GB/s peak BW, 362 TFLOPS BF16, CC 8.9",
+          "quoted_content": "- **Hardware**: NVIDIA L40S (1x GPU, CUDA_VISIBLE_DEVICES=0)\n  - 46 GB GDDR6X, 733 GB/s peak memory bandwidth\n  - 362 TFLOPS BF16 tensor core, 89.2 SMs, compute capability 8.9\n  - Max SM clock: 2520 MHz"
+        },
+        {
+          "file_path": "env.json",
+          "line_start": 113,
+          "line_end": 114,
+          "claim": "Software: PyTorch 2.10.0+cu128, CUDA 12.8",
+          "quoted_content": "\"torch_version\": \"2.10.0+cu128\"\n\"cuda_version\": \"12.8\""
+        }
+      ]
+    },
+    {
+      "category": "success_factors",
+      "subcategory": "what_made_this_run_highest_scoring",
+      "summary": "This run's 8.65 score was driven by: (1) perfect E2E outcome (10.0) with 1.262x speedup from FP8 W8A16 in Round 2, (2) perfect campaign efficiency (10.0) with 2-round convergence and 0 failed tracks, (3) strong debate quality (9.0) with 100% grounding and micro-experiment rates. The main drag was transcript quality (5.0) due to Round 1's anti-pattern of avoiding the dominant GEMM bottleneck.",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 42,
+          "line_end": 43,
+          "claim": "Round 2 debate selection rationale: FP8 W8A16 merged from champions 1+2 with 1.35-1.50x E2E estimated",
+          "quoted_content": "\"selection_rationale\": \"FP8 W8A16 merged from R2 champions 1+2. Score 7.10. 1.35-1.50x E2E estimated.\""
+        },
+        {
+          "file_path": "debate/campaign_round_2/summary.md",
+          "line_start": 62,
+          "line_end": 64,
+          "claim": "Key insight that FP8 W8A16 halves weight bytes to directly address BW bottleneck with measured 1.55-2.13x kernel speedups",
+          "quoted_content": "1. **FP8 W8A16 is the dominant GEMM optimization**: Halving weight bytes from BF16->FP8 directly addresses the BW bottleneck. Measured 1.55-2.13x kernel speedups across all projection shapes."
+        }
+      ]
+    },
+    {
+      "category": "success_factors",
+      "subcategory": "round2_correction",
+      "summary": "Round 2 successfully corrected Round 1's blind spot by targeting the GEMM bottleneck with FP8 weight compression. The Round 2 contribution (22.7% E2E at BS=8) was 6.6x larger than Round 1's contribution (3.46% at BS=8), demonstrating the campaign loop's ability to self-correct",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 693,
+          "line_end": 699,
+          "claim": "After OP-002, analysis confirmed GEMM still dominates at 89.2% with FP8 giving 2.34x Amdahl E2E ceiling, correctly directing Round 2",
+          "quoted_content": "- **GEMM is still 89.2% at BS=8** with BW utilization at 70.8%. Amdahl ceilings by weight format: BF16 at peak BW gives 1.34x E2E; FP8 at peak BW gives 2.34x E2E; INT4 at peak BW gives 3.73x E2E."
+        },
+        {
+          "file_path": "tracks/OP-R2-001/validation_results.md",
+          "line_start": 128,
+          "line_end": 130,
+          "claim": "FP8 decode GEMM confirmed executing via log message: quantized 226 linear layers for decode acceleration",
+          "quoted_content": "### Evidence of Optimized Path Execution\n- Log message: `FP8 decode GEMM: quantized 226 linear layers for decode acceleration`\n- Custom op `torch.ops.vllm.fp8_decode_linear` registered and invoked for all linear layers"
+        }
+      ]
+    },
+    {
+      "category": "model_architecture",
+      "subcategory": "hybrid_linear_full_attention",
+      "summary": "Qwen3.5-4B is a hybrid model with 24 linear attention layers (gated delta rule) and 8 full attention layers. This architecture-specific trait determined the optimization strategy: OP-002 targeted the 24 GDN layers, while OP-R2-001's FP8 applied to all 32 layers' projections",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 8,
+          "line_end": 14,
+          "claim": "Architecture: 32 layers total with 24 linear_attention (gated delta rule) + 8 full_attention, hidden=2560, intermediate=9216",
+          "quoted_content": "**Architecture**: Qwen3_5ForConditionalGeneration (hybrid linear + full attention)\n- 32 layers total: 24 linear_attention (gated delta rule) + 8 full_attention (every 4th layer: 3,7,11,15,19,23,27,31)\n- hidden_size=2560, intermediate_size=9216, head_dim=256"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 336,
+          "line_end": 348,
+          "claim": "Weight matrix breakdown: MLP projections 4530MB (largest), linear attn projections 2021MB, full attn 420MB -- total 6970MB in BF16",
+          "quoted_content": "| gate_up_proj (MLP) | 2560 x 18432 | 94.4 MB | 32 | 3,019.9 |\n| down_proj (MLP) | 9216 x 2560 | 47.2 MB | 32 | 1,509.9 |\n| **TOTAL** | | | | **6,970.4** |"
+        }
+      ]
+    }
+  ]
+}

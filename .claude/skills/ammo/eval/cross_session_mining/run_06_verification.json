@@ -1,0 +1,284 @@
+{
+  "total": 42,
+  "passed": 34,
+  "failed": 8,
+  "failure_rate": 0.19,
+  "results": [
+    {
+      "file_path": "tracks/op_w8a8_tiny_fp8_gemm/validation_results.md",
+      "line_range": "37-40",
+      "claim": "Validator independently tested 21 cases with additional NaN/Inf and CUDA graph checks",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_w8a8_tiny_fp8_gemm/validation_results.md",
+      "line_range": "69-78",
+      "claim": "Cross-check between champion and validator kernel benchmarks showed <1% delta",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_fused_silu_fp8quant/validation_results.md",
+      "line_range": "88-100",
+      "claim": "Validator benchmarked both paths under CUDA graph capture independently, found 1.11-1.25x warm speedup",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_fused_silu_fp8quant/validation_results.md",
+      "line_range": "183-185",
+      "claim": "Validator flagged champion's 5.5x speedup claim as inflated by eager-mode benchmark",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "29-39",
+      "claim": "Validator measured 3.4x regression under CUDA graphs, contradicting champion's 1.10x claim",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "52-57",
+      "claim": "Validator identified that champion benchmark excluded CUDA graphs, inflating Triton baseline by ~25us Python overhead",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "1-5",
+      "claim": "Campaign exhausted after 3 rounds with cumulative 1.053x E2E speedup",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.38 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "78-82",
+      "claim": "Only op_w8a8_tiny_fp8_gemm was shipped",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "42-49",
+      "claim": "op_w8a8_tiny_fp8_gemm achieved 13.7% BS=1, 5.3% BS=8, 0.7% BS=32 E2E improvement",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "455-461",
+      "claim": "bottleneck_analysis.md used near-optimal framing for fused_moe_kernel at 79.6% BW, below the 85% anti-pattern threshold",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.51 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "43-52",
+      "claim": "Champion-3 explicitly invoked near-optimal framing to justify pivoting away from fused_moe",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "81-84",
+      "claim": "Debate summary reinforced near-optimal framing, discouraging fused_moe optimization in subsequent rounds",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "128-131",
+      "claim": "Champion-3 projected 1.69% conservative E2E improvement at BS=8",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "17-27",
+      "claim": "Actual E2E improvement for op_fused_moe_route_prep was 0.65% at BS=8, 2.6-3.4x below conservative projection",
+      "verified": true
+    },
+    {
+      "file_path": "debate/late_findings/champion-2_baseline_provenance.md",
+      "line_range": "41-51",
+      "claim": "Corrected E2E drops from 1.49% to 0.41% for prototyped 3-op fusion due to baseline provenance failure",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.52 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_fused_moe_analysis.md",
+      "line_range": "241-247",
+      "claim": "Delegate-1a identified the no-L40S-w8a8-config gap that enabled op_w8a8_tiny_fp8_gemm",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.66 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_r2_champion3_audit.md",
+      "line_range": "1-22",
+      "claim": "Delegate-2a audited champion-3 prototype and identified production dispatch path discrepancy",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "33-37",
+      "claim": "BLOCK_N=256 forces num_stages=2, yielding ~0% net E2E due to 3.6% regression",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "52-58",
+      "claim": "Champion's benchmark without CUDA graphs was misleading; validator caught the regression",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_fused_silu_fp8quant/validation_results.md",
+      "line_range": "160-166",
+      "claim": "Amdahl analysis showed f=0.013 gives ceiling of 0.16% E2E, explaining negligible impact",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.68 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "580-593",
+      "claim": "Only 10-45% of kernel-level savings materialized as E2E due to NCCL absorption",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "455-461",
+      "claim": "Bottleneck analysis concluded 'No red flags' and 'near-optimal for its configuration' at 79.6% BW",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.51 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op_w8a8_tiny_fp8_gemm/validation_results.md",
+      "line_range": "7-9",
+      "claim": "Config-only optimization replaced BLOCK_SIZE_M=64 with BLOCK_SIZE_M=16, reducing register pressure 2.5x",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_w8a8_tiny_fp8_gemm/validation_results.md",
+      "line_range": "93-98",
+      "claim": "E2E sweep showed 13.7% at BS=1, 5.3% at BS=8, 0.7% at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "46-47",
+      "claim": "Root cause: FP8->FP16 conversion approach caused 4.4x instruction overhead on SM89",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "40-44",
+      "claim": "ncu showed WarpSpec has 4.4x more instructions and 21% lower BW utilization than Triton",
+      "verified": true
+    },
+    {
+      "file_path": "debate/late_findings/champion-2_baseline_provenance.md",
+      "line_range": "12-22",
+      "claim": "Production dispatch uses topkGating with fused sigmoid, not separate torch.topk + int32 cast",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "580-593",
+      "claim": "NCCL spin-wait absorption reduces kernel-to-E2E translation ratio to 10-45%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_perbs_config.md",
+      "line_range": "16-29",
+      "claim": "Delegate-1a identified production config BLOCK_SIZE_M=16, num_stages=3 for all batch sizes",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.51 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "83-86",
+      "claim": "BLOCK_N=256 and num_stages=3 mutually exclusive on L40S; DeepGEMM/CUTLASS blocked",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "26-29",
+      "claim": "DeepGEMM blocked on L40S (SM89, requires SM90+); CUTLASS block FP8 requires SM90+",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "29-37",
+      "claim": "Model has 256 experts, top_k=8, GatedDeltaNet linear attention, and very small per-expert GEMMs",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "43-53",
+      "claim": "op_w8a8_tiny_fp8_gemm passed Gate 5.3b, but two validator_gate53 directories indicate a sweep retry",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_w8a8_tiny_fp8_gemm/validation_results.md",
+      "line_range": "80-88",
+      "claim": "Validation report references kernel_proof_w8a8 for logs while multiple kernel_proof variants exist",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "48-50",
+      "claim": "Dispatch guard was in wrong function -- kernel never dispatched in production",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "109-115",
+      "claim": "Champion-3 claimed 120 us/step from inter-kernel gap savings under CUDA graphs",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_critique_champion-3.md",
+      "line_range": "11-24",
+      "claim": "Champion-3's own CUDA graph experiment showed 0 us inter-kernel overhead, contradicting 120 us claim",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "126-132",
+      "claim": "Champion-3 projected 1.69-2.18% E2E based on inflated baseline",
+      "verified": true
+    },
+    {
+      "file_path": "debate/late_findings/champion-2_baseline_provenance.md",
+      "line_range": "12-22",
+      "claim": "Production uses topkGating (sigmoid fused in, int32 pre-allocated), not torch.topk + int32 cast",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_2/champion-1_argument.md",
+      "line_range": "16-35",
+      "claim": "BLOCK_N=256 forces num_stages=2, causing 4.6% pipeline regression",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.65 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "52-58",
+      "claim": "Champion benchmark excluded CUDA graphs; Triton measurement included ~25us Python overhead",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+      "line_range": "29-39",
+      "claim": "Under CUDA graphs WarpSpec is 3.4x slower than Triton",
+      "verified": true
+    }
+  ]
+}

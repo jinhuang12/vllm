@@ -1,0 +1,534 @@
+{
+  "run_idx": 13,
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "version_slug": "bcde2c0c2_qwen35-4b-bf16-tp1-on-l40s-r7-tiered-evi",
+  "run_dir_name": "run_3",
+  "overall_score": 4.85,
+  "transcript_quality_score": 4.0,
+  "campaign_status": "campaign_complete",
+  "shipped_optimizations": [
+    "op002"
+  ],
+  "cumulative_e2e_speedup": 1.0186,
+  "total_rounds": 1,
+  "total_proposals": 3,
+  "total_tracks": 2,
+  "tracks_passed": 1,
+  "tracks_failed": 0,
+  "anti_patterns": [
+    {
+      "pattern": "cold_to_production_overestimation",
+      "severity": "high",
+      "description": "Micro-experiment kernel speedups did not translate to E2E gains due to L2-warm measurement artifacts and dispatch path mismatches. Champion-2 originally claimed 9.1% E2E at BS=32 (from 838 GB/s inflated by L2 warming); corrected to 3.9%; actual was 5.51%. OP-001 projected 5.4% deflated E2E at BS=1 but measured +0.057% (95x overestimation).",
+      "deduction": -1.0,
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-2_argument.md",
+          "line_start": 3,
+          "line_end": 3,
+          "claim": "Champion-2 claimed 9.1% E2E at BS=32 in Round 1 argument based on inflated 838 GB/s measurement",
+          "quoted_content": "A custom Triton GEMM kernel fusing gate_up_proj with SiLU gating achieves **1.383x cold-cache kernel speedup at BS=32** (838 GB/s vs cuBLAS's 610 GB/s), projecting to **9.1% E2E improvement**"
+        },
+        {
+          "file_path": "tracks/op001/validation_results.md",
+          "line_start": 82,
+          "line_end": 87,
+          "claim": "OP-001 showed extreme Amdahl violation with 0.01x measured-vs-predicted ratio due to L2-warm micro-benchmarks",
+          "quoted_content": "| BS | f_decode | Kernel s | Expected E2E | Measured E2E | Ratio |\n|----|----------|---------|-------------|-------------|-------|\n| 8  | 34.1%    | 1.094x  | +2.9%       | -0.052%     | 0.018 |\n| 32 | 35.4%    | 1.188x  | +5.6%       | +0.066%     | 0.012 |"
+        }
+      ]
+    }
+  ],
+  "findings": {
+    "bottleneck_analysis": {
+      "primary_bottleneck": "GEMV/GEMM linear projections",
+      "bottleneck_share_range": "78.1%-93.9% of GPU time across BS=1-32",
+      "weight_per_step_mb": 7600,
+      "projections_per_step": 152,
+      "regime": "deeply_memory_bound",
+      "arithmetic_intensity_range": "1.0 (BS=1) to 31.5 (BS=32) vs 419 roofline crossover",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 39,
+          "line_end": 49,
+          "claim": "GEMV/GEMM projections dominate 78-94% of GPU time at all batch sizes",
+          "quoted_content": "| **GEMV/GEMM (projections)** | **93.9%** | **89.0%** | **78.1%** | gemvx, CUTLASS WMMA/tensorop, cuBLAS |\n| DeltaRule recurrent | 1.0% | 4.9% | 13.7% | fused_recurrent_gated_delta_rule_fwd_kernel |"
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 118,
+          "line_end": 123,
+          "claim": "All batch sizes are deeply memory-bound with AI far below 419 FLOPs/byte crossover",
+          "quoted_content": "| 1 | 1.0 | **Memory-bound** | 7,600 MB | 9,224 |\n| 8 | 8.0 | **Memory-bound** | 7,630 MB | 9,260 |\n| 32 | 31.5 | **Memory-bound** | 7,719 MB | 9,368 |"
+        },
+        {
+          "file_path": "REPORT.md",
+          "line_start": 76,
+          "line_end": 87,
+          "claim": "Each decode step reads 7.6 GB of model weights through 152 linear projection GEMMs",
+          "quoted_content": "Each decode step executes **152 linear projection GEMMs** that read **7.6 GB of model weights** through HBM:\n\n| Projection | Weight Shape | Size (MB) | Layers | Per-step Calls |\n|---|---|---:|---:|---:|\n| DeltaRule qkvz_proj | [2560, 12288] | 60.0 | 24 | 24 |"
+        }
+      ]
+    },
+    "debate_quality": {
+      "total_champions": 3,
+      "total_delegates": 3,
+      "debate_rounds": 2,
+      "bw_convergence_band": "676-693 GB/s (<2% spread)",
+      "key_methodology_corrections": [
+        "L2 flush bug identified and corrected (copy_() re-warming artifact)",
+        "L2 cache size corrected from 48 MB to 96 MB",
+        "fill_() vs read-flush methodology comparison"
+      ],
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 46,
+          "line_end": 49,
+          "claim": "All three champions independently converged on 676-693 GB/s Triton BW, resolving the 838 GB/s artifact",
+          "quoted_content": "**BW measurement dispute resolution**: Champion-2's original 838 GB/s was traced to `copy_()` after L2 flush. Corrected to 689 GB/s, matching Champion-1 (676 GB/s) and Champion-3 (688 GB/s). This reduced C-2's projected BS=32 E2E from 9.1% to 3.9%."
+        },
+        {
+          "file_path": "debate/delegate_work/delegate-2a_bw_discrepancy_analysis.md",
+          "line_start": 10,
+          "line_end": 11,
+          "claim": "Delegate-2a identified L2 re-warming as root cause of inflated BW numbers before Round 1 critique",
+          "quoted_content": "Champion-2's \"cold-cache\" numbers are **inflated by an L2 methodology flaw**. The `.copy_()` call immediately before each `graph.replay()` re-warms the L2 cache with the 94.4 MB weight (which fits in the 96 MB L2)."
+        },
+        {
+          "file_path": "debate/round_1/champion-2_rebuttal.md",
+          "line_start": 11,
+          "line_end": 15,
+          "claim": "Champion-2 self-corrected in rebuttal: BS=32 speedup revised from 1.383x to 1.141x with 608 GB/s matching ncu ground truth",
+          "quoted_content": "| BS | cuBLAS+SiLU cold (us) | BW | Triton fused cold (us) | BW | Speedup |\n|----|---:|---:|---:|---:|---:|\n| 1 | 166.4 | 567 GB/s | 136.2 | 693 GB/s | **1.222x** |\n| 8 | 145.5 | 651 GB/s | 136.7 | 692 GB/s | **1.064x** |\n| 32 | 157.5 | 608 GB/s | 138.0 | 689 GB/s | **1.141x** |"
+        },
+        {
+          "file_path": "debate/round_1/champion-1_rebuttal.md",
+          "line_start": 5,
+          "line_end": 6,
+          "claim": "Champion-1 conceded and corrected L2 size from 48 MB to 96 MB after Champion-3 identified error",
+          "quoted_content": "Champion-3 is correct -- the L40S has **96 MB L2**, not 48 MB. I confirmed this via `torch.cuda.get_device_properties(0).L2_cache_size = 96 MB`. My original 52 MB flush was insufficient for full L2 eviction. I accept this error."
+        }
+      ]
+    },
+    "shipped_optimization": {
+      "op_id": "op002",
+      "technique": "Triton GEMM+SiLU epilogue fusion for gate_up_proj",
+      "target_component": "gate_up_proj [M, 2560] x [2560, 18432] + SiLU gating in all 32 MLP layers",
+      "dispatch_gate": "M >= 8 (cuBLAS fallback at BS=1)",
+      "env_var": "VLLM_FUSED_GATE_UP_SILU",
+      "files_modified": 5,
+      "memory_overhead_gb": 2.81,
+      "kernel_bw_achieved_gbs": "590-609",
+      "kernel_bw_baseline_gbs": "493-556",
+      "e2e_results": {
+        "bs1": {
+          "baseline_s": 6.548,
+          "opt_s": 6.585,
+          "delta_pct": -0.57,
+          "verdict": "REGRESSED_memory_overhead"
+        },
+        "bs8": {
+          "baseline_s": 7.817,
+          "opt_s": 7.674,
+          "delta_pct": 1.86,
+          "verdict": "PASS"
+        },
+        "bs32": {
+          "baseline_s": 10.27,
+          "opt_s": 9.733,
+          "delta_pct": 5.51,
+          "verdict": "PASS"
+        }
+      },
+      "citations": [
+        {
+          "file_path": "tracks/op002/validation_results.md",
+          "line_start": 89,
+          "line_end": 95,
+          "claim": "OP-002 post-gating E2E: BS=32 +5.51%, BS=8 +1.86%, BS=1 -0.57% (memory overhead, not kernel)",
+          "quoted_content": "| BS | Baseline avg (s) | Opt avg (s) | Speedup | E2E Delta | Verdict |\n|----|-----------------|-------------|---------|-----------|-------|\n| 1  | 6.548           | 6.585       | 0.9943  | -0.57%    | REGRESSED |\n| 8  | 7.817           | 7.674       | 1.0186  | +1.86%    | PASS |\n| 32 | 10.270          | 9.733       | 1.0551  | +5.51%    | PASS |"
+        },
+        {
+          "file_path": "tracks/op002/validation_results.md",
+          "line_start": 60,
+          "line_end": 69,
+          "claim": "Validator independent kernel benchmark shows 1.097x at BS=8 and 1.197x at BS=32 with 400 MB L2 flush",
+          "quoted_content": "| BS | Baseline cold (us) | Opt cold (us) | Cold Speedup | BW base (GB/s) | BW opt (GB/s) |\n|----|-------------------|---------------|-------------|----------------|---------------|\n| 1  | 141.6             | 163.3         | 0.867x      | ~636           | ~578          |\n| 8  | 170.3             | 155.3         | 1.097x      | ~556           | ~609          |\n| 32 | 192.0             | 160.4         | 1.197x      | ~493           | ~590          |"
+        },
+        {
+          "file_path": "tracks/op002/validation_results.md",
+          "line_start": 36,
+          "line_end": 53,
+          "claim": "11/11 correctness tests passed including CUDA graph capture/replay and adversarial inputs",
+          "quoted_content": "| Test | Result |\n|------|--------|\n| BS=1 fused vs cuBLAS+SiLU (atol=0.05) | PASS (max_err=0.0625) |\n| BS=8 fused vs cuBLAS+SiLU | PASS (max_err=0.0625) |\n| BS=32 fused vs cuBLAS+SiLU | PASS (max_err=0.0625) |\n| Mean absolute error | ~0.00081 all BS |"
+        },
+        {
+          "file_path": "REPORT.md",
+          "line_start": 255,
+          "line_end": 259,
+          "claim": "SiLU fusion eliminates 75.5 MB intermediate tensor per layer at BS=32, saving 2.4 GB per decode step",
+          "quoted_content": "**Fusion benefit**: Eliminates the intermediate [M, 18432] BF16 tensor (75.5 MB at BS=32) that the baseline path writes and immediately reads back for the SiLU activation. At BS=32 this saves ~75.5 MB of memory traffic per layer invocation, amounting to ~2.4 GB per decode step across 32 layers."
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 25,
+          "line_end": 34,
+          "claim": "State.json records OP-002 as GATED_PASS with 1.0551x E2E speedup and M>=8 dispatch",
+          "quoted_content": "\"op002\": {\n            \"status\": \"GATED_PASS\",\n            \"e2e_speedup\": 1.0551,\n            \"gating\": {\n              \"env_var\": \"VLLM_FUSED_GATE_UP_SILU\",\n              \"crossover_threshold_bs\": 8"
+        }
+      ]
+    },
+    "failed_optimization": {
+      "op_id": "op001",
+      "technique": "Custom Triton GEMM for qkvz_proj (DeltaRule layers)",
+      "failure_reason": "Micro-experiment baseline used torch.mm (N,N dispatch) instead of production F.linear (N,T dispatch). Production cuBLAS GEMV achieves ~716 GB/s under L2 pre-warming, leaving only 8% headroom vs the 29% suggested by isolated cold-cache benchmarks.",
+      "projected_e2e_bs1": "5.4%",
+      "actual_e2e_bs1": "0.057%",
+      "overestimation_factor": "95x",
+      "citations": [
+        {
+          "file_path": "tracks/op001/validation_results.md",
+          "line_start": 66,
+          "line_end": 77,
+          "claim": "OP-001 E2E showed near-zero improvement: BS=1 +0.057%, BS=8 -0.052%, BS=32 +0.066%",
+          "quoted_content": "| BS | Baseline (s) | Opt (s) | Delta (ms) | E2E Change | Kill Criterion | Verdict |\n|----|-------------|---------|------------|-----------|---------------|-------|\n| 1  | 6.4935      | 6.4898  | +3.7       | +0.057%   | >= -0.5%       | PASS    |\n| 8  | 7.7388      | 7.7429  | -4.1       | -0.052%   | >= +1.0%       | NOISE   |\n| 32 | 10.2237     | 10.2170 | +6.8       | +0.066%   | >= +2.5%       | PASS    |"
+        },
+        {
+          "file_path": "tracks/op001/validation_results.md",
+          "line_start": 101,
+          "line_end": 111,
+          "claim": "Root cause: debate micro-experiments measured L2-warm standalone torch.mm, not production DRAM-bound F.linear",
+          "quoted_content": "The debate's projected E2E impact (2.8-3.4%) was based on kernel speedups measured with a **methodologically flawed cold-cache protocol**: the 48 MB L2 flush evicts only ~53% of the 90 MB gate_up_proj weight, leaving the measurement in a partially L2-warm state"
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 20,
+          "line_end": 23,
+          "claim": "State records OP-001 failure: torch.mm vs F.linear dispatch gap",
+          "quoted_content": "\"op001\": {\n            \"status\": \"FAIL\",\n            \"reason\": \"Debate baseline used torch.mm (N,N) instead of F.linear (N,T). No speedup at BS=1.\"\n          }"
+        }
+      ]
+    },
+    "hallucinated_data_instances": [
+      {
+        "description": "Champion-2 claimed 838 GB/s (97% of L40S peak) and 1.383x kernel speedup at BS=32 due to L2 re-warming artifact from copy_() after L2 flush. Self-corrected to 689 GB/s / 1.141x in Round 1 rebuttal.",
+        "citations": [
+          {
+            "file_path": "debate/proposals/champion-2_proposal.md",
+            "line_start": 48,
+            "line_end": 52,
+            "claim": "Champion-2 proposal claims 838 GB/s and 1.383x at BS=32 cold-cache",
+            "quoted_content": "| 32 | 73.3 us | 30.9 us | 157.0 us | 113.5 us | **1.383x** |"
+          },
+          {
+            "file_path": "debate/round_1/champion-2_rebuttal.md",
+            "line_start": 11,
+            "line_end": 15,
+            "claim": "Champion-2 corrected in rebuttal: actual BS=32 speedup is 1.141x at 689 GB/s",
+            "quoted_content": "| 32 | 157.5 | 608 GB/s | 138.0 | 689 GB/s | **1.141x** |"
+          }
+        ]
+      },
+      {
+        "description": "Champion-2 BS=1 cuBLAS baseline of 91.7 us implies 1029 GB/s, exceeding L40S DRAM peak of 864 GB/s, proving data served from L2 not cold DRAM.",
+        "citations": [
+          {
+            "file_path": "debate/proposals/champion-2_proposal.md",
+            "line_start": 57,
+            "line_end": 60,
+            "claim": "Baseline cold BW reported at 1029 GB/s exceeding L40S DRAM peak",
+            "quoted_content": "| 1 | 1029 GB/s (L2 residual) | 904 GB/s | -12.1% |"
+          }
+        ]
+      },
+      {
+        "description": "Champion-1 stated L40S L2 cache is 48 MB and used 52 MB flush buffer. Actual L2 is 96 MB. Corrected in Round 1 rebuttal.",
+        "citations": [
+          {
+            "file_path": "debate/proposals/champion-1_proposal.md",
+            "line_start": 122,
+            "line_end": 123,
+            "claim": "Champion-1 states L40S L2 is 48 MB, working set / L2 = 158x",
+            "quoted_content": "Production pipeline: 7,600 MB weight per step, 152 projections.\nL40S L2: 48 MB. Working set / L2 = 158x."
+          },
+          {
+            "file_path": "debate/round_1/champion-1_rebuttal.md",
+            "line_start": 5,
+            "line_end": 6,
+            "claim": "Champion-1 conceded L40S has 96 MB L2 in Round 1 rebuttal",
+            "quoted_content": "Champion-3 is correct -- the L40S has **96 MB L2**, not 48 MB. I confirmed this via `torch.cuda.get_device_properties(0).L2_cache_size = 96 MB`."
+          }
+        ]
+      }
+    ],
+    "wasted_retries": [
+      {
+        "description": "Multiple E2E re-runs during validation: 6+ timestamped e2e_latency directories. Earliest (T203809Z) produced sub-second baselines indicating wrong output_len config; later run (T235049Z) produced ~11.8s at BS=1 indicating GPU contention.",
+        "citations": [
+          {
+            "file_path": "e2e_latency_2026-03-23T203809Z/e2e_latency_results.md",
+            "line_start": 14,
+            "line_end": 18,
+            "claim": "First baseline run produced sub-second latencies indicating configuration error",
+            "quoted_content": "| 1 | 0.0860498 |  | x | % | unknown |\n| 8 | 0.253361 |  | x | % | unknown |\n| 32 | 0.315635 |  | x | % | unknown |"
+          }
+        ]
+      },
+      {
+        "description": "OP-001 required two commits -- initial implementation (73321bd56) had lazy weight transpose breaking CUDA graph capture, needing a second commit (61396467f) to fix torch.compile compatibility.",
+        "citations": [
+          {
+            "file_path": "tracks/op001/validation_results.md",
+            "line_start": 26,
+            "line_end": 27,
+            "claim": "OP-001 required two commits, second being a critical torch.compile fix",
+            "quoted_content": "- `73321bd56` -- Initial implementation\n- `61396467f` -- Critical torch.compile fix (moved weight transpose to process_weights_after_loading)"
+          }
+        ]
+      },
+      {
+        "description": "OP-002 kernel benchmark iterated through 3 versions (gate_5_2_results.json, v2, v3) before stable numbers.",
+        "citations": [
+          {
+            "file_path": "tracks/op002/validation_results.md",
+            "line_start": 68,
+            "line_end": 69,
+            "claim": "Validator kernel benchmark went through multiple iterations",
+            "quoted_content": "Validator script: `tracks/op002/validator_tests/benchmark_kernel.py`\nRaw JSON: `tracks/op002/validator_tests/gate_5_2_results_v3.json`"
+          }
+        ]
+      }
+    ],
+    "delegation_analysis": {
+      "enabled": true,
+      "delegates_per_champion": 1,
+      "total_delegates_spawned": 3,
+      "delegate_artifacts_count": 13,
+      "delegate_citation_rate": 0.333,
+      "causality_chains": [
+        {
+          "delegate": "delegate-2a",
+          "finding": "Identified champion-2 L2 re-warming bug from copy_() writing 94.4 MB weights into L2 after flush. Smoking-gun: BS=1 cuBLAS at 1030 GB/s = 119% of DRAM peak.",
+          "outcome": "Champion-2 revised BS=32 speedup from 1.383x to 1.141x; discovered BS=1 flipped from regression to 1.222x improvement; eliminated conditional dispatch. Most consequential finding in the debate.",
+          "citations": [
+            {
+              "file_path": "debate/delegate_work/delegate-2a_bw_discrepancy_analysis.md",
+              "line_start": 10,
+              "line_end": 11,
+              "claim": "Delegate identified L2 re-warming as root cause of inflated BW numbers",
+              "quoted_content": "Champion-2's \"cold-cache\" numbers are **inflated by an L2 methodology flaw**. The `.copy_()` call immediately before each `graph.replay()` re-warms the L2 cache with the 94.4 MB weight (which fits in the 96 MB L2)."
+            }
+          ]
+        },
+        {
+          "delegate": "delegate-1a",
+          "finding": "Mapped gate_up_proj dispatch chain through MergedColumnParallelLinear to dispatch_unquantized_gemm() at utils.py:298-304. Identified ROCm skinny GEMM pattern as integration template.",
+          "outcome": "Champion-1 cited dispatch path in Round 2 argument and OP-001 implementation used this exact interception point.",
+          "citations": [
+            {
+              "file_path": "debate/delegate_work/delegate-1a_gemm_dispatch_research.md",
+              "line_start": 57,
+              "line_end": 67,
+              "claim": "Delegate mapped the dispatch interception point at utils.py:298-304",
+              "quoted_content": "`dispatch_unquantized_gemm()` at `vllm/model_executor/layers/utils.py:298-304`:\n\n```python\ndef dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:\n    if current_platform.is_rocm():\n        return rocm_unquantized_gemm"
+            }
+          ]
+        },
+        {
+          "delegate": "delegate-3a",
+          "finding": "Confirmed ba_proj output dimension is 64 (NOT 8192), weight is only 327 KB. Merging ba_proj into qkvz_proj yields negligible gain.",
+          "outcome": "Champion-3 abandoned merged qkvz+ba approach and focused on gate_up+SiLU fusion, saving effort on dead-end path.",
+          "citations": [
+            {
+              "file_path": "debate/delegate_work/delegate-3a_projection_analysis.md",
+              "line_start": 76,
+              "line_end": 77,
+              "claim": "Delegate confirmed ba_proj is only 327 KB, not significant optimization target",
+              "quoted_content": "- **Weight shape**: [64, 2560]  (= [32+32, 2560])\n- **Output per token**: [tokens, 64] -> split into b[32], a[32]\n- **Weight bytes (BF16)**: 64 x 2560 x 2 = **327 KB**"
+            }
+          ]
+        }
+      ],
+      "delegation_failures": [
+        {
+          "delegate": "delegate-3a",
+          "failure": "Stated 'Actual L40S L2: 48 MB' as definitive hardware fact. L40S actually has 96 MB L2.",
+          "citations": [
+            {
+              "file_path": "debate/delegate_work/delegate-3a_bw_discrepancy_analysis.md",
+              "line_start": 22,
+              "line_end": 22,
+              "claim": "Delegate-3a incorrectly states L40S L2 is 48 MB",
+              "quoted_content": "**Actual L40S L2: 48 MB** (not 96 MB as champion-2's comment claims)"
+            }
+          ]
+        }
+      ],
+      "efficiency_issues": [
+        {
+          "description": "Both delegate-2a and delegate-3a independently researched the same BW discrepancy (838 vs 502 GB/s) with substantially overlapping scope and similar conclusions -- duplicated research effort.",
+          "citations": [
+            {
+              "file_path": "debate/delegate_work/delegate-2a_bw_discrepancy_analysis.md",
+              "line_start": 1,
+              "line_end": 4,
+              "claim": "Delegate-2a investigated BW discrepancy between champion-2 and champion-3",
+              "quoted_content": "# BW Discrepancy Analysis: Champion-2 (838 GB/s) vs Champion-3 (502 GB/s)\n\n**Delegate**: delegate-2a | **Date**: 2026-03-23\n**Scope**: Root cause of 838 vs 502 GB/s disparity for same shape [32, 2560]x[2560, 18432]"
+            },
+            {
+              "file_path": "debate/delegate_work/delegate-3a_bw_discrepancy_analysis.md",
+              "line_start": 1,
+              "line_end": 5,
+              "claim": "Delegate-3a independently investigated the same BW discrepancy",
+              "quoted_content": "# Delegate Task Report: BW Discrepancy Analysis -- Champion-2 vs Champion-3\n\n**Assigned by**: champion-3\n**Completed by**: delegate-3a\n**Date**: 2026-03-23"
+            }
+          ]
+        }
+      ]
+    },
+    "e2e_verification": {
+      "baseline_source_discrepancy": "Final e2e_latency directory has failed baselines (returncode=1), so baselines taken from runs/ directory (Stage 1). Validation report uses constraints.md baselines (6.548, 7.817, 10.270) which differ from runs/ JSON (6.494, 7.739, 10.224).",
+      "verified_results": [
+        {
+          "batch_size": 1,
+          "constraints_baseline_s": 6.548,
+          "runs_baseline_s": 6.4935,
+          "opt_s": 6.5854,
+          "delta_pct_constraints": -0.57,
+          "delta_pct_runs": -1.41,
+          "note": "Regression caused by 2.81 GB memory pressure from pre-transposed weight copies, not fused kernel (kernel does not fire at BS=1 due to M>=8 gating)"
+        },
+        {
+          "batch_size": 8,
+          "constraints_baseline_s": 7.817,
+          "runs_baseline_s": 7.7388,
+          "opt_s": 7.6743,
+          "delta_pct_constraints": 1.86,
+          "delta_pct_runs": 0.83
+        },
+        {
+          "batch_size": 32,
+          "constraints_baseline_s": 10.27,
+          "runs_baseline_s": 10.2237,
+          "opt_s": 9.7333,
+          "delta_pct_constraints": 5.51,
+          "delta_pct_runs": 4.8
+        }
+      ],
+      "citations": [
+        {
+          "file_path": "e2e_latency/e2e_latency_results.json",
+          "line_start": 70,
+          "line_end": 78,
+          "claim": "Final e2e_latency baselines have returncode=1 (failed to run)",
+          "quoted_content": "\"ok\": null,\n\"output_json\": \"json/baseline_bs1.json\",\n\"returncode\": 1"
+        },
+        {
+          "file_path": "runs/baseline_bs32.json",
+          "line_start": 2,
+          "line_end": 2,
+          "claim": "Stage 1 baseline for BS=32 is 10.224s, not 10.270s from constraints.md",
+          "quoted_content": "\"avg_latency\": 10.223709921026602"
+        },
+        {
+          "file_path": "runs/baseline_bs1.json",
+          "line_start": 2,
+          "line_end": 2,
+          "claim": "Stage 1 baseline for BS=1 is 6.494s, not 6.548s from constraints.md",
+          "quoted_content": "\"avg_latency\": 6.493532403185964"
+        }
+      ]
+    },
+    "key_lessons": [
+      {
+        "lesson": "Cold-cache micro-benchmarks overestimate production headroom due to L2 pre-warming from adjacent layer operations in production pipeline",
+        "production_to_isolated_bw_ratio": "1.15-1.30x",
+        "citations": [
+          {
+            "file_path": "REPORT.md",
+            "line_start": 393,
+            "line_end": 396,
+            "claim": "Isolated benchmarks measured cuBLAS at 493-636 GB/s; production achieves 680-750 GB/s due to L2 pre-warming",
+            "quoted_content": "Isolated kernel benchmarks with L2 cache flushing measured cuBLAS at 493-636 GB/s, suggesting 36-75% headroom versus the L40S's 864 GB/s peak. Under production conditions with CUDA graph replay, L2 pre-warming from adjacent layer operations raises cuBLAS to 680-750 GB/s"
+          }
+        ]
+      },
+      {
+        "lesson": "Verify exact baseline dispatch path (F.linear vs torch.mm) -- seemingly minor API difference caused cuBLAS to select a 22% slower kernel in micro-benchmark, inflating projected improvement from 1.6% to 5.4%",
+        "citations": [
+          {
+            "file_path": "REPORT.md",
+            "line_start": 398,
+            "line_end": 400,
+            "claim": "torch.mm vs F.linear dispatch difference caused 10x overestimation of optimization opportunity for OP-001",
+            "quoted_content": "Candidate A's evaluation used `torch.mm(input, weight.T)` as the baseline, which triggers a different cuBLAS GEMM kernel than the production path `F.linear(x, weight)`. This seemingly minor API difference caused cuBLAS to select a 22% slower kernel"
+          }
+        ]
+      },
+      {
+        "lesson": "L2 cache size must be empirically measured, not assumed -- all three champions initially used 48 MB (wrong) instead of actual 96 MB for L40S",
+        "citations": [
+          {
+            "file_path": "REPORT.md",
+            "line_start": 402,
+            "line_end": 404,
+            "claim": "All three candidates initially assumed L40S L2 = 48 MB; empirical measurement revealed 96 MB",
+            "quoted_content": "All three optimization candidates initially assumed L40S L2 = 48 MB (based on earlier Ada Lovelace documentation). Empirical measurement by one candidate revealed L2 = 96 MB. Using the wrong flush size in cold-cache benchmarks would have left 48 MB of hot weight data in L2"
+          }
+        ]
+      },
+      {
+        "lesson": "Memory overhead from weight pre-transposition (2.81 GB) can regress uninvolved batch sizes through reduced L2 cache efficiency",
+        "citations": [
+          {
+            "file_path": "REPORT.md",
+            "line_start": 406,
+            "line_end": 408,
+            "claim": "Pre-transposing weights added 2.81 GB causing 0.57% BS=1 regression despite fused kernel never executing at BS=1",
+            "quoted_content": "Pre-transposing weights for the fused kernel added 2.81 GB to model memory (32 layers x 90 MB). This caused a 0.57% regression at BS=1 even though the fused kernel never executes at that batch size."
+          }
+        ]
+      }
+    ],
+    "campaign_timing": {
+      "total_seconds": 6667.1,
+      "stages": {
+        "baseline_and_bottleneck": "2026-03-23T21:50 to 2026-03-23T22:23 (~33 min)",
+        "debate": "2026-03-23T22:23 to 2026-03-23T23:02 (~39 min)",
+        "implementation_and_validation": "2026-03-23T23:02 to 2026-03-24T00:15 (~73 min)"
+      },
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 193,
+          "line_end": 216,
+          "claim": "Campaign ran from 21:50 to 00:15 UTC across 7 stages",
+          "quoted_content": "\"1_baseline\": {\n      \"completed_at\": \"2026-03-23T22:23:15.195277+00:00\",\n      \"started_at\": \"2026-03-23T21:50:41.113113+00:00\"\n    }"
+        }
+      ]
+    },
+    "model_architecture_context": {
+      "type": "hybrid_transformer",
+      "layers": 32,
+      "deltaRule_layers": 24,
+      "attention_layers": 8,
+      "layer_pattern": "[linear_attention, linear_attention, linear_attention, full_attention] x 8",
+      "mlp_type": "dense_silu_gated",
+      "hidden_size": 2560,
+      "intermediate_size": 9216,
+      "citations": [
+        {
+          "file_path": "constraints.md",
+          "line_start": 15,
+          "line_end": 19,
+          "claim": "Qwen3.5-4B is a hybrid transformer with 24 DeltaRule and 8 full attention layers, dense SiLU-gated MLP",
+          "quoted_content": "Qwen3.5-4B is a hybrid transformer with 32 layers:\n- 24 DeltaRule (linear_attention) layers using Gated Delta Net (GDN)\n- 8 full_attention layers using standard multi-head attention (GQA)\n- Layer pattern: [linear_attention, linear_attention, linear_attention, full_attention] x 8\n- Dense SiLU-gated MLP in all 32 layers (NOT MoE)"
+        }
+      ]
+    }
+  }
+}

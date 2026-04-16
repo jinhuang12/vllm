@@ -1,0 +1,826 @@
+{
+  "aggregation_metadata": {
+    "total_runs": 18,
+    "runs_included": [
+      "00",
+      "01",
+      "02",
+      "03",
+      "04",
+      "04b",
+      "05",
+      "06",
+      "07",
+      "08",
+      "09",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17"
+    ],
+    "models": [
+      "Qwen3.5-4B",
+      "Qwen3.5-35B-A3B",
+      "GLM-5",
+      "Nemotron-3-Nano-30B"
+    ],
+    "hardware": [
+      "L40S",
+      "B200"
+    ],
+    "skill_versions": [
+      "baseline-v1",
+      "0258cbea2",
+      "06f309c83",
+      "2075d7d1e",
+      "327b55e1e",
+      "3ed2cc190",
+      "6da5e40a0",
+      "85d8ded68",
+      "a779aa29",
+      "refactored"
+    ],
+    "dtypes": [
+      "BF16",
+      "FP8"
+    ],
+    "campaign_length_range": "1-17 rounds",
+    "notes": {
+      "run_04_and_04b": "Same campaign (327b55e1e, 12-round Qwen3.5-4B/L40S) mined by two different agents with different schemas. run_04 has nested categories, run_04b has flat intervention_inventory. Both included but deduplicated in aggregate counts.",
+      "runs_05_and_06": "Same campaign (3ed2cc190, Qwen3.5-35B-A3B/L40S) mined by two different agents. Both included.",
+      "runs_13_16": "Runs 13-16 have partial campaign metrics (overall_score present, but rounds/shipped/speedup missing from top-level campaign_metrics). These are included for anti-pattern and qualitative data.",
+      "citation_verification": "Approximately 80% of citations verified exact-match; remaining 20% have fuzzy-match issues but underlying findings are real per verification JSONs."
+    }
+  },
+  "intervention_taxonomy": {
+    "description": "Classification of all monitor interventions across sessions. Only runs 00, 04/04b, 08, 12, and 17 had active transcript monitors. The remaining 13 runs had monitors disabled or missing, providing natural counterfactual baselines.",
+    "runs_with_active_monitors": [
+      "00",
+      "04",
+      "04b",
+      "08",
+      "12",
+      "17"
+    ],
+    "runs_without_monitors": [
+      "01",
+      "02",
+      "03",
+      "05",
+      "06",
+      "07",
+      "09",
+      "10",
+      "11",
+      "13",
+      "14",
+      "15",
+      "16"
+    ],
+    "total_interventions": 121,
+    "by_normalized_category": {
+      "evidence": {
+        "count": 33,
+        "share_pct": 27.3,
+        "description": "Flagging invalid measurements, L2 cache artifacts, baseline mismatch, inflated speedup claims, unverified assumptions",
+        "includes_raw_categories": [
+          "evidence",
+          "redirect_to_data",
+          "negative_result",
+          "stale_data",
+          "baseline_provenance",
+          "data_inconsistency",
+          "unverified_claim",
+          "invalid_measurement",
+          "below_threshold",
+          "unverified_assumption",
+          "baseline_contamination"
+        ]
+      },
+      "methodology": {
+        "count": 19,
+        "share_pct": 15.7,
+        "description": "Flawed benchmarking methodology, missing CUDA graphs, wrong output-len, premature optimization, missing GPU reservation",
+        "includes_raw_categories": [
+          "methodology",
+          "methodology_error",
+          "methodology_concern",
+          "timing_concern",
+          "prototype_requirement",
+          "gpu_reservation",
+          "smoke_test_metric",
+          "scope_gap"
+        ]
+      },
+      "correctness": {
+        "count": 14,
+        "share_pct": 11.6,
+        "description": "Kernel correctness failures, hardware misconceptions (FP8 MMA on SM89), tolerance masking bugs, runtime crashes",
+        "includes_raw_categories": [
+          "correctness",
+          "correctness_anomaly",
+          "hardware_misconception",
+          "runtime_crash",
+          "accuracy_failure"
+        ]
+      },
+      "reasoning": {
+        "count": 10,
+        "share_pct": 8.3,
+        "description": "Flawed Amdahl reasoning, occupancy misconceptions, overoptimistic BW targets, disproved hypotheses",
+        "includes_raw_categories": [
+          "reasoning",
+          "flawed_reasoning",
+          "flawed_model",
+          "amdahl_framing",
+          "overoptimistic_target",
+          "hypothesis_disproved"
+        ]
+      },
+      "coaching": {
+        "count": 1,
+        "share_pct": 0.8,
+        "description": "Explicit coaching suggestions (e.g., Self-Validation Gate protocol after repeated failures)"
+      },
+      "other_and_unclassified": {
+        "count": 44,
+        "share_pct": 36.4,
+        "description": "Interventions from run_17 and run_12 with topic-based rather than category-based schemas (e.g., 'L2 flush too small', 'wrong lm_head shape'). These map approximately to evidence (60%) and methodology (30%) but are not force-classified to preserve fidelity."
+      }
+    },
+    "by_severity": {
+      "CRITICAL": 41,
+      "WARNING": 88,
+      "INFO": 1,
+      "note": "Severity counts from runs with explicit severity fields. run_17 uses topic-based classification."
+    }
+  },
+  "impact_distribution": {
+    "description": "Impact classification of interventions where formal counterfactual analysis was performed. run_00 has the most complete impact data (27 interventions with impact ratings). run_04b adds 16 more classified interventions.",
+    "classified_interventions": 43,
+    "by_impact": {
+      "HIGH": 15,
+      "MEDIUM": 17,
+      "LOW": 8,
+      "NONE": 3
+    },
+    "shares_pct": {
+      "HIGH": 34.9,
+      "MEDIUM": 39.5,
+      "LOW": 18.6,
+      "NONE": 7.0
+    },
+    "before_actor_noticed": {
+      "description": "Whether monitor flagged the issue before the actor independently noticed it (from run_00 data, 27 interventions)",
+      "true_count": 13,
+      "false_count": 14,
+      "before_actor_rate_pct": 48.1,
+      "note": "48% of interventions caught issues before the actor noticed. The remaining 52% served as confirmation or urgency reinforcement."
+    },
+    "false_positive_rate": {
+      "value_pct": 7.0,
+      "description": "3 NONE-impact interventions out of 43 classified (monitor incorrectly cited 5% threshold, timing concern that was 6 seconds off, GPU reservation procedural warning). These were self-corrected or harmless.",
+      "source_runs": [
+        "00",
+        "04b"
+      ]
+    },
+    "false_negative_assessment": {
+      "description": "Runs without monitors (01, 02, 03, 05, 06, 07, 09, 10, 11) had anti-patterns that monitors would likely have caught: hallucinated E2E improvements (run_01: 6.02% claimed vs 4.79% actual), unreported regressions (run_01: 2.63% BS=1 regression), cold-to-production overestimation in 10 runs. These provide counterfactual evidence that monitors reduce error propagation.",
+      "estimated_missed_intervention_count": "15-25 across 13 unmonitored runs",
+      "key_examples": [
+        "run_01: Hallucinated 6.02% E2E (actual 4.79%) pushed past 5% kill criterion -- no monitor to flag",
+        "run_02: Same campaign re-mined independently found same inflation issue",
+        "run_07: Champion-3 benchmarked against wrong baseline (C++ instead of torch.compile) -- debate peer review caught it, but monitor would have caught it earlier",
+        "run_09: Both shipped ops failed kill criteria -- monitors would have escalated"
+      ]
+    }
+  },
+  "campaign_metrics_summary": {
+    "per_run": [
+      {
+        "run": "00",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 17,
+        "tracks_shipped": 16,
+        "tracks_failed": 4,
+        "cumulative_speedup": 2.648,
+        "termination": "paused (R18 overlap)",
+        "score": 7.04,
+        "monitored": true
+      },
+      {
+        "run": "01",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 1,
+        "tracks_shipped": 1,
+        "tracks_failed": 1,
+        "cumulative_speedup": 1.06,
+        "termination": "diminishing_returns",
+        "score": 6.04,
+        "monitored": false
+      },
+      {
+        "run": "02",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 1,
+        "tracks_shipped": 1,
+        "tracks_failed": 1,
+        "cumulative_speedup": 1.06,
+        "termination": "diminishing_returns",
+        "score": 6.34,
+        "monitored": false
+      },
+      {
+        "run": "03",
+        "model": "GLM-5",
+        "hw": "B200",
+        "dtype": "FP8",
+        "rounds": 2,
+        "tracks_shipped": 1,
+        "tracks_failed": 1,
+        "cumulative_speedup": 1.016,
+        "termination": "active (interrupted)",
+        "score": 4.21,
+        "monitored": false
+      },
+      {
+        "run": "04/04b",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 12,
+        "tracks_shipped": 5,
+        "tracks_failed": 5,
+        "cumulative_speedup": 1.422,
+        "termination": "campaign_exhausted (all 4 tech classes)",
+        "score": null,
+        "monitored": true
+      },
+      {
+        "run": "05",
+        "model": "Qwen3.5-35B-A3B",
+        "hw": "L40S",
+        "dtype": "FP8",
+        "rounds": 3,
+        "tracks_shipped": 1,
+        "tracks_failed": 3,
+        "cumulative_speedup": 1.053,
+        "termination": "campaign_exhausted",
+        "score": 2.85,
+        "monitored": false
+      },
+      {
+        "run": "06",
+        "model": "Qwen3.5-35B-A3B",
+        "hw": "L40S",
+        "dtype": "FP8",
+        "rounds": 3,
+        "tracks_shipped": 1,
+        "tracks_failed": 3,
+        "cumulative_speedup": 1.053,
+        "termination": "campaign_exhausted",
+        "score": 2.29,
+        "monitored": false
+      },
+      {
+        "run": "07",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 1,
+        "tracks_shipped": 0,
+        "tracks_failed": 0,
+        "cumulative_speedup": 1.0,
+        "termination": "campaign_exhausted (at HW ceiling)",
+        "score": 4.12,
+        "monitored": false
+      },
+      {
+        "run": "08",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 5,
+        "tracks_shipped": 2,
+        "tracks_failed": 4,
+        "cumulative_speedup": 1.051,
+        "termination": "campaign_exhausted",
+        "score": 3.81,
+        "monitored": true
+      },
+      {
+        "run": "09",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 3,
+        "tracks_shipped": 2,
+        "tracks_failed": 2,
+        "cumulative_speedup": 1.0,
+        "termination": "campaign_complete",
+        "score": 4.25,
+        "monitored": false
+      },
+      {
+        "run": "10",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 2,
+        "tracks_shipped": 2,
+        "tracks_failed": 3,
+        "cumulative_speedup": 1.018,
+        "termination": "campaign_exhausted",
+        "score": 3.79,
+        "monitored": false
+      },
+      {
+        "run": "11",
+        "model": "Nemotron-3-Nano-30B",
+        "hw": "L40S",
+        "dtype": "FP8",
+        "rounds": 3,
+        "tracks_shipped": 2,
+        "tracks_failed": 5,
+        "cumulative_speedup": 1.081,
+        "termination": "campaign_exhausted (BW ceiling)",
+        "score": 5.17,
+        "monitored": false
+      },
+      {
+        "run": "12",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 1,
+        "tracks_shipped": 0,
+        "tracks_failed": 2,
+        "cumulative_speedup": 1.0,
+        "termination": "campaign_exhausted",
+        "score": 3.56,
+        "monitored": true
+      },
+      {
+        "run": "13",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": null,
+        "tracks_shipped": null,
+        "tracks_failed": null,
+        "cumulative_speedup": null,
+        "termination": "partial data",
+        "score": 4.85,
+        "monitored": false
+      },
+      {
+        "run": "14",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": null,
+        "tracks_shipped": null,
+        "tracks_failed": null,
+        "cumulative_speedup": null,
+        "termination": "partial data",
+        "score": 2.89,
+        "monitored": false
+      },
+      {
+        "run": "15",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": null,
+        "tracks_shipped": null,
+        "tracks_failed": null,
+        "cumulative_speedup": null,
+        "termination": "partial data",
+        "score": 4.52,
+        "monitored": false
+      },
+      {
+        "run": "16",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": null,
+        "tracks_shipped": null,
+        "tracks_failed": null,
+        "cumulative_speedup": null,
+        "termination": "partial data",
+        "score": 8.65,
+        "monitored": false
+      },
+      {
+        "run": "17",
+        "model": "Qwen3.5-4B",
+        "hw": "L40S",
+        "dtype": "BF16",
+        "rounds": 4,
+        "tracks_shipped": 2,
+        "tracks_failed": 0,
+        "cumulative_speedup": 1.157,
+        "termination": "campaign_exhausted",
+        "score": 5.38,
+        "monitored": true
+      }
+    ],
+    "aggregate": {
+      "runs_with_complete_metrics": 15,
+      "runs_with_partial_metrics": 4,
+      "mean_rounds": 4.7,
+      "median_rounds": 3.0,
+      "mean_cumulative_speedup": 1.203,
+      "median_cumulative_speedup": 1.053,
+      "max_cumulative_speedup": 2.648,
+      "total_tracks_shipped_across_all": 36,
+      "mean_overall_score": 4.49,
+      "median_overall_score": 4.25,
+      "campaigns_exhausted_pct": 73.3,
+      "campaigns_with_zero_shipped_pct": 13.3,
+      "note": "Aggregate stats computed over runs with non-null values for each field. run_04/04b counted once."
+    }
+  },
+  "anti_pattern_frequency": {
+    "description": "Recurrence of failure modes across sessions. cold_to_production_overestimation is the dominant anti-pattern appearing in 10 of 18 runs (55.6%), confirming it as the most common failure mode for coding agents optimizing GPU kernels.",
+    "total_unique_patterns": 30,
+    "frequency_table": [
+      {
+        "pattern": "cold_to_production_overestimation",
+        "count": 10,
+        "runs": [
+          "02",
+          "03",
+          "05",
+          "06",
+          "08",
+          "09",
+          "10",
+          "11",
+          "12",
+          "13"
+        ],
+        "description": "Debate E2E projections overestimate actual validated E2E by 1.5-7x. Root cause: cold-cache kernel speedup does not account for production L2 cache state, NCCL spin-wait absorption, or monolithic kernel fusion advantages."
+      },
+      {
+        "pattern": "near_optimal_framing_trap",
+        "count": 4,
+        "runs": [
+          "05",
+          "06",
+          "07",
+          "08"
+        ],
+        "description": "Bottleneck analysis declares a component 'near-optimal' or 'no red flags' at BW utilizations below 85%, discouraging optimization of the dominant bottleneck component."
+      },
+      {
+        "pattern": "hallucinated_data",
+        "count": 3,
+        "runs": [
+          "00",
+          "01",
+          "07"
+        ],
+        "description": "Champion fabricates or misattributes data (wrong layer counts, inflated E2E percentages, wrong f_decode values)."
+      },
+      {
+        "pattern": "wasted_retries",
+        "count": 2,
+        "runs": [
+          "00",
+          "07"
+        ],
+        "description": "Repeated failures from the same root cause (wrong class patched, wrong output-len flags)."
+      },
+      {
+        "pattern": "kernel_speedup_no_e2e_translation",
+        "count": 2,
+        "runs": [
+          "02",
+          "09"
+        ],
+        "description": "Kernel-level speedup (1.64x, 1.29x) fails to translate to E2E due to L2 cache effects or wave count scaling."
+      },
+      {
+        "pattern": "off_track_reasoning",
+        "count": 2,
+        "runs": [
+          "06",
+          "07"
+        ],
+        "description": "Champion benchmarks against wrong baseline (non-CUDA-graph mode, C++ kernel instead of torch.compile production)."
+      },
+      {
+        "pattern": "shipped_despite_kill_criteria_failure",
+        "count": 1,
+        "runs": [
+          "09"
+        ],
+        "description": "Both shipped optimizations failed their kill criteria but were shipped anyway."
+      },
+      {
+        "pattern": "masking_bug_in_reference",
+        "count": 1,
+        "runs": [
+          "00"
+        ],
+        "description": "Champion's smoke test reference function had same bug as kernel (sigmoid vs silu), hiding correctness failure."
+      },
+      {
+        "pattern": "single_experiment_dismissal",
+        "count": 1,
+        "runs": [
+          "01"
+        ],
+        "description": "Champion dismissed Triton for 88.6% bottleneck based on single flawed experiment (BLOCK_M=16 hardcode)."
+      },
+      {
+        "pattern": "dead_hook_infrastructure",
+        "count": 1,
+        "runs": [
+          "02"
+        ],
+        "description": "Gate validator hook (329 LOC + 674 LOC tests) never fired during campaign."
+      },
+      {
+        "pattern": "hallucinated_profiling_data",
+        "count": 1,
+        "runs": [
+          "11"
+        ],
+        "description": "Validator fabricated profiling data (ViT encoder attribution for text-only model)."
+      },
+      {
+        "pattern": "round1_complete_washout",
+        "count": 1,
+        "runs": [
+          "11"
+        ],
+        "description": "All Round 1 implementations failed (100% washout), wasting full debate+implementation cycle."
+      }
+    ],
+    "key_finding": "cold_to_production_overestimation appears in 10 of 18 runs (55.6%), spanning all 4 models and both hardware platforms. This is the single most important failure mode for transcript-native oversight to target. Overestimation ratios range from 1.5x (run_09) to 6.9x (run_03, GLM-5/B200). Root causes: L2 cache effects (7 runs), NCCL spin-wait absorption (2 runs), monolithic fusion advantage (1 run)."
+  },
+  "top_coaching_examples": [
+    {
+      "rank": 1,
+      "run": "00",
+      "id": "COACH-004",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "summary": "Monitor used op018 champion's own benchmark data (0.881x regression for INT4 kernel) to send CRITICAL halt, prompting diagnosis of BK_PACKED=16 creating 80 tiny iterations. Champion fixed to BK_PACKED=128 achieving 1.445x, ultimately delivering 12.72% E2E.",
+      "impact": "HIGH -- prevented shipping regressing kernel; diagnosis led to largest single-op E2E gain",
+      "monitor_citation": {
+        "file": "monitor_log_impl-champion-op018.md",
+        "lines": "73-78"
+      },
+      "actor_data_citation": {
+        "file": "monitor_log_impl-champion-op018.md",
+        "lines": "65-69"
+      }
+    },
+    {
+      "rank": 2,
+      "run": "04/04b",
+      "id": "COACH-R2-BW-REDIRECT",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "summary": "Monitor used champion's own per-shape BW delegate results (80-83% already achieved for all shapes) to redirect away from speculative tiled weight layout. Champion immediately pivoted, discovering the production gap is environmental not per-kernel. This redirected the entire Round 2 strategy.",
+      "impact": "HIGH -- foundation for shipped op002 SiLU-prologue concat (1.5% E2E)",
+      "monitor_citation": {
+        "file": "monitor_log_champion-1.md",
+        "lines": "786-788"
+      },
+      "actor_data_citation": {
+        "file": "monitor_log_champion-1.md",
+        "lines": "766-769"
+      }
+    },
+    {
+      "rank": 3,
+      "run": "04/04b",
+      "id": "COACH-R9-C3-OCCUPANCY",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "summary": "Monitor flagged 82% BW assumption as unvalidated for custom FP8 kernel. Champion ran NCU profiling in response, discovering the key 16.8% occupancy root cause (SMEM-limited 2 blocks/SM). This finding became the core evidence for the merged winning proposal.",
+      "impact": "MEDIUM-HIGH -- prompted discovery that became core evidence for winning proposal",
+      "monitor_citation": {
+        "file": "monitor_log_champion-3.md",
+        "lines": "120-124"
+      },
+      "actor_data_citation": {
+        "file": "monitor_log_champion-3.md",
+        "lines": "146-153"
+      }
+    },
+    {
+      "rank": 4,
+      "run": "00",
+      "id": "COACH-003",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "summary": "Monitor warned about FP8 baseline mismatch (F.linear vs op002 production kernel), leading champion to revise selected speedup estimate from 1.5x to 1.33x and deflated E2E from 5.4% to 3.98%.",
+      "impact": "HIGH -- prevented inflated FP8 claim from passing debate",
+      "monitor_citation": {
+        "file": "monitor_log_champion-r3-1.md",
+        "lines": "37"
+      },
+      "actor_data_citation": {
+        "file": "monitor_log_champion-r3-1.md",
+        "lines": "61-69"
+      }
+    },
+    {
+      "rank": 5,
+      "run": "08",
+      "id": "COACH-1",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "summary": "Monitor coaching across 5-round campaign with 15 interventions (5 CRITICAL, 10 WARNING). Key interventions included flagging FP8 MLP overestimation (projected 7.24% vs actual 1.06%), INT4 accuracy gates (79.5% vs 89.5% baseline), and BW wall kill decisions on 4 failed tracks.",
+      "impact": "MEDIUM -- guided 5-round campaign through 4 technology pivots",
+      "monitor_citation": {
+        "file": "run_08.json",
+        "lines": "intervention_inventory"
+      },
+      "actor_data_citation": {
+        "file": "run_08.json",
+        "lines": "campaign_metrics"
+      }
+    }
+  ],
+  "validator_independence_examples": [
+    {
+      "rank": 1,
+      "run": "00",
+      "id": "VIND-003",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "track": "op015_fused_rmsnorm_gated",
+      "summary": "Independent validator caught sigmoid-vs-silu bug (max_err=6.5) that champion's own smoke test MASKED because the reference function had the same bug. This is the strongest example of validator independence value: both implementation and test shared a conceptual error that only an independent derivation could catch.",
+      "citation": {
+        "file": "tracks/op015_fused_rmsnorm_gated/validation_results.md",
+        "lines": "27-29",
+        "quoted": "Initial implementation used sigmoid(z) instead of silu(z) = z * sigmoid(z). Caught by independent validator (Gate 5.1a FAIL with max_err=6.5). Champion's smoke test had the same bug in its reference function, masking the error."
+      }
+    },
+    {
+      "rank": 2,
+      "run": "06",
+      "id": "VIND-cuda-graph-catch",
+      "model": "Qwen3.5-35B-A3B",
+      "hardware": "L40S",
+      "track": "op_cuda_warp_spec_fused_moe",
+      "summary": "Validator benchmarked under CUDA graphs (production parity), revealing champion's benchmark was NOT under CUDA graphs. Champion reported 1.10x speedup; validator measured 3.4x REGRESSION (0.29x). The Triton baseline included ~25us Python dispatch overhead that CUDA graphs eliminate. Without independent validation, a catastrophic 3.4x regression could have been shipped.",
+      "citation": {
+        "file": "tracks/op_cuda_warp_spec_fused_moe/validation_results.md",
+        "lines": "52-58",
+        "quoted": "The champion measured 37.0us (Triton) -> 33.5us (WarpSpec) = 1.10x speedup. This was not under CUDA graphs. The actual GPU kernel time for Triton is ~9.4us (BS=8), not 37us."
+      }
+    },
+    {
+      "rank": 3,
+      "run": "01",
+      "id": "VIND-colocated-baseline",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "track": "OP-002",
+      "summary": "Validator independently constructed three-way baseline comparison (Stage 1 baseline, co-located baseline, optimized) and discovered 0.5-1.0% systematic inter-run drift, larger than the claimed optimization effect. Revealed OP-002's kernel-level 1.64x speedup translated to -0.19% E2E (regression). Validator independently derived the root cause (L2 cache effects: 384 MB state across 24 layers vs L2 capacity).",
+      "citation": {
+        "file": "tracks/OP-002/validation_results.md",
+        "lines": "117-137",
+        "quoted": "The co-located baseline revealed the optimization actually regressed -0.19% at BS=8... S1 gap: The Stage 1 baseline is consistently 0.5-1.0% slower than the co-located baseline across all batch sizes."
+      }
+    }
+  ],
+  "enforcement_examples": [
+    {
+      "rank": 1,
+      "type": "block",
+      "run": "00",
+      "id": "ENF-001",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "trigger": "op015 Gate 5.1a FAIL (max_err=6.5 from sigmoid-vs-silu bug)",
+      "outcome": "Champion forced to fix sigmoid-to-silu bug before track could proceed. Fix committed at SHA 93b3bb12e. Re-validation confirmed correctness.",
+      "enforcement_level": "BLOCK -- implementation halted until correctness fix verified",
+      "citation": {
+        "file": "monitor_log_impl-champion-op015.md",
+        "lines": "43-53"
+      }
+    },
+    {
+      "rank": 2,
+      "type": "warn_then_halt",
+      "run": "00",
+      "id": "ENF-004",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "trigger": "op018 garbage generation output (prompts 2-3 produce unintelligible text) detected by monitor while champion assessed output as 'coherent'",
+      "outcome": "CRITICAL halt sent to champion; ESCALATION sent to team-lead telling validator to HOLD. Champion investigated, proved garbage was from accumulated FP8 ops not INT4. Validation resumed only after root cause identified.",
+      "enforcement_level": "WARN escalated to HALT -- calibrated response: monitor detected quality issue champion missed, escalated proportionally",
+      "citation": {
+        "file": "monitor_log_impl-champion-op018.md",
+        "lines": "42-49"
+      }
+    },
+    {
+      "rank": 3,
+      "type": "advisory",
+      "run": "00",
+      "id": "ENF-005",
+      "model": "Qwen3.5-4B",
+      "hardware": "L40S",
+      "trigger": "op006 BK=256 not selected by autotuner for any production shape -- candidate contributes zero improvement",
+      "outcome": "Track declared FAIL with transparent reporting. Champion proactively informed team-lead: 'Likely outcome is FAIL'. Negative evidence preserved for future rounds. No blocking action needed -- champion self-terminated.",
+      "enforcement_level": "ADVISORY -- lightest touch; monitor observed, champion self-corrected, negative result preserved transparently",
+      "citation": {
+        "file": "monitor_log_impl-champion-op006.md",
+        "lines": "47-56"
+      }
+    }
+  ],
+  "changelog_entries": [
+    {
+      "id": "CLE-001",
+      "section": "6.9",
+      "significance": "HIGH",
+      "finding": "cold_to_production_overestimation is the dominant anti-pattern across the corpus: 10 of 18 runs (55.6%), spanning all 4 models (Qwen3.5-4B, Qwen3.5-35B-A3B, GLM-5, Nemotron-3-Nano-30B) and both hardware platforms (L40S, B200). Overestimation ratios range from 1.5x to 6.9x. Root causes: L2 cache effects (7 runs), NCCL spin-wait absorption on PCIe TP=4 (2 runs), monolithic kernel fusion advantage (1 run). This validates the paper's claim that runtime monitors should specifically target measurement-to-production translation gaps.",
+      "source_runs": 10
+    },
+    {
+      "id": "CLE-002",
+      "section": "6.9",
+      "significance": "HIGH",
+      "finding": "121 monitor interventions classified across 5 monitored runs. Evidence-quality interventions dominate (27.3%), followed by methodology (15.7%), correctness (11.6%), and reasoning (8.3%). 34.9% of classified interventions had HIGH impact, with a 7.0% false positive rate (3/43 NONE-impact). Monitors caught issues before the actor noticed in 48% of cases. The remaining 52% served as confirmation/urgency reinforcement -- still valuable as they prevented the actor from silently dropping the concern.",
+      "source_runs": 5
+    },
+    {
+      "id": "CLE-003",
+      "section": "4.2",
+      "significance": "HIGH",
+      "finding": "38 validator independence examples across 10 runs. Strongest examples: (1) sigmoid-vs-silu shared bug between implementation AND reference test caught only by independent validator (run_00, op015), (2) 3.4x regression caught because validator benchmarked under CUDA graphs while champion did not (run_06), (3) co-located baseline methodology independently revealing 1.64x kernel speedup is actually -0.19% E2E (run_01/02). These demonstrate that independent test derivation from spec catches errors that shared-context testing systematically misses.",
+      "source_runs": 10
+    },
+    {
+      "id": "CLE-004",
+      "section": "4.7",
+      "significance": "HIGH",
+      "finding": "25 enforcement instances across 5 runs demonstrate the full enforcement spectrum: BLOCK (Gate 5.1a correctness failures halting tracks), DENY (premature TRACK_COMPLETE before validator returned), WARN (escalated to HALT for garbage generation output), and ADVISORY (negative results transparently preserved). The spectrum shows calibrated enforcement: strongest action for correctness bugs, lightest for negative results where champion is already self-correcting.",
+      "source_runs": 5
+    },
+    {
+      "id": "CLE-005",
+      "section": "6.9",
+      "significance": "HIGH",
+      "finding": "N=18 sessions provide generalizability evidence across 4 model architectures (Hybrid Mamba-Transformer, MoE-256, dense MoE-30B, dense LM) and 2 GPU generations (Ada Lovelace SM89, Blackwell SM100). Key architecture-independent findings: (a) cold-to-production overestimation is universal, (b) adversarial debate corrects code-path misattribution regardless of model family, (c) delegation causality chains function across hardware generations, (d) Amdahl's Law predictions validate within 1.1-1.5x on both L40S and B200.",
+      "source_runs": 18
+    },
+    {
+      "id": "CLE-006",
+      "section": "4.5d",
+      "significance": "HIGH",
+      "finding": "26 coaching instances across 6 runs. The coaching pattern is consistent: monitor uses the actor's own data to redirect reasoning. Top examples: (1) Using champion's 0.881x regression data to halt INT4 shipping (run_00), (2) Using champion's per-shape BW showing 80-83% to redirect from speculative tiled layout (run_04), (3) Flagging unvalidated BW assumption prompting NCU discovery of 16.8% occupancy root cause (run_04). The 'use their own data' pattern is key to coaching acceptance -- actors respond to their own evidence, not external assertions.",
+      "source_runs": 6
+    },
+    {
+      "id": "CLE-007",
+      "section": "6.9",
+      "significance": "MEDIUM",
+      "finding": "near_optimal_framing_trap appears in 4 runs (05, 06, 07, 08), always originating from bottleneck_analysis.md using 'no red flags' or 'near-optimal' framing for components at 73-80% BW utilization (below the 85% threshold). In all 4 cases, this framing delayed or prevented optimization of the dominant bottleneck. Recommendation: bottleneck analysis should flag any component below 85% BW as 'optimization candidate' rather than 'near-optimal'.",
+      "source_runs": 4
+    },
+    {
+      "id": "CLE-008",
+      "section": "6.9",
+      "significance": "MEDIUM",
+      "finding": "Campaign metrics show wide variance: speedup range 1.0x to 2.648x, rounds range 1 to 17, scores range 2.29 to 8.65. Median speedup is 1.053x (modest), but the 17-round campaign (run_00) achieved 2.648x. The monitored runs (00, 04, 08, 17) have a mean speedup of 1.569x vs unmonitored mean of 1.039x. Caveat: monitored runs also tend to be longer campaigns with more skill maturity, so the comparison is confounded.",
+      "source_runs": 18
+    },
+    {
+      "id": "CLE-009",
+      "section": "6.9",
+      "significance": "MEDIUM",
+      "finding": "Monitor self-correction instances validate healthy adversarial dynamics: (1) run_00: monitor incorrectly cited 5% threshold (actual 1%), champion correctly rejected, monitor self-corrected with explicit error log; (2) run_04: monitor initially framed 2.26% FP8 E4M3 error as 'correctness bug', then sent INFO correction acknowledging it's expected for FP8 precision. Self-correction rate: ~5% of interventions (2-3 per monitored campaign).",
+      "source_runs": 2
+    },
+    {
+      "id": "CLE-010",
+      "section": "6.9",
+      "significance": "MEDIUM",
+      "finding": "Zero-intervention periods during exhaustion phases: run_04 R10-R12 had 6 debate sessions with ZERO corrective interventions. Champions self-corrected via empirical evidence during the technology exhaustion phase. This suggests monitors provide highest value during early/mid campaign when novel optimization approaches are being explored, and diminishing value during exhaustion phases when agents are systematically ruling out remaining approaches.",
+      "source_runs": 1
+    }
+  ]
+}

@@ -1,0 +1,287 @@
+{
+  "total": 42,
+  "passed": 33,
+  "failed": 9,
+  "failure_rate": 0.214,
+  "results": [
+    {
+      "file_path": "debate/round_1/champion-2_critique_champion-3.md",
+      "line_range": "10-17",
+      "claim": "Champion-2 identifies L2_SIZE_MB=48 bug in Champion-3's script when actual L40S L2 is 96 MB",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.65 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/round_1/champion-3_rebuttal.md",
+      "line_range": "9-17",
+      "claim": "Champion-3 concedes L2 cache bug and revises E2E estimate downward",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-3_argument.md",
+      "line_range": "50-58",
+      "claim": "Champion-3 identifies BLOCK_M=max(M,16) hardcode in Champion-1's script as root cause of false Triton limitation claim",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "9-17",
+      "claim": "Champion-1 concedes the error and retracts the Triton M-padding claim",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_champion3_critique_prep.md",
+      "line_range": "56-67",
+      "claim": "Delegate analysis confirms in_proj_ba chain (21 MB) is 0.22x of actual 96 MB L2 -- entirely L2-warm",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_l2_verification.md",
+      "line_range": "8-15",
+      "claim": "Delegate report confirms L40S L2 = 96 MB from hardware query",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.61 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/round_1/champion-1_argument.md",
+      "line_range": "73-89",
+      "claim": "Champion-1 cites L2=96 MB finding to identify that in_proj_ba chain is entirely L2-cached in Champion-3's experiment",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.62 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "../../ammo_gate_validator_analysis.md",
+      "line_range": "8-10",
+      "claim": "Gate validator hook provided zero value -- never fired during campaign",
+      "verified": true
+    },
+    {
+      "file_path": "../../ammo_gate_validator_analysis.md",
+      "line_range": "57-64",
+      "claim": "Gates were enforced manually by orchestrator, not by automated hooks",
+      "verified": true
+    },
+    {
+      "file_path": "../../ammo_gate_validator_analysis.md",
+      "line_range": "88-96",
+      "claim": "Zero hook events fired vs 6 manual gate checks by orchestrator",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "139-149",
+      "claim": "Validator independently concluded co-located baseline is the correct comparison, revealing zero E2E benefit",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "171-185",
+      "claim": "OP-002 track recorded FAIL verdict with explicit kill criterion reference",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "170-183",
+      "claim": "Kill criteria evaluation table shows binding constraint was criterion 5",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "57-67",
+      "claim": "Pending queue contains only sub-threshold candidates, triggering campaign completion",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.59 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "232-233",
+      "claim": "Campaign summary confirms completion due to sub-threshold remaining candidates",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "20-22",
+      "claim": "Champion-1 eliminated below 5.0 threshold",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "3-9",
+      "claim": "Agent record shows researcher was killed with explicit reason",
+      "verified": true
+    },
+    {
+      "file_path": "../../scorecard.json",
+      "line_range": "1-10",
+      "claim": "Overall score 6.34, E2E outcome 6.0 at 40% weight, transcript quality 8.25 at 15% weight",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "56-58",
+      "claim": "Cumulative E2E speedup 1.06x across 1 round, campaign complete",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.66 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "../../artifacts_snapshot.json",
+      "line_range": "140-170",
+      "claim": "Delegation metrics: 3 delegates spawned, 100% citation rate, 8 artifacts produced",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "83-90",
+      "claim": "Campaign records 6.02% as official E2E improvement",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "113-124",
+      "claim": "In-sweep comparison gives only 1.94% at BS=8, isolating Triton kernel contribution",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.46 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "130-133",
+      "claim": "OP-002 validation confirms systematic 0.5-1.0% drift between Stage 1 and same-session baselines",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "65-71",
+      "claim": "Champion-3 proposal cites 2.50x speedup for in_proj_ba as measured result",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/round_1/champion-3_rebuttal.md",
+      "line_range": "17-18",
+      "claim": "Champion-3 concedes the in_proj_ba speedup is unreliable due to L2 caching",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "54-55",
+      "claim": "Proposal concludes Triton fundamentally cannot avoid M-padding",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "9-17",
+      "claim": "Champion-1 concedes the error after Champion-3 identifies the BLOCK_M hardcode bug",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "1-10",
+      "claim": "OP-002 showed 1.64x kernel speedup but zero E2E benefit",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "153-168",
+      "claim": "Root cause: isolated benchmark L2 flattery, redundant ba dot-product, ba_weight transpose overhead",
+      "verified": true
+    },
+    {
+      "file_path": "../../ammo_gate_validator_analysis.md",
+      "line_range": "98-107",
+      "claim": "Gate validator hook is dead code that never executes; all enforcement was manual",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "1-11",
+      "claim": "OP-003 passed all gates: correctness (48/48), kernel 4.9% speedup, E2E 6.02% at BS=8",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "80-92",
+      "claim": "Kernel-level results show BW utilization improved from 76.6% to 80.3%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "256-260",
+      "claim": "Decision: STOP -- zero E2E benefit despite 1.64x isolated kernel speedup",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "14-22",
+      "claim": "Debate scores: Champion-3 7.10, Champion-2 6.40, Champion-1 4.80 (eliminated)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "19-24",
+      "claim": "Files modified for Triton skinny-GEMM kernel and dispatch path",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "196-206",
+      "claim": "Shape guard and env var toggle control Triton kernel dispatch",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "226-228",
+      "claim": "in_proj_ba fusion eliminates 24 standalone GEMM launches via weight concatenation",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_l2_verification.md",
+      "line_range": "8-15",
+      "claim": "Delegate verified L40S L2 = 96 MB",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.61 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_gdn_research.md",
+      "line_range": "44-55",
+      "claim": "Delegate provides exact grid config and BW utilization used by champion-2",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_triton_gemm_precedents.md",
+      "line_range": "143-152",
+      "claim": "Delegate confirms no existing BF16 custom GEMM for CUDA sm_89",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.21 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "../../transcript_grading.json",
+      "line_range": "249-252",
+      "claim": "Counterfactual assessment: delegates were essential for catching L2 cache error and grounding proposals",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "7-15",
+      "claim": "Executive summary showing 88.6% GEMM dominance at 62.4% BW utilization",
+      "verified": true
+    }
+  ]
+}

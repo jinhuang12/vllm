@@ -1,0 +1,704 @@
+{
+  "run_idx": 11,
+  "slug": "a779aa294_nemotron-3-nano-30b-a3b-fp8-on-l40s-fp8-",
+  "run_dir": "/home/jinhun/.claude/ammo-eval/versions/a779aa294_nemotron-3-nano-30b-a3b-fp8-on-l40s-fp8-/runs/nvidia-nemotron-3-nano-30b-a3b_l40s_fp8_tp1/run_1",
+  "model": "Nemotron-3-Nano-30B",
+  "hardware": "L40S",
+  "dtype": "FP8",
+  "skill_version": "a779aa29",
+  "has_monitor_logs": false,
+
+  "interventions": [],
+
+  "coaching_instances": [],
+
+  "intervention_timing": [],
+
+  "validator_independence": [
+    {
+      "track_id": "OP-003-bf16",
+      "evidence_type": "independent_kernel_benchmark_with_methodology_divergence",
+      "summary": "OP-003-bf16 validator independently benchmarked the BF16 SSM kernel using a 120 MB L2 flush (2.5x L2 size), producing baseline_cold=175.82us vs proposal's nsys-calibrated 123.1us (1.43x divergence). The validator's methodology was MORE conservative -- production cold sits between the two. Both confirm the optimization works; 2.08x passes the 2.0x kill criterion regardless.",
+      "citation": {
+        "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+        "line_start": 38,
+        "line_end": 47,
+        "claim": "Validator independently benchmarked kernel with conservative L2 flush methodology, diverging 1.43x from proposal baseline but still passing kill criterion",
+        "quoted_content": "| 32 | 52.70 | 26.08 | 175.82 | 84.67 | **2.08x** |\n\n**Note on baseline_cold divergence**: Validator's baseline_cold=175.82us vs nsys production=122.3us. The validator's flush evicts ALL tensors including 2MB read-only params (A, D, dt_bias) that are L2-warm in production."
+      }
+    },
+    {
+      "track_id": "OP-003-bf16",
+      "evidence_type": "independent_correctness_with_stability_analysis",
+      "summary": "OP-003-bf16 validator independently tested correctness across 512 decode steps with random per-step inputs, verifying that BF16 state error is stable and does not accumulate (SSM recurrence is strongly contractive). Cosine sim 0.99989-0.99991 across BS=1,8,32.",
+      "citation": {
+        "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+        "line_start": 26,
+        "line_end": 35,
+        "claim": "Validator independently verified 512-step accuracy stability and non-accumulation of BF16 error",
+        "quoted_content": "| 1 | 0.99989378 | 1.825% | None | PASS |\n| 8 | 0.99990577 | 1.561% | None | PASS |\n| 32 | 0.99990702 | 1.539% | None | PASS |\n\n- State error is stable (does not accumulate) -- SSM recurrence is strongly contractive"
+      }
+    },
+    {
+      "track_id": "OP-001-ext",
+      "evidence_type": "independent_correctness_with_bit_identical_verification",
+      "summary": "OP-001-ext validator independently tested both Marlin W1 fused (max_abs 7.81e-3 vs unquantized reference) and Triton relu2 fused (bit-identical, 0.0 max diff) components, plus CUDA graph capture/replay verification.",
+      "citation": {
+        "file_path": "tracks/op001ext/validation_results.md",
+        "line_start": 42,
+        "line_end": 58,
+        "claim": "Validator independently confirmed Marlin max_abs 7.81e-3 and Triton bit-identical correctness across all batch sizes",
+        "quoted_content": "**Group A -- Marlin W1 fused vs unquantized reference (atol=0.1):**\n| BS | max_abs | Result |\n| 1 | 7.81e-3 | PASS |\n...\n**Group B -- Triton fused relu2 vs PyTorch reference:**\n| Shape | max_abs | Result |\n| All shapes, BF16/FP16 | **0.0** (bit-identical) | PASS |"
+      }
+    },
+    {
+      "track_id": "OP-002-v2",
+      "evidence_type": "independent_root_cause_analysis",
+      "summary": "OP-002-v2 validator independently identified the root cause of split-K regression: FP32 workspace writes 6x more bandwidth than BF16 direct output, plus reduced K-loop pipeline efficiency (84% to 55%). Also confirmed StreamK already provides partial work redistribution.",
+      "citation": {
+        "file_path": "tracks/op002v2/validation_results.md",
+        "line_start": 55,
+        "line_end": 72,
+        "claim": "Validator independently determined FP32 workspace + pipeline depth degradation as root cause of 13-17% regression",
+        "quoted_content": "### 1. FP32 Workspace Bandwidth Overhead\nSplit-K writes FP32 partials to workspace before reducing, adding significant write bandwidth:\n- out_proj (sk=3): writes 3 x 32 x 2688 x 4 = 1.03 MB FP32 (vs baseline writing 32 x 2688 x 2 = 172 KB BF16)\n- This is ~6x more write bandwidth than the baseline\n\n### 2. Reduced K-Loop Pipeline Depth\n...Baseline out_proj: K=4096, K_tile=128, 32 K-iterations per CTA (pipeline 84% efficient)"
+      }
+    }
+  ],
+
+  "enforcement_instances": [],
+
+  "campaign_metrics": {
+    "total_rounds": 3,
+    "tracks_shipped": 2,
+    "tracks_failed": 5,
+    "shipped_optimization_ids": ["OP-003-bf16", "OP-001-ext"],
+    "failed_optimization_ids": ["OP-002-splitk", "OP-001-relu2", "OP-002-v2", "OP-006-dispatch", "OP-005-bf16-splitk"],
+    "cumulative_speedup": 1.0811,
+    "campaign_status": "campaign_exhausted",
+    "termination_reason": "3 rounds, 7 implementations, remaining bottleneck (MoE GEMM 75.9%) at BW ceiling -- proven unoptimizable across 3 rounds and 5 separate FP8/BF16 GEMM attempts",
+    "technology_classes": [
+      "BF16 Mamba SSM state dtype change (FP32 -> BF16, L2 residency regime shift)",
+      "Dual relu2 epilogue fusion (Marlin MoE W1 CUDA epilogue + shared expert Triton kernel, 69 kernel launches eliminated/step)",
+      "CUTLASS FP8 split-K (proposed, failed: EVT blocks kGemmSplitKParallel, 1.04x)",
+      "CUTLASS FP8 EVT-bypass split-K (proposed, failed: 13-17% regression from FP32 workspace overhead)",
+      "Triton FP8 split-K GEMM (proposed, eliminated in debate: Triton 14-43% slower than CUTLASS)",
+      "Triton BF16 split-K GEMM (proposed, failed: slower than cuBLAS for K>2688)",
+      "Fused MoE dispatch (proposed, failed: single-CTA BW 44 GB/s, 13.6x below proposal's 600 GB/s assumption)"
+    ],
+    "debate_proposals": 8,
+    "debate_winners": 7,
+    "debate_quality_score": 10.0,
+    "overall_score": 5.17,
+    "transcript_quality_score": 7.5,
+    "total_agent_tokens": 490400,
+    "total_agent_invocations": 32,
+    "total_tracked_time_seconds": 10925,
+    "top_bottleneck_share_pct": 71.9,
+    "citations": [
+      {
+        "file_path": "state.json",
+        "line_start": 36,
+        "line_end": 38,
+        "claim": "Campaign exhausted after 3 rounds with 8.11% combined E2E at BS=32",
+        "quoted_content": "\"shipped_optimizations\": [\"OP-003-bf16\", \"OP-001-ext\"],\n    \"status\": \"campaign_exhausted\""
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 134,
+        "line_end": 134,
+        "claim": "Campaign summary with remaining bottleneck ceiling",
+        "quoted_content": "\"summary\": \"CAMPAIGN EXHAUSTED. 3 rounds, 7 implementations, 2 shipped. Cumulative: 8.11% E2E at BS=32 (OP-003-bf16 + OP-001-ext). Remaining bottleneck (MoE GEMM 75.9%) is at BW ceiling -- proven unoptimizable across 3 rounds.\""
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 65,
+        "line_end": 70,
+        "claim": "GPU: 4x NVIDIA L40S, 45 GiB each, using CUDA_VISIBLE_DEVICES=0",
+        "quoted_content": "\"cuda_visible_devices\": \"0\",\n    \"gpu_count\": 4,\n    \"gpu_model\": \"NVIDIA L40S\",\n    \"memory_total_gib\": 45.0"
+      }
+    ]
+  },
+
+  "anti_patterns": [
+    {
+      "pattern": "cold_to_production_overestimation",
+      "description": "Champion-1 projected 5.67% E2E at BS=32 using f=0.148 and 1.62x kernel speedup. The f=0.148 conflated 'Dense GEMM (FP8 CUTLASS)' (14,024 ms including BF16 GEMM) with FP8 CUTLASS-only (7,118 ms, f=0.0753). Combined with fabricated 68.5 us/call profiling match (actual: 34.8 us/call), the original proposal was 2.4x above the achievable ceiling. OP-002-splitk ultimately failed at 1.04x kernel speedup.",
+      "deduction": -1.0,
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 26,
+          "line_end": 28,
+          "claim": "Champion-1 used f=0.148 while simultaneously citing 7,118 ms FP8 CUTLASS total (internally inconsistent: 7118/94487=0.0753)",
+          "quoted_content": "| Total FP8 CUTLASS GPU time | 7,118 ms / 2560 steps = **2,780 us/step** | bottleneck_analysis.md S2 |\n| Per-step share (f) | **0.148** | bottleneck_analysis.md S2 |"
+        },
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 157,
+          "line_end": 163,
+          "claim": "Champion-1 projected 5.67% E2E at BS=32 using the inflated f=0.148",
+          "quoted_content": "E2E improvement = f x (1 - 1/kernel_speedup)\n                = 0.148 x (1 - 1/1.62)\n                = 0.148 x 0.383\n                = 5.67%"
+        },
+        {
+          "file_path": "debate/round_1/champion-1_rebuttal.md",
+          "line_start": 103,
+          "line_end": 107,
+          "claim": "Champion-1 conceded corrected f=0.0753, dropping E2E from 5.7% to 1.8-2.4%",
+          "quoted_content": "**Major concession**: The bottleneck analysis labels \"Dense GEMM (FP8 CUTLASS)\" with f=0.148, but the Top-15 kernel data shows FP8 CUTLASS total is 7,118 ms = **f=0.0753**. The remaining 6,906 ms is BF16 GEMM (lm_head, excluded layers). My proposal targets only the FP8 CUTLASS subset.\n\n**Corrected f = 0.0753**"
+        }
+      ]
+    },
+    {
+      "pattern": "hallucinated_profiling_data",
+      "description": "Champion-1 claimed L2-cold benchmark matched profiling at '68.5 us/call within 1.2%'. The 68.5 us figure does not exist in bottleneck_analysis.md or constraints.md. Actual production per-call average is (5117+2001)ms / (160965+43435) instances = 34.8 us/call -- approximately 2x lower. Champion-3 identified this in critique.",
+      "deduction": -1.0,
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 69,
+          "line_end": 71,
+          "claim": "Champion-1 fabricated 68.5 us/call figure not traceable to any source artifact",
+          "quoted_content": "**Validation**: Weighted average = 69.3 us/call, matching profiling data (68.5 us/call) within 1.2%. L2-cold methodology is sound."
+        },
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 315,
+          "line_end": 319,
+          "claim": "Actual per-call averages are 31.8 us (variant A) and 46.1 us (variant B), weighted ~34.8 us -- not 68.5 us",
+          "quoted_content": "**Grounded evidence**:\n- Average kernel time: 31.8 us (variant A), 46.1 us (variant B)"
+        },
+        {
+          "file_path": "debate/round_1/champion-3_critique_champion-1.md",
+          "line_start": 12,
+          "line_end": 25,
+          "claim": "Champion-3 identified cold times ~2x inflated and challenged 68.5 us as double-count",
+          "quoted_content": "Champion-1 claims \"L2-cold matches profiling within 1.2%\" (weighted 69.3 vs 68.5 us). But the profiled weighted average per call is: (5117 + 2001) ms / 2560 steps / 80 calls = 34.8 us/call\n\nNOT 68.5 us."
+        }
+      ]
+    },
+    {
+      "pattern": "f_value_propagation_through_debate_phase",
+      "description": "Champion-1 continued projecting 4.7-6.5% E2E using f=0.148 through the entire Phase-A argument, presenting this as 'grounded from profiling', even though the proposal already listed the 7,118 ms total from which f=0.0753 is directly derivable. Error persisted through argument and critique phases before concession in rebuttal.",
+      "deduction": -0.75,
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-1_argument.md",
+          "line_start": 128,
+          "line_end": 134,
+          "claim": "Champion-1 cited f=0.148 as 'grounded from profiling' and projected 6.5% E2E in Phase A",
+          "quoted_content": "f = 0.148 (BS=32, grounded from profiling)\nE2E = f x (1-1/speedup) = 0.148 x (1 - 1/1.79) = 0.148 x 0.441 = 6.5%"
+        },
+        {
+          "file_path": "debate/round_1/champion-1_argument.md",
+          "line_start": 174,
+          "line_end": 180,
+          "claim": "Champion-1 summary table repeated f=0.148 and 4.7-6.5% as official grounded range",
+          "quoted_content": "| f (BS=32) | 0.148 | bottleneck_analysis.md S2 |\n...| E2E (BS=32) | **4.7-6.5%** | f x (1-1/speedup) |"
+        }
+      ]
+    },
+    {
+      "pattern": "round1_complete_washout",
+      "description": "Both Round 1 debate selections (OP-002-splitk score 6.80, OP-001-relu2 score 7.70) failed implementation gates, consuming 6 impl-agent slots for ~84 minutes. Zero shipped optimizations from Round 1; all shipped OPs came from Round 2's entirely new debate. Root cause: debate accepted theoretical projections as sufficient feasibility evidence without requiring empirical kernel prototypes.",
+      "deduction": 0,
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 14,
+          "line_end": 19,
+          "claim": "Both Round 1 candidates failed: OP-002-splitk (EVT blocks, 1.04x) and OP-001-relu2 (0.58% < 1.0% threshold)",
+          "quoted_content": "\"OP-002-splitk\": {\"status\": \"FAILED\", \"reason\": \"EVT blocks kGemmSplitKParallel. Tile-M halving only 1.04x.\"},\n          \"OP-001-relu2\": {\"status\": \"FAILED\", \"reason\": \"BS=32 avg 0.58% < 1.0% kill threshold. P50 1.22%.\"}"
+        },
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 21,
+          "line_end": 32,
+          "claim": "Debate scoring gave OP-002-splitk 6/10 feasibility despite zero empirical split-K benchmarks",
+          "quoted_content": "| Feasibility evidence | 25% | 6/10 | Strong production profiling analysis (variant A 37% BW vs variant B 71% BW). BF16 cuBLAS cross-validation. BUT no empirical CUTLASS split-K benchmark. Theoretical argument sound but unvalidated. |"
+        }
+      ]
+    }
+  ],
+
+  "impact_classification": [],
+
+  "delegation_analysis": {
+    "enabled": true,
+    "delegates_per_champion": 1,
+    "total_delegates_spawned": 3,
+    "delegate_artifacts_count": 10,
+    "delegate_citation_rate": 0.667,
+    "causality_chains": [
+      {
+        "delegate": "delegate-3a",
+        "impact": "HIGH",
+        "summary": "Discovered StreamK + SplitK interaction (ThreadblockSwizzleStreamK already active in scaled_mm_c2x.cuh line 88) and K=3712 prime factorization constraint. Champion-3 cited verbatim as Weakness 4 in critique. Findings confirmed by OP-002-v2 validation.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-3a_cutlass_splitk_verify.md",
+          "line_start": 62,
+          "line_end": 72,
+          "claim": "Delegate-3a identified StreamK + SplitK interaction and shared_dn prime K factorization",
+          "quoted_content": "**This is critical:** The swizzle is `ThreadblockSwizzleStreamK`, NOT the standard identity swizzle. This affects split-K behavior... `shared_dn` (K=3712, TileK=128): only batch_count=1 or 29 are exact."
+        }
+      },
+      {
+        "delegate": "delegate-2a",
+        "impact": "HIGH",
+        "summary": "Corrected bottleneck_analysis.md line 342 error: empty MoE experts are already excluded by moe_align_block_size, not reading weights for all experts. Also confirmed shared expert uses ReLUSquaredActivation (relu2). Both findings cited by Champion-2 in proposal, validating the extended relu2 optimization that shipped.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-2a_marlin_empty_expert.md",
+          "line_start": 14,
+          "line_end": 18,
+          "claim": "Delegate-2a corrected bottleneck_analysis.md error: empty experts are already excluded, not reading weights",
+          "quoted_content": "## CRITICAL FINDING: Empty Experts Are NOT in the Grid\n\n**Empty experts (0 tokens) do NOT get any CTAs launched.** They are excluded during `moe_align_block_size`. The optimization hypothesis was incorrect."
+        }
+      },
+      {
+        "delegate": "delegate-3a",
+        "impact": "MEDIUM",
+        "summary": "Computed per-shape roofline for all 4 FP8 CUTLASS shapes showing variant A at 37-39% BW util / 2.54-2.67x ceiling vs variant B at 71% / 1.40x. This differentiation was new information not in bottleneck_analysis.md aggregate. Champion-3 cited directly.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-3a_roofline_fp8.md",
+          "line_start": 120,
+          "line_end": 127,
+          "claim": "Delegate-3a computed per-shape ceilings differentiating variant A (2.54-2.67x) from variant B (1.40x)",
+          "quoted_content": "| Mamba out_proj (32,4096,2688) | 65.3 | 340 GB/s | 39.4% | **2.54x** |\n| Shared expert up (32,2688,3712) | 62.0 | 324 GB/s | 37.5% | **2.67x** |\n| Mamba in_proj (32,2688,10308) | 62.4 | 616 GB/s | 71.3% | **1.40x** |"
+        }
+      },
+      {
+        "delegate": "delegate-1a",
+        "impact": "LOW",
+        "summary": "Produced verified SM89 tile config mapping and dispatch path analysis, but Champion-1 never cited either delegate-1a report in any debate phase. Work overlapped with delegate-3a's analysis of same source files.",
+        "citation": {
+          "file_path": "debate/delegate_work/delegate-1a_fp8_cutlass_research.md",
+          "line_start": 39,
+          "line_end": 62,
+          "claim": "Delegate-1a provided verified tile config mapping but Champion-1 never cited it",
+          "quoted_content": "### Mapping to Nemotron shapes (BS=32, M=32):\n\n| Projection | K | N | np2 | Selected Tile | Profile Variant |\n| Mamba in_proj | 2688 | 10308 | 16384 | 32x128x128 (4 stages) | **Variant B** |"
+        }
+      }
+    ],
+    "counterfactual_assessment": "Delegates provided moderate positive value. The StreamK interaction (delegate-3a) and empty-expert correction (delegate-2a) would likely not have been surfaced without delegate code inspection. Champion-2's scope extension to shared experts -- which made OP-001-ext pass the kill threshold -- was grounded by delegate-2a's shared_expert_codepath confirmation. Champion-1's idle delegates represent wasted compute."
+  },
+
+  "debate_analysis": {
+    "total_proposals": 8,
+    "winners_selected": 7,
+    "eliminated": 1,
+    "grounding_rate": 1.0,
+    "micro_experiment_rate": 1.0,
+    "quality_score": 10.0,
+    "key_events": [
+      {
+        "event": "f_value_correction_via_adversarial_debate",
+        "summary": "Champion-1's f=0.148 (conflating FP8 CUTLASS with all Dense GEMM) was caught by Champion-3 in critique. Champion-1 conceded f=0.0753 in rebuttal, halving the projected E2E from 5.7% to 1.8-2.4%. The debate's adversarial structure caught this error before implementation.",
+        "citations": [
+          {
+            "file_path": "debate/round_1/champion-1_rebuttal.md",
+            "line_start": 103,
+            "line_end": 107,
+            "claim": "Champion-1 conceded corrected f=0.0753 in rebuttal",
+            "quoted_content": "**Major concession**: The bottleneck analysis labels \"Dense GEMM (FP8 CUTLASS)\" with f=0.148, but the Top-15 kernel data shows FP8 CUTLASS total is 7,118 ms = **f=0.0753**."
+          }
+        ]
+      },
+      {
+        "event": "regime_shift_discovery_op003_bf16",
+        "summary": "Champion-3 in Round 2 discovered that BF16 SSM state (37.1 MB) fits L2 (48 MB) while FP32 (70.6 MB) overflows, enabling a regime change from HBM-bound to L2-resident. The bottleneck analysis conservatively bounded SSM at 1.3x ceiling (correct for same-dtype optimization). The dtype change was a separate optimization class that achieved 3.92x kernel speedup.",
+        "citations": [
+          {
+            "file_path": "debate/campaign_round_2/summary.md",
+            "line_start": 18,
+            "line_end": 22,
+            "claim": "OP-003-bf16 discovered regime-shift: BF16 state fits L2, FP32 overflows",
+            "quoted_content": "### OP-003-bf16 (Champion-3) -- Score 7.55\n- **Strongest empirical evidence**: 3.92x measured under CUDA graph capture\n- **Regime-shift insight**: BF16 state (37.1 MB) fits L2 (48 MB), FP32 (70.6 MB) overflows"
+          }
+        ]
+      },
+      {
+        "event": "round1_failure_driven_pivots",
+        "summary": "Round 1 complete washout (both selections failed) forced Round 2 to explore entirely new approaches. OP-003-bf16 (regime shift) and OP-001-ext (shared expert extension) originated from Round 2 and were the only shipped optimizations.",
+        "citations": [
+          {
+            "file_path": "debate/campaign_round_2/summary.md",
+            "line_start": 1,
+            "line_end": 6,
+            "claim": "Round 2 context: Round 1 exhausted, exploring new approaches informed by failures",
+            "quoted_content": "## Context\nRound 1 exhausted -- CUTLASS split-K blocked by EVT, relu2 fusion marginal (0.58%). Round 2 explores new approaches informed by Round 1 failures."
+          }
+        ]
+      },
+      {
+        "event": "complementary_selection_across_components",
+        "summary": "Round 2 selected 3 candidates targeting disjoint components (SSM state, FP8 CUTLASS, relu2 chain), enabling additive E2E. Portfolio diversification delivered 2/3 passing, combined 8.11% exceeding individual sums by 0.49% (super-additive from reduced L2 contention).",
+        "citations": [
+          {
+            "file_path": "debate/campaign_round_2/summary.md",
+            "line_start": 44,
+            "line_end": 50,
+            "claim": "All 3 Round 2 candidates target different components, enabling additive E2E up to 8.6-11%",
+            "quoted_content": "## Combined E2E Potential\nIf all 3 succeed (different components, additive):\n- OP-003-bf16: 5.7% (BS=32)\n- OP-002-v2: 1.75-3.4% (BS=32)\n- OP-001-ext: 1.1-1.9% (BS=32)\n- **Combined: 8.6-11.0%**"
+          }
+        ]
+      },
+      {
+        "event": "split_k_definitively_eliminated",
+        "summary": "FP8 CUTLASS split-K was attempted in 3 forms across 2 rounds: kGemmSplitKParallel (EVT assertion), EVT bypass (13-17% regression), Triton FP8 split-K (eliminated in debate). Root cause: FP32 workspace + reduced pipeline depth + StreamK already providing redistribution.",
+        "citations": [
+          {
+            "file_path": "tracks/op002v2/validation_results.md",
+            "line_start": 85,
+            "line_end": 97,
+            "claim": "Split-K lessons: workspace overhead, pipeline depth, StreamK baseline efficiency",
+            "quoted_content": "1. **Split-K parallel is NOT free**: The FP32 workspace write + reduced pipeline depth can exceed the SM utilization benefit\n2. **BW models must account for workspace overhead**\n3. **StreamK already provides work redistribution**"
+          }
+        ]
+      }
+    ]
+  },
+
+  "verified_e2e_results": [
+    {
+      "batch_size": 1,
+      "baseline_e2e_s": 3.6557,
+      "optimized_e2e_s": 3.531,
+      "delta_pct": 3.41,
+      "technique": "OP-003-bf16: BF16 Mamba SSM state (FP32->BF16), L2 residency at BS=32",
+      "discrepancy": "validation_results.md reports +3.42%; computed from raw values is 3.41% -- rounding only.",
+      "citation": {
+        "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+        "line_start": 53,
+        "line_end": 57,
+        "claim": "OP-003-bf16 E2E results across all batch sizes",
+        "quoted_content": "| 1 | 3.656 | 3.531 | -125.1 | +3.42% | 0.24 |\n| 8 | 8.882 | 8.620 | -261.6 | +2.94% | 0.51 |\n| **32** | **17.928** | **16.797** | **-1130.7** | **+6.31%** | **2.21** |"
+      }
+    },
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 8.882,
+      "optimized_e2e_s": 8.620,
+      "delta_pct": 2.95,
+      "technique": "OP-003-bf16: BF16 Mamba SSM state (FP32->BF16), L2 residency at BS=32",
+      "discrepancy": "validation_results.md reports +2.94%; computed is 2.95% -- rounding only.",
+      "citation": {
+        "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+        "line_start": 53,
+        "line_end": 57,
+        "claim": "OP-003-bf16 E2E at BS=8",
+        "quoted_content": "| 8 | 8.882 | 8.620 | -261.6 | +2.94% | 0.51 |"
+      }
+    },
+    {
+      "batch_size": 32,
+      "baseline_e2e_s": 17.928,
+      "optimized_e2e_s": 16.797,
+      "delta_pct": 6.31,
+      "technique": "OP-003-bf16: BF16 Mamba SSM state (FP32->BF16), L2 residency at BS=32",
+      "discrepancy": null,
+      "citation": {
+        "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+        "line_start": 53,
+        "line_end": 57,
+        "claim": "OP-003-bf16 E2E at BS=32: +6.31%",
+        "quoted_content": "| **32** | **17.928** | **16.797** | **-1130.7** | **+6.31%** | **2.21** |"
+      }
+    },
+    {
+      "batch_size": 1,
+      "baseline_e2e_s": 3.6557,
+      "optimized_e2e_s": 3.5656,
+      "delta_pct": 2.46,
+      "technique": "OP-001-ext: Dual relu2 fusion (Marlin W1 epilogue + shared expert Triton), 69 kernels eliminated/step",
+      "discrepancy": null,
+      "citation": {
+        "file_path": "tracks/op001ext/validation_results.md",
+        "line_start": 99,
+        "line_end": 103,
+        "claim": "OP-001-ext E2E results: BS=1 +2.46%, BS=8 +1.15%, BS=32 +1.31%",
+        "quoted_content": "| 1 | 3.5656 | +90.1 | **+2.46%** | +176 |\n| 8 | 8.7790 | +102.6 | **+1.15%** | +200 |\n| 32 | 17.6926 | +235.3 | **+1.31%** | +460 |"
+      }
+    },
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 8.882,
+      "optimized_e2e_s": 8.779,
+      "delta_pct": 1.16,
+      "technique": "OP-001-ext: Dual relu2 fusion (Marlin W1 epilogue + shared expert Triton), 69 kernels eliminated/step",
+      "discrepancy": "validation_results.md reports +1.15%; computed is 1.16% -- rounding only.",
+      "citation": {
+        "file_path": "tracks/op001ext/validation_results.md",
+        "line_start": 99,
+        "line_end": 103,
+        "claim": "OP-001-ext E2E at BS=8",
+        "quoted_content": "| 8 | 8.7790 | +102.6 | **+1.15%** | +200 |"
+      }
+    },
+    {
+      "batch_size": 32,
+      "baseline_e2e_s": 17.928,
+      "optimized_e2e_s": 17.6926,
+      "delta_pct": 1.31,
+      "technique": "OP-001-ext: Dual relu2 fusion (Marlin W1 epilogue + shared expert Triton), 69 kernels eliminated/step",
+      "discrepancy": null,
+      "citation": {
+        "file_path": "tracks/op001ext/validation_results.md",
+        "line_start": 99,
+        "line_end": 103,
+        "claim": "OP-001-ext E2E at BS=32: +1.31%",
+        "quoted_content": "| 32 | 17.6926 | +235.3 | **+1.31%** | +460 |"
+      }
+    },
+    {
+      "batch_size": 32,
+      "baseline_e2e_s": 17.8812,
+      "optimized_e2e_s": 16.4316,
+      "delta_pct": 8.11,
+      "technique": "Combined (OP-003-bf16 + OP-001-ext): paired 20-iteration sweep, both optimizations active",
+      "discrepancy": "Individual track deltas (6.31% + 1.31%) sum to 7.62% sequentially, vs combined 8.11%. 0.49% super-additive gap likely from reduced L2 contention.",
+      "citation": {
+        "file_path": "e2e_latency_combined/e2e_latency_results.md",
+        "line_start": 13,
+        "line_end": 17,
+        "claim": "Combined E2E verified by paired 20-iter sweep: BS=32 +8.11%",
+        "quoted_content": "| 32 | 17.8812 | 16.4316 | 1.08822x | 8.1064% | unknown |"
+      }
+    }
+  ],
+
+  "failure_analysis": [
+    {
+      "track_id": "OP-002-splitk",
+      "round": 1,
+      "kernel_speedup": "1.04x (vs 1.3x threshold)",
+      "e2e_improvement": "N/A (below threshold)",
+      "verdict": "FAIL",
+      "root_cause": "CUTLASS EVT (GemmUniversalWithVisitor) explicitly disallows kGemmSplitKParallel. Tile-M halving pivot gave only 1.04x.",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 14,
+          "line_end": 15,
+          "claim": "OP-002-splitk failed: EVT blocks kGemmSplitKParallel, tile-M halving only 1.04x",
+          "quoted_content": "\"OP-002-splitk\": {\"status\": \"FAILED\", \"reason\": \"EVT blocks kGemmSplitKParallel. Tile-M halving only 1.04x.\"}"
+        }
+      ]
+    },
+    {
+      "track_id": "OP-001-relu2",
+      "round": 1,
+      "kernel_speedup": "PASS (W1 regression +0.08 us)",
+      "e2e_improvement": "+0.58% avg at BS=32 (below 1.0% threshold)",
+      "verdict": "FAIL",
+      "root_cause": "Marlin-only relu2 fusion (46 kernels eliminated) insufficient for BS=32 at 5 iterations. Round 2 added shared expert path (+23 kernels) and 20 iters, passing at 1.31%.",
+      "citations": [
+        {
+          "file_path": "tracks/op001_relu2_fusion/validation_results.md",
+          "line_start": 89,
+          "line_end": 94,
+          "claim": "OP-001-relu2 failed at BS=32 avg 0.58%, P50 1.22%, with only 5 iterations",
+          "quoted_content": "| 32 | 17.9278 | 17.8232 | +104.6 | **+0.58%** | +204 |"
+        }
+      ]
+    },
+    {
+      "track_id": "OP-002-v2",
+      "round": 2,
+      "kernel_speedup": "0.84-0.87x (13-17% regression all shapes)",
+      "e2e_improvement": "N/A (regression)",
+      "verdict": "FAIL",
+      "root_cause": "FP32 workspace writes (6x more BW than BF16 direct) + reduced K-loop pipeline efficiency (84%->55%) + StreamK baseline already providing redistribution.",
+      "citations": [
+        {
+          "file_path": "tracks/op002v2/validation_results.md",
+          "line_start": 34,
+          "line_end": 49,
+          "claim": "OP-002-v2 regresses 13-17% on all shapes",
+          "quoted_content": "| out_proj (N=2688) | 49.6 | 56.2 | **0.88x** (13% regression) |\n| shared_up (N=3712) | 48.8 | 55.8 | **0.87x** (14% regression) |"
+        }
+      ]
+    },
+    {
+      "track_id": "OP-006-dispatch",
+      "round": 3,
+      "kernel_speedup": "N/A (70.5 us fused vs ~30 us production = regression)",
+      "e2e_improvement": "Projected -2.5% regression",
+      "verdict": "FAIL",
+      "root_cause": "Single-CTA HBM bandwidth is 44 GB/s on L40S, 13.6x below proposal's 600 GB/s assumption. Even theoretical max (keeping cuBLAS GEMM) gives only 1.47% at BS=32, below 1.50% threshold.",
+      "citations": [
+        {
+          "file_path": "tracks/op006_fused_moe_dispatch/validation_results.md",
+          "line_start": 69,
+          "line_end": 81,
+          "claim": "Single-CTA BW 44 GB/s, 13.6x below proposal. Even theoretical max gives 1.47%.",
+          "quoted_content": "| Single-CTA HBM BW | 600 GB/s | **44 GB/s** | **13.6x overestimate** |\n| Router GEMM time | 2.3 us | **42 us** | 18x slower |"
+        }
+      ]
+    },
+    {
+      "track_id": "OP-005-bf16-splitk",
+      "round": 3,
+      "kernel_speedup": "0.69x average (only lm_head at 1.07x)",
+      "e2e_improvement": "NET REGRESSION",
+      "verdict": "FAIL",
+      "root_cause": "Triton BF16 GEMM cannot beat cuBLAS for K=2688-4096 on L40S. Per-iteration codegen overhead accumulates over 3-4.5x more K-loop iterations than Qwen's K=896.",
+      "citations": [
+        {
+          "file_path": "tracks/op005_bf16_splitk/validation_results.md",
+          "line_start": 96,
+          "line_end": 102,
+          "claim": "Triton loses to cuBLAS due to larger K accumulating per-iteration overhead vs Qwen",
+          "quoted_content": "**Different from Qwen campaign**: The Qwen campaign (op007) showed Triton 1.07x faster for K=896, N=3584. Nemotron has K=2688-4096 (3-4.5x larger K), meaning 3-4.5x more inner-loop iterations."
+        }
+      ]
+    }
+  ],
+
+  "changelog_entries": [
+    {
+      "category": "regime_shift_optimization",
+      "significance": "HIGH",
+      "entry": "OP-003-bf16 discovered a regime shift: BF16 SSM state (37.1 MB) fits L2 (48 MB) while FP32 (70.6 MB) overflows. This changed the kernel from HBM-bound to L2-resident, achieving 3.92x kernel speedup and 6.31% E2E -- exceeding the bottleneck analysis's 1.3x ceiling which was correct for same-dtype optimization. Novel optimization class: dtype change enabling cache-tier transition. Only ~15 LOC across 3 Python/Triton files.",
+      "citations": [
+        {
+          "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+          "line_start": 1,
+          "line_end": 6,
+          "claim": "BF16 state enables L2 residency regime shift at BS=32",
+          "quoted_content": "**Optimization**: Change Mamba SSM state cache from FP32 to BF16, gated by `VLLM_MAMBA_BF16_STATE=1`. At BS=32, FP32 state (70.6 MB) overflows L2 (48 MB) but BF16 state (37.1 MB) fits, enabling a regime shift from HBM-bound to L2-resident."
+        }
+      ]
+    },
+    {
+      "category": "cross_model_split_k_evidence",
+      "significance": "HIGH",
+      "entry": "FP8 CUTLASS split-K is definitively dead on L40S for M<=32 across ALL tested shapes: 3 attempts across 2 rounds. Root causes: FP32 workspace 6x BW overhead, pipeline depth degradation, StreamK already active. Consistent with Qwen campaign results -- split-K fails across model families on this hardware.",
+      "citations": [
+        {
+          "file_path": "tracks/op002v2/validation_results.md",
+          "line_start": 85,
+          "line_end": 97,
+          "claim": "Split-K lessons: workspace overhead, pipeline depth, StreamK baseline efficiency",
+          "quoted_content": "1. **Split-K parallel is NOT free**: The FP32 workspace write + reduced pipeline depth can exceed the SM utilization benefit\n3. **StreamK already provides work redistribution**"
+        }
+      ]
+    },
+    {
+      "category": "cross_model_triton_vs_cublas",
+      "significance": "HIGH",
+      "entry": "Triton BF16 GEMM is NOT universally faster than cuBLAS. Qwen: 1.07x at K=896. Nemotron: 0.49-0.81x at K=2688-4096. Crossover is K-dependent: Triton per-iteration codegen overhead accumulates. Only lm_head (K=2688, N=131072) showed Triton competitive at 1.07x where N amortizes overhead.",
+      "citations": [
+        {
+          "file_path": "tracks/op005_bf16_splitk/validation_results.md",
+          "line_start": 96,
+          "line_end": 102,
+          "claim": "Triton vs cuBLAS depends on K dimension: 1.07x at K=896, 0.49-0.81x at K=2688-4096",
+          "quoted_content": "**Different from Qwen campaign**: The Qwen campaign (op007) showed Triton 1.07x faster for K=896, N=3584. Nemotron has K=2688-4096 (3-4.5x larger K), meaning 3-4.5x more inner-loop iterations."
+        }
+      ]
+    },
+    {
+      "category": "single_cta_bandwidth_ceiling",
+      "significance": "HIGH",
+      "entry": "Per-CTA HBM bandwidth on L40S is ~44-47 GB/s (measured by both Triton and cuBLAS). OP-006 assumed 600 GB/s -- 13.6x overestimate. cuBLAS achieves 187 GB/s for router GEMM by using 4 parallel CTAs. This ceiling makes single-CTA kernel fusion non-viable for BW-bound micro-GEMMs on L40S.",
+      "citations": [
+        {
+          "file_path": "tracks/op006_fused_moe_dispatch/validation_results.md",
+          "line_start": 69,
+          "line_end": 81,
+          "claim": "Single-CTA BW on L40S is 44 GB/s, 13.6x below 600 GB/s assumption",
+          "quoted_content": "| Single-CTA HBM BW | 600 GB/s | **44 GB/s** | **13.6x overestimate** |"
+        }
+      ]
+    },
+    {
+      "category": "debate_quality",
+      "significance": "HIGH",
+      "entry": "Perfect debate quality score (10/10): 8 proposals across 3 rounds, 100% grounding rate, 100% micro-experiment rate, correct filtering, component diversity. Debate caught Champion-1's f-value error (0.148->0.0753) before implementation, preventing wasted effort on inflated projection.",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 76,
+          "line_end": 77,
+          "claim": "f-value accuracy critical: debate caught f=0.148 -> f=0.0753 correction",
+          "quoted_content": "1. **f-value accuracy is critical**: Champion-1's original f=0.148 included BF16 GEMM. Corrected to f=0.0753 (FP8 CUTLASS only), halving the E2E projection."
+        }
+      ]
+    },
+    {
+      "category": "kernel_elimination_vs_speedup",
+      "significance": "MEDIUM",
+      "entry": "OP-001-ext E2E benefit from kernel ELIMINATION (69 launches removed), not speedup. Triton relu2 execution similar to 2-kernel baseline (data fits L2). Savings: ~0.5 us per eliminated CUDA graph kernel launch x 69. Pattern reliable across batch sizes (2.46% BS=1, 1.31% BS=32).",
+      "citations": [
+        {
+          "file_path": "tracks/op001ext/validation_results.md",
+          "line_start": 77,
+          "line_end": 83,
+          "claim": "E2E from kernel elimination, not speedup; Triton fused time similar to 2-kernel baseline",
+          "quoted_content": "Note: Triton fused kernel execution time is similar to the 2-kernel baseline (data fits L2, so no memory traffic savings). The E2E benefit comes from eliminating CUDA graph kernel launch overhead (~0.5 us per eliminated launch x 23 layers)."
+        }
+      ]
+    },
+    {
+      "category": "round1_to_round2_iteration_value",
+      "significance": "MEDIUM",
+      "entry": "OP-001-relu2 failed at BS=32 avg 0.58% in Round 1 (5 iters, Marlin-only). Round 2 OP-001-ext added shared expert Triton (+23 kernels) and 20 iterations, passing at 1.31%. Two changes: scope expansion and statistical confidence. Round 1 data was noisy with insufficient scope.",
+      "citations": [
+        {
+          "file_path": "tracks/op001ext/validation_results.md",
+          "line_start": 152,
+          "line_end": 163,
+          "claim": "Round 1 vs Round 2: scope + statistical confidence drove improvement",
+          "quoted_content": "| Kernels eliminated | 46/step | 69/step |\n| BS=32 E2E avg | 0.58% (5 iters) | **1.31%** (20 iters) |"
+        }
+      ]
+    },
+    {
+      "category": "hybrid_architecture_profiling",
+      "significance": "MEDIUM",
+      "entry": "NemotronH hybrid MEMEM* architecture (23 Mamba + 23 MoE + 6 Attention) creates heterogeneous bottlenecks. Third distinct model family profiled (after Qwen dense and GLM hybrid), confirming hybrid architectures expose multiple disjoint optimization surfaces.",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 1,
+          "line_end": 16,
+          "claim": "NemotronH: 52 layers, Mamba + MoE + Attention, ~3B active per token",
+          "quoted_content": "| Architecture | NemotronH (hybrid Mamba + Attention + MoE) |\n| Layers | 52 total: 23 Mamba, 23 MoE, 6 Attention |\n| Active params/token | ~3B (128 routed experts, top-6, 1 shared) |"
+        }
+      ]
+    },
+    {
+      "category": "bottleneck_analysis_f_overcounting",
+      "significance": "MEDIUM",
+      "entry": "Round 1 bottleneck analysis overcounted FP8 CUTLASS as 14.8% by including prefill-variant kernels. Round 3 re-profiling revealed true decode-only share is ~8.4%. Reduced Amdahl ceiling from 9.4% to 5.3%. The 'Dense GEMM (FP8 CUTLASS)' label also conflated FP8 CUTLASS with BF16 GEMM, contributing to Champion-1's f-value error.",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis_round3.md",
+          "line_start": 76,
+          "line_end": 83,
+          "claim": "Round 1 overcounted FP8 CUTLASS by including prefill variants; true decode share 8.4% not 14.8%",
+          "quoted_content": "The Round 1 analysis reported Dense GEMM (FP8 CUTLASS) as 14.8% of decode time. This included larger-M prefill CUTLASS variants (128x128x64, 64x128x128) that are NOT part of the steady-state decode step."
+        }
+      ]
+    },
+    {
+      "category": "no_monitor_oversight",
+      "significance": "MEDIUM",
+      "entry": "No transcript monitor active. Fabricated 68.5 us profiling match and f=0.148 conflation would have been intervention candidates. Adversarial debate caught f-value error but 68.5 us fabrication caught only by Champion-3 critique. Evidence that debate partially substitutes for monitoring.",
+      "citations": []
+    },
+    {
+      "category": "super_additive_e2e",
+      "significance": "LOW",
+      "entry": "Combined 8.11% vs individual sum 7.62%. 0.49% super-additive gap attributed to reduced L2 contention: BF16 SSM state frees L2 capacity for relu2 epilogue outputs. Within 20-iter noise but consistent with physics.",
+      "citations": [
+        {
+          "file_path": "e2e_latency_combined/e2e_latency_results.md",
+          "line_start": 13,
+          "line_end": 17,
+          "claim": "Combined 8.11% vs individual sum 7.62%, super-additive by 0.49%",
+          "quoted_content": "| 32 | 17.8812 | 16.4316 | 1.08822x | 8.1064% | unknown |"
+        }
+      ]
+    }
+  ]
+}

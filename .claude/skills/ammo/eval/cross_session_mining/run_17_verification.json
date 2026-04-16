@@ -1,0 +1,404 @@
+{
+  "total": 60,
+  "passed": 48,
+  "failed": 12,
+  "failure_rate": 0.2,
+  "results": [
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "35-35",
+      "claim": "Monitor flagged L2 flush as too small before experiments ran",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "32-33",
+      "claim": "Monitor warned about gate_up weight nearly equal to L2 flush size",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.65 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "17-22",
+      "claim": "Monitor caught speculative E2E claim before proposal written",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "14-16",
+      "claim": "Monitor flagged the critical N shape error and champion independently confirmed",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "11-12",
+      "claim": "Monitor proactively escalated shape error to team-lead",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "480-495",
+      "claim": "Monitor flagged benchmark-production discrepancy; champion independently found same issue",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "497-512",
+      "claim": "Monitor sent second warning about warm-cache methodology; champion understood and created v3 with L2 flush",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "556-563",
+      "claim": "Monitor flagged FP8 race condition; champion fixed it achieving 11x accuracy improvement",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "685-689",
+      "claim": "Race condition fix led to 11x accuracy improvement and slight speedup improvement",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "92-101",
+      "claim": "Monitor sent CRITICAL about L2-cached benchmark; champion had independently reached same conclusion",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "141-141",
+      "claim": "Monitor warned about baseline provenance; champion addressed it in proposal caveat",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "142-142",
+      "claim": "Monitor warned about RMSNorm 2x overstatement; champion did NOT address it in proposal",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-1.md",
+      "line_range": "32-34",
+      "claim": "Monitor flagged arithmetic inconsistency in graph overhead estimate; champion measured actual 1.6-1.7 us/node",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "26-28",
+      "claim": "Monitor warned about borderline math and fusion opportunity gap",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "86-89",
+      "claim": "Monitor flagged memcopy BW ceiling invalid for GEMV; champion ran cuBLAS cold-cache test",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "122-124",
+      "claim": "Monitor recommended cuBLAS ceiling test; champion ran it and confirmed Triton beats cuBLAS on all shapes",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-3.md",
+      "line_range": "67-69",
+      "claim": "Monitor pointed out fused SiLU+rearrange combined still below threshold; champion acknowledged",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "68-77",
+      "claim": "Monitor identified real root cause of torch.compile dispatch failure; champion restructured fix",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op003.md",
+      "line_range": "72-75",
+      "claim": "Champion dismissed warning as 'independent, don't need it' but later required escalation",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op003.md",
+      "line_range": "48-56",
+      "claim": "Escalation to team-lead was effective; champion cherry-picked op001 commits",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "153-162",
+      "claim": "Champion corrected proposal to honest E2E after monitor coaching",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "669-690",
+      "claim": "FP8 v2 with per-V-tile scale achieved 2.092x speedup and 11x accuracy improvement",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.58 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "146-161",
+      "claim": "cuBLAS cold-cache benchmark ran in response to monitor warning; Triton wins all shapes",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.69 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op003.md",
+      "line_range": "44-49",
+      "claim": "Escalation was effective; champion acknowledged 'Good catch from the monitor'",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "32-35",
+      "claim": "L2 flush and speculative E2E warnings were all proactive (before experiments/proposal)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.36 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "625-631",
+      "claim": "All 3 R3 messages addressed; timing ranged from proactive to reactive",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "288-289",
+      "claim": "Monitor's CRITICAL arrived after champion independently self-corrected",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "43-44",
+      "claim": "DA-MONITOR CRITICAL message received AFTER champion already fixed issue",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_triton_nn_kn/validation_results.md",
+      "line_range": "64-64",
+      "claim": "Validator explicitly stated as independent; tests written from scratch",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_triton_nn_kn/validation_results.md",
+      "line_range": "150-153",
+      "claim": "Cross-check between champion and validator measurements shows 0.9% divergence",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.62 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op002.md",
+      "line_range": "30-32",
+      "claim": "Validator independently confirmed all gates passed",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_fp8_gdn_state/validation_results.md",
+      "line_range": "108-127",
+      "claim": "Validator independently discovered Amdahl violation and root-caused the memory cascade effect",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op003.md",
+      "line_range": "29-33",
+      "claim": "Validator found Amdahl violation and joint crash independently",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "138-138",
+      "claim": "Production parity flags confirmed NOT used",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "78-78",
+      "claim": "GPU reservation protocol correctly followed",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "107-107",
+      "claim": "GPU reservation confirmed used correctly",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.46 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-r4-1.md",
+      "line_range": "110-110",
+      "claim": "GPU reservation protocol followed in R4",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "144-144",
+      "claim": "Baseline reuse confirmed, not re-run",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op002.md",
+      "line_range": "25-25",
+      "claim": "Baseline read from file, not re-run",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "12-13",
+      "claim": "Champion entered worktree and worked on correct branch",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-1.md",
+      "line_range": "209-214",
+      "claim": "Champion showed excellent methodology: no source tree modifications, proper CUDA graph capture",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.27 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "6-6",
+      "claim": "Cumulative E2E speedup is 1.157x",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.32 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "49-49",
+      "claim": "Two optimizations shipped: op001 and op003",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "182-182",
+      "claim": "Campaign exhausted with 13.57% cumulative improvement",
+      "verified": true
+    },
+    {
+      "file_path": "scorecard.json",
+      "line_range": "3-3",
+      "claim": "Overall scorecard score is 5.38",
+      "verified": false,
+      "errors": [
+        "file_not_found: scorecard.json"
+      ]
+    },
+    {
+      "file_path": "scorecard.json",
+      "line_range": "86-88",
+      "claim": "Debate quality scored 10/10 with 100% grounding and micro-experiment rates",
+      "verified": false,
+      "errors": [
+        "file_not_found: scorecard.json"
+      ]
+    },
+    {
+      "file_path": "transcript_grading.json",
+      "line_range": "198-198",
+      "claim": "No anti-patterns detected in this run",
+      "verified": false,
+      "errors": [
+        "file_not_found: transcript_grading.json"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "669-690",
+      "claim": "Race condition fix directly led to 11x accuracy improvement and production viability",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.50 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "14-18",
+      "claim": "Shape correction prevented wasted optimization effort on non-existent opportunity",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op003.md",
+      "line_range": "14-16",
+      "claim": "Escalation enabled cumulative E2E measurement at 1.1545x",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "56-65",
+      "claim": "Monitor CRITICAL confirmed champion's fix approach was correct",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "155-156",
+      "claim": "cuBLAS test closed CUDA C++ avenue; Triton wins all shapes",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "275-276",
+      "claim": "Monitor message was not needed; champion self-corrected independently",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "110-114",
+      "claim": "RMSNorm warning not addressed but proposal was not selected; low impact",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_triton_nn_kn/validation_results.md",
+      "line_range": "159-162",
+      "claim": "op001 E2E measurement: 7.8166s -> 7.2348s = 1.0804x = +7.44%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002_triton_tn_nk/validation_results.md",
+      "line_range": "110-110",
+      "claim": "op002 E2E measurement: 7.8166s -> 7.4323s = 1.0517x = +5.17%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_fp8_gdn_state/validation_results.md",
+      "line_range": "93-93",
+      "claim": "op003 combined E2E: 7.8166s -> 6.7703s = 1.1545x = 13.38%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_fp8_gdn_state/validation_results.md",
+      "line_range": "99-99",
+      "claim": "op003-only E2E: 7.8166s -> 7.2826s = 1.073x = 6.83%",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "34-34",
+      "claim": "Round 2 exhausted with documented exhaustion reason",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_4/summary.md",
+      "line_range": "1-6",
+      "claim": "Round 4 exhausted with cross-champion convergence on no viable candidates",
+      "verified": true
+    }
+  ]
+}

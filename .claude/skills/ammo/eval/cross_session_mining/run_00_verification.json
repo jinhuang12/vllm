@@ -1,0 +1,401 @@
+{
+  "total": 59,
+  "passed": 46,
+  "failed": 13,
+  "failure_rate": 0.22,
+  "results": [
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "31-34",
+      "claim": "Monitor flagged fused kernel correctness failure and L2 artifact speedup during champion-1 debate",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "33-34",
+      "claim": "Monitor warned that warm-cache 1.516x speedup is an L2 artifact; pipeline measurement is authoritative",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "47-48",
+      "claim": "Champion using 10 us/layer for SiLU savings when production shows 3.7 us, inflating E2E by 2.5x",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "83-88",
+      "claim": "GPU throttled to 329 GB/s (38.1% BW), inflating SiLU and orthogonality savings measurements",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "60-66",
+      "claim": "Champion compared nsys 308 us/layer (inclusive of overhead) vs Triton 129 us/layer (pure kernel), creating 2.38x apples-to-oranges comparison",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "142-148",
+      "claim": "Triton REGRESSES on MLP gate_up_proj (0.475x) - champion cannot claim universal thin-M coverage",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "98-124",
+      "claim": "Monitor incorrectly stated 5% threshold; champion correctly identified actual 1% from state.json and rejected the error",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.53 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "35-36",
+      "claim": "Monitor warned GDN BW extrapolation from gate_up data was unvalidated since BW utilization differs substantially",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-1.md",
+      "line_range": "37-37",
+      "claim": "FP8 micro-experiment baseline is F.linear, not op002 production kernel; creates speedup overstatement",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-2.md",
+      "line_range": "108-113",
+      "claim": "benchmark_cuda_graph captures tensor creation (torch.randn) inside CUDA graph, making BF16 baseline 5x slower than reality",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-3.md",
+      "line_range": "87-87",
+      "claim": "L2-bust script baseline 153.7us is 2.3x slower than production nsys 66us; using those numbers would grossly overstate E2E benefit",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-3.md",
+      "line_range": "108-108",
+      "claim": "attn_out 4.413x pipeline speedup is L2 cache artifact detected by both monitor and champion independently",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r5-1.md",
+      "line_range": "51-58",
+      "claim": "Champion corrected physical ceiling from 4.63x to 1.57x and updated proposal after monitor warning",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "38-39",
+      "claim": "Champion committed without formal E2E benchmark; monitor warned that validator coverage is needed",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "67-79",
+      "claim": "Amdahl concern from validator's L2-warm benchmarks; champion demonstrated validator BW was physically impossible for DRAM",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "101-101",
+      "claim": "DA-MONITOR recommended Self-Validation Gate protocol and Option F after 3 failed dispatch fixes",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op010.md",
+      "line_range": "45-49",
+      "claim": "M=16 BF16 max_diff=1.0 at tolerance boundary flagged; champion diagnosed as Triton vs cuBLAS tiling difference",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op010.md",
+      "line_range": "103-111",
+      "claim": "Monitor warned premature optimization; track already passed; champion acknowledged warning validity at shutdown",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.59 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op018.md",
+      "line_range": "73-78",
+      "claim": "INT4 benchmark showed 0.881x regression vs FP8; monitor sent CRITICAL to stop before committing",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op018.md",
+      "line_range": "42-49",
+      "claim": "Champion concluded 'coherent output' despite garbage in prompts 2-3; monitor sent CRITICAL to halt",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op018.md",
+      "line_range": "59-63",
+      "claim": "Monitor warned no accuracy validation before commit; champion had not yet verified INT4 doesn't degrade quality",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.33 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op002.md",
+      "line_range": "12-13",
+      "claim": "Monitor flagged autotune BLOCK_N mismatch with REPACK_BN before benchmark crash; champion confirmed illegal memory access",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op002.md",
+      "line_range": "18-19",
+      "claim": "E2E showed 46% regression from dynamic dict-lookup dispatch causing graph breaks",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op009.md",
+      "line_range": "62-63",
+      "claim": "tl.constexpr for runtime K would fail; champion fixed to range-based K-loop and added cold-cache benchmark",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op006.md",
+      "line_range": "28-29",
+      "claim": "Champion planned to relax tolerance without investigating N=640 failure root cause",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.39 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "41-42",
+      "claim": "Cosine-only tolerance can mask scale-magnitude errors; champion added magnitude_ratio check after warning",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.21 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_r12-champion-1.md",
+      "line_range": "22-25",
+      "claim": "Monitor flagged R12-2 approximation bias from serial gating loop; champion corrected gap from 100.8us to 43.3us",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "33-34",
+      "claim": "Monitor pointed to champion's own pipeline measurement showing 0% gain as the authoritative metric",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "28-31",
+      "claim": "Champion's own benchmark showed pipeline speedup of 1.000x (flat) vs inflated warm-cache 1.516x",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "96-101",
+      "claim": "Monitor recommended Self-Validation Gate protocol and Option F approach after analyzing champion's 3 failure modes",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.66 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "97-100",
+      "claim": "Champion's own 7025-char thinking block identified that Dynamo opacity is required for correct M dispatch",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-1.md",
+      "line_range": "37-37",
+      "claim": "Monitor sent WARNING about baseline mismatch creating risk of overestimating FP8 speedup",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-1.md",
+      "line_range": "61-69",
+      "claim": "Champion updated proposal using own data: selected estimate revised from 1.5x to 1.33x, deflated E2E from 5.4% to 3.98%",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.57 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op018.md",
+      "line_range": "73-78",
+      "claim": "Monitor used champion's 0.881x regression data to send CRITICAL: stop and diagnose BW issue",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.68 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op018.md",
+      "line_range": "65-69",
+      "claim": "Champion diagnosed BK_PACKED=16 as root cause and fixed to BK_PACKED=128, achieving 1.445x",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_triton_thin_gemm_gdn/validation_results.md",
+      "line_range": "69-70",
+      "claim": "Validator wrote independent tests from scratch, not reusing champion's smoke test code",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op010_fused_qkvz_ba/validation_results.md",
+      "line_range": "71-73",
+      "claim": "Validator found root cause: all three fixes modified wrong class; Qwen3.5-4B uses Qwen3_5GatedDeltaNet which overrides base forward()",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op015_fused_rmsnorm_gated/validation_results.md",
+      "line_range": "27-29",
+      "claim": "Independent validator caught silu bug that champion's co-buggy reference function masked",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_triton_thin_gemm_gdn/validation_results.md",
+      "line_range": "120-125",
+      "claim": "Validator identified L2 contamination in own Gate 5.2 methodology, declared E2E as authoritative measurement",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op015.md",
+      "line_range": "43-53",
+      "claim": "Validator Gate 5.1a CRITICAL FAIL blocked shipping until silu fix committed",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.68 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op010_fused_qkvz_ba/validation_results.md",
+      "line_range": "146-149",
+      "claim": "Three consecutive Gate 5.3a FAIL verdicts forced champion to find correct dispatch class",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "86-102",
+      "claim": "Validator Gate 5.3b FAIL killed CUTLASS track due to cold-cache regression vs Triton W8A16",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op018.md",
+      "line_range": "42-49",
+      "claim": "Monitor CRITICAL halted validation until garbage output root cause identified",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op006.md",
+      "line_range": "47-56",
+      "claim": "Autotuner selected BK=128 for all thin-GEMM shapes; op006 BK=256 contribution was nil; track FAIL with transparent reporting",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "1-73",
+      "claim": "Campaign state shows 17 rounds, 16 shipped ops, 2.648x cumulative speedup",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op010_fused_qkvz_ba/validation_results.md",
+      "line_range": "71-73",
+      "claim": "Three commits targeted wrong class; a preliminary code audit would have revealed correct class",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op015_fused_rmsnorm_gated/validation_results.md",
+      "line_range": "27-29",
+      "claim": "Shared bug in reference and implementation masked correctness failure",
+      "verified": true
+    },
+    {
+      "file_path": "kernel_proof_validator_op020/e2e_latency_results.md",
+      "line_range": "16-16",
+      "claim": "op020 E2E sweep shows 0.255s, a physically impossible result caused by GPU contention",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-2_argument.md",
+      "line_range": "121-125",
+      "claim": "Champion-2 used wrong layer count for down_proj E2E projection",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis_round5.md",
+      "line_range": "165-165",
+      "claim": "BA reported 4.63x physical ceiling based on incorrect weight size attribution",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "233-233",
+      "claim": "Champion-1 cited prefill-inflated 83% BW to dismiss dominant component as near-optimal",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op015_fused_rmsnorm_gated/validation_results.md",
+      "line_range": "27-29",
+      "claim": "Validator independence caught shared bug between implementation and reference test",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_5/proposals/champion-r5-1_proposal.md",
+      "line_range": "67-67",
+      "claim": "Champion independently caught and corrected BA weight-size error, revising physical ceiling from 4.63x to 1.57x",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.65 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op018.md",
+      "line_range": "73-78",
+      "claim": "CRITICAL halt prevented shipping regressing kernel; champion fixed BK_PACKED for 12.72% final E2E",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.64 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op001_triton_thin_gemm_gdn/validation_results.md",
+      "line_range": "120-125",
+      "claim": "L2 contamination systematically inflated kernel benchmarks; pipeline methodology required",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_triton_thin_gemm_gdn/validation_results.md",
+      "line_range": "23-28",
+      "claim": "Four Gate 5.3a attempts needed before discovering custom_op opacity pattern",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "121-124",
+      "claim": "Monitor incorrectly stated 5% threshold; champion rejected; monitor self-corrected",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "7-8",
+      "claim": "Campaign achieved 2.648x cumulative E2E speedup over 17 rounds",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.62 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op017.md",
+      "line_range": "27-27",
+      "claim": "op017 achieved 7.47% E2E vs debate prediction of 3.6-4.0%",
+      "verified": true
+    }
+  ]
+}

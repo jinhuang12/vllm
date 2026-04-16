@@ -1,0 +1,437 @@
+{
+  "total": 68,
+  "passed": 61,
+  "failed": 7,
+  "failure_rate": 0.103,
+  "results": [
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "334-341",
+      "claim": "Monitor flagged N=320 correctness anomaly as WARNING",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "345-363",
+      "claim": "Champion discovered shape estimates were wrong after monitor warning",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "707-713",
+      "claim": "Monitor sent WARNING about Split-K reasoning flaw",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.66 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "944-951",
+      "claim": "Champion acknowledged WARNING and committed to measure first",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.63 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-r3-1.md",
+      "line_range": "16-19",
+      "claim": "Monitor flagged production BW impact model as flawed",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-1.md",
+      "line_range": "79-83",
+      "claim": "Champion corrected math after WARNING",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-2.md",
+      "line_range": "15-17",
+      "claim": "Monitor sent WARNING about NCU data validity from eager mode",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-2.md",
+      "line_range": "32-35",
+      "claim": "Champion fully addressed WARNING by excluding eager-mode data",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-2.md",
+      "line_range": "46-49",
+      "claim": "Monitor flagged Section 3c baseline mismatch making 1.236x claim invalid",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-2.md",
+      "line_range": "74-80",
+      "claim": "Champion retracted 1.236x claim after diagnosing artifact",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-2.md",
+      "line_range": "38-41",
+      "claim": "Monitor flagged F.linear/cuBLAS dispatch confusion in delegate baseline",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-2.md",
+      "line_range": "56-59",
+      "claim": "Champion addressed warning and used correct baseline",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r6-1.md",
+      "line_range": "19-19",
+      "claim": "Monitor flagged incommensurable Amdahl comparison",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "472-476",
+      "claim": "Monitor flagged 2x vs 4x scaling error in pipeline projection",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "481-483",
+      "claim": "Champion fixed scaling error after WARNING",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-3.md",
+      "line_range": "171-183",
+      "claim": "Monitor sent CRITICAL about Test A measuring L2 bandwidth not DRAM",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-3.md",
+      "line_range": "57-61",
+      "claim": "Champion excluded Test A from all analysis after CRITICAL",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-3.md",
+      "line_range": "127-132",
+      "claim": "Monitor sent CRITICAL about CUDA C++ invalid timing (7580% BW)",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-3.md",
+      "line_range": "115-118",
+      "claim": "Champion excluded CUDA C++ data and used Triton tile sweep as primary evidence",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-3.md",
+      "line_range": "15-17",
+      "claim": "Monitor sent CRITICAL about FP8 MMA incorrectly claimed for L40S",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-3.md",
+      "line_range": "37-38",
+      "claim": "Champion acknowledged CRITICAL and corrected approach",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r6-3.md",
+      "line_range": "35-38",
+      "claim": "Monitor sent WARNING about unverified BK=256 claim, champion verified empirically",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r6-3.md",
+      "line_range": "37-37",
+      "claim": "Champion explicitly credited monitor for flag",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r5-2.md",
+      "line_range": "14-18",
+      "claim": "Monitor sent CRITICAL about L2 caching regime invalidating pipeline speedup",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "786-788",
+      "claim": "Monitor sent CRITICAL #2 about per-shape BW showing 80-83% already",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "793-798",
+      "claim": "Champion immediately pivoted after CRITICAL #2",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "101-116",
+      "claim": "Monitor identified occupancy reasoning error with empirical evidence",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.70 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "153-158",
+      "claim": "Champion revised after WARNING #3",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r5-1.md",
+      "line_range": "36-37",
+      "claim": "Monitor sent WARNING about below-threshold E2E",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r5-1.md",
+      "line_range": "55-58",
+      "claim": "Both WARNINGs addressed with explicit uncertainty quantification",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "991-991",
+      "claim": "Monitor sent CRITICAL about fused GEMM-SiLU regression",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "996-1006",
+      "claim": "Champion had already independently identified regression before CRITICAL arrived",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "186-192",
+      "claim": "Monitor sent CRITICAL about validation data potentially from debate-phase",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "197-206",
+      "claim": "Validator results matched exactly, 6 second gap",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.51 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "35-36",
+      "claim": "Monitor sent WARNING about high relative error in smoke test",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "39-40",
+      "claim": "Champion confirmed kernel correct with better metric",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op003.md",
+      "line_range": "62-66",
+      "claim": "Monitor flagged missing GPU reservation on smoke test",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r10-1.md",
+      "line_range": "51-57",
+      "claim": "Monitor sent CRITICAL about empty CUDA graph producing invalid benchmark",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r10-1.md",
+      "line_range": "19-27",
+      "claim": "Champion wrote v2 benchmark after CRITICAL, showing regression",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.55 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op001.md",
+      "line_range": "99-103",
+      "claim": "Monitor validated champion's root cause analysis approach",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "53-58",
+      "claim": "Champion correctly identified recurrence accumulation as fundamental and descoped",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "8-9",
+      "claim": "Team lead acknowledged negative experiments as key contribution",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "244-249",
+      "claim": "Monitor noted exemplary intellectual honesty in debate",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-3.md",
+      "line_range": "93-101",
+      "claim": "Monitor self-corrected its WARNING framing about correctness",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r10-2.md",
+      "line_range": "47-54",
+      "claim": "Champion disproved own hypothesis empirically and self-corrected",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r10-2.md",
+      "line_range": "60-67",
+      "claim": "Three independent GEMM engines converge at 83% BW ceiling",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r11-2.md",
+      "line_range": "33-41",
+      "claim": "2-stage hypothesis disproven, CUTLASS cannot beat Triton on sm_89",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r11-2.md",
+      "line_range": "108-111",
+      "claim": "Three FP8 engines converge at 73-77% BW = hardware ceiling",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r12-2.md",
+      "line_range": "47-53",
+      "claim": "L2 prefetch harmful in pipeline",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r12-2.md",
+      "line_range": "109-109",
+      "claim": "Champion confirmed campaign frontier exhausted",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r12-1.md",
+      "line_range": "22-34",
+      "claim": "Champion found BW anomaly was artifact, sent definitive negative",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op003.md",
+      "line_range": "40-43",
+      "claim": "Autotuner already selects same configs as hardcoded ones",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op010.md",
+      "line_range": "107-118",
+      "claim": "Both kernel approaches failed with fundamental BW gap",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "978-989",
+      "claim": "Fused GEMM-SiLU empirically shown slower due to grid-halving",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "62-64",
+      "claim": "L2 cache policy experiment null result",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r4-2.md",
+      "line_range": "50-56",
+      "claim": "Split-K all variants slower with correctness bugs",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op004_fp8_weight_gemm/validation_results.md",
+      "line_range": "110-110",
+      "claim": "Validation report fabricated ViT encoder attribution",
+      "verified": true
+    },
+    {
+      "file_path": "constraints.md",
+      "line_range": "15-17",
+      "claim": "Model architecture is text-only hybrid with no ViT encoder",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_tile_selection/validation_results.md",
+      "line_range": "49-49",
+      "claim": "Stale golden refs caused false accuracy failure",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "67-67",
+      "claim": "Champion found output_len mismatch but only fixed target.json",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r10-2.md",
+      "line_range": "99-100",
+      "claim": "R10-2 zero critical violations, excellent empirical work",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r11-2.md",
+      "line_range": "121-125",
+      "claim": "R11-2 zero critical violations, honest negative assessment",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r12-2.md",
+      "line_range": "112-118",
+      "claim": "R12-2 zero issues flagged, campaign frontier correctly assessed",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-r4-3.md",
+      "line_range": "24-25",
+      "claim": "Champion self-corrected in thinking block before CRITICAL arrived",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r11-2.md",
+      "line_range": "76-84",
+      "claim": "Subagent found contradicting evidence, champion updated honestly",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r11-2.md",
+      "line_range": "96-100",
+      "claim": "Correction strengthened the negative result",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.45 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-r6-2.md",
+      "line_range": "73-74",
+      "claim": "Champion self-ranked below competitors in debate",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-r3-3.md",
+      "line_range": "96-96",
+      "claim": "Champion honestly identified viability depends on untested assumption",
+      "verified": true
+    }
+  ]
+}

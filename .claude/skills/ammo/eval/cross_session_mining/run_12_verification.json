@@ -1,0 +1,179 @@
+{
+  "total": 27,
+  "passed": 24,
+  "failed": 3,
+  "failure_rate": 0.111,
+  "results": [
+    {
+      "file_path": "state.json",
+      "line_range": "18-23",
+      "claim": "OP-001 selected with status FAILED, reason: kernel speedup vanishes under DRAM-bound conditions",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "1-6",
+      "claim": "OP-001 overall determination is FAIL; numerically correct but does not meet E2E kill criteria",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "66-76",
+      "claim": "E2E results: BS=8 -0.052%, BS=32 +0.066%, both within noise and below kill criteria",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "24-28",
+      "claim": "OP-002 FAILED: fused kernel slower cold-cache, all BS regressed",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "1-6",
+      "claim": "OP-002 overall determination is FAIL; all batch sizes regressed",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "69-74",
+      "claim": "E2E sweep all regressed: BS=1 0.973x, BS=8 0.989x, BS=32 0.990x",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "54-55",
+      "claim": "Champion-3 scored 4.90, below 5.0 minimum threshold, FAIL",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "40-44",
+      "claim": "Champion-3 feasibility evidence 4/10: no register measurement (est 200 vs actual 227), no prototype",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "143-166",
+      "claim": "Stage timestamps from state.json recording baseline through campaign_eval",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "5-6",
+      "claim": "Campaign duration approximately 2.6 hours from profiling through final evaluation",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "38-44",
+      "claim": "OP-001 validator ran independent tests: batch sizes [1,8,32], atol=0.01, rtol=0.01, bit-identical to cuBLAS",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "32-45",
+      "claim": "OP-002 validator: 26/26 correctness tests passed including CUDA graph, multi-step, adversarial",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "61-63",
+      "claim": "OP-001 kill criteria: >=2.5% at BS=32, >=1.0% at BS=8, no regression at BS=1",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "74-76",
+      "claim": "OP-001 kill criteria FAIL: BS=32 +0.066% vs +2.5% required; BS=8 -0.052% vs +1.0% required",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "78-84",
+      "claim": "OP-002 kill criteria: all FAIL, BS=32 -1.02% vs +0.6% required, BS=1 -2.66% vs -0.5% required",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "103-105",
+      "claim": "Integration final decision: No candidates passed, Round EXHAUSTED",
+      "verified": true
+    },
+    {
+      "file_path": "scorecard.json",
+      "line_range": "2-4",
+      "claim": "Overall score 3.56, without transcript 2.82",
+      "verified": false,
+      "errors": [
+        "file_not_found: scorecard.json"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "5-8",
+      "claim": "Cumulative speedup 1.0x, campaign status campaign_exhausted, 1 round completed",
+      "verified": true
+    },
+    {
+      "file_path": "constraints.md",
+      "line_range": "99-106",
+      "claim": "Baseline E2E latency: BS=1 6.4935s, BS=8 7.7388s, BS=32 10.2237s with <0.2% stdev",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "119-123",
+      "claim": "Champion-1 projected 3.4% E2E at BS=32 from 1.107x isolated kernel speedup",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "83-88",
+      "claim": "Severe Amdahl violation ratio < 0.01; standalone benchmarks measured L2-warm performance not production DRAM-bound",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "66-76",
+      "claim": "Actual E2E: BS=32 +0.066%, BS=8 -0.052%, both noise-level",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "297-298",
+      "claim": "OP-001 verdict: FAIL -- 5-19% kernel-level speedup does not translate to E2E; both equally DRAM-bound at ~640 GB/s",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "91-102",
+      "claim": "Root cause: inter-program race condition on shared Q,K conv state forced Python-level scatter workaround whose overhead exceeds savings",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.63 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op001/validation_results.md",
+      "line_range": "9-16",
+      "claim": "OP-001 files: new triton_gemm_gate_up.py, modified utils.py, linear.py, envs.py",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002/validation_results.md",
+      "line_range": "10-17",
+      "claim": "OP-002 files: new fused_gdn_decode.py, modified qwen3_next.py",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "29-31",
+      "claim": "shipped_optimizations is empty; campaign status is campaign_exhausted",
+      "verified": true
+    }
+  ]
+}

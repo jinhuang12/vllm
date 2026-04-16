@@ -1,0 +1,263 @@
+{
+  "total": 38,
+  "passed": 29,
+  "failed": 9,
+  "failure_rate": 0.237,
+  "results": [
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "78-80",
+      "claim": "Monitor warned that standalone GDN recurrence kernel at 1.53x speedup only yields 0.98% deflated E2E, below the 1% threshold",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "95-100",
+      "claim": "Roofline analysis proved standalone kernel is definitively sub-threshold: even at 92% BW (795 GB/s), only 0.88% deflated E2E",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "126-129",
+      "claim": "Monitor corrected champion's f_decode from 6.96% to 6.34% because z-norm is outside the custom op",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "168-170",
+      "claim": "Tier 2 benchmark showed only 1.11x speedup vs champion's 1.53x claim in proposal",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "162-166",
+      "claim": "ncu evidence shows 3x occupancy increase yields only 11% BW improvement; 85% BW is not achievable",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "28-33",
+      "claim": "Champion-2 computed 1055 GB/s exceeding L40S theoretical peak of 864 GB/s, and in_proj_ba pivot carries torch.compile graph-change risk like Round 1 op008 failure",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.63 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-2.md",
+      "line_range": "85-92",
+      "claim": "Delegate found existing fused GDN decode kernel (op013) in git history; champion proceeding to write proposal without reading delegate results",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "53-55",
+      "claim": "Monitor sent proactive warning about warm-cache inflation before champion received Triton micro-experiment results showing impossible BW numbers (2362 GB/s vs L40S 864 GB/s peak)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.69 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "310-330",
+      "claim": "Champion claimed 4-6 us savings from kernel launch overhead under CUDA graphs, but CUDA graph replay has near-zero launch overhead; realistic savings only 3.2 us from fusion",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.51 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "370-380",
+      "claim": "BV=8 pipeline data was 0.97x SLOWER (negative), yet champion was interpolating to 1.12x production claim; monitor flagged as unsupported",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.53 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "70-81",
+      "claim": "Gate 5.2 revealed massive discrepancy: gate_up_proj 1.337x vs micro-experiment 2.981x, down_proj 0.99x vs 2.144x",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.68 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op007.md",
+      "line_range": "145-151",
+      "claim": "Same-day baseline 7.742s essentially identical to opt 7.743s, suggesting 0% real improvement; 1.06% claim relies on cross-session Stage 1 baseline (7.825s)",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-champion-op008.md",
+      "line_range": "75-77",
+      "claim": "Champion ran --overwrite twice, first deleting Stage 1 baseline, then deleting freshly-captured golden_refs",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-op008-investigate.md",
+      "line_range": "177-178",
+      "claim": "Monitor warned that champion's static max-autotune Triton test shows bit-exactness, but vLLM production uses Inductor default mode which may use different kernels",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-op008-investigate.md",
+      "line_range": "77-79",
+      "claim": "Champion used hardcoded CUDA_VISIBLE_DEVICES=1 instead of gpu_reservation.py",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "95-111",
+      "claim": "Monitor used champion's own roofline output to redirect strategy from standalone to fused approach",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.62 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "monitor_log_champion-1.md",
+      "line_range": "155-170",
+      "claim": "Monitor used champion's own ncu data (3x occupancy, only 11% BW gain) to prove 85% BW target unachievable",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "383-413",
+      "claim": "Monitor's CRITICAL flag caused champion to remove unsupported interpolation, correct all scenarios to below-threshold, and add 'honest assessment' section",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_champion-3.md",
+      "line_range": "448-456",
+      "claim": "Champion-3 identified their benchmark was wrong via INPLACE_FINAL_STATE mismatch, correctly deferred to champion-1",
+      "verified": true
+    },
+    {
+      "file_path": "monitor_log_impl-op008-investigate.md",
+      "line_range": "206-237",
+      "claim": "Champion ran test_inductor_default.py confirming production compilation path diverges identically to eager cuBLAS, and explicitly acknowledged monitor's warning",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.44 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op010_fused_gdn_proj/validation_results.md",
+      "line_range": "20-32",
+      "claim": "Independent validator tested 7 correctness scenarios with random seeds, edge cases, and CUDA graph replay, all bit-exact",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op011_nn_layout_gemv/validation_results.md",
+      "line_range": "42-49",
+      "claim": "Independent validator ran 32/32 dispatch-range tests with independent 240 MB L2 flush methodology",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_fp8_mlp_gemm/validation_results.md",
+      "line_range": "80-85",
+      "claim": "Validator's independent kernel benchmark directly contradicted champion's debate claims, revealing cold-cache inflation",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op012_ba_fusion/validation_results.md",
+      "line_range": "30-48",
+      "claim": "Validator independently tested M-sweep correctness and confirmed bit-exact for M<=12, 1-ULP divergence for M>=13 (cuBLAS tiling root cause)",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "211-213",
+      "claim": "FP8 op007 failed Gate 5.1b re-eval: 89.0% vs 89.5% baseline, lost 4 questions gained 3, net -1",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "193-195",
+      "claim": "Op008 failed Gate 5.1b: 88.0% vs 89.5% baseline, lost 3 questions due to cuBLAS tiling divergence",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "225-226",
+      "claim": "Op009 failed kill gate: ncu BW 604 GB/s at 69.9% of peak, pipeline 47.06 us vs Triton 46.42 us (1.4% slower)",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "266-268",
+      "claim": "Op012 failed Gate 5.1b: 88.5% vs 89.0%, same cuBLAS tiling divergence class as op008",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "299-299",
+      "claim": "Campaign exhausted after 5 rounds with 5.1% cumulative lossless E2E improvement",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "36-36",
+      "claim": "Debate projected 7.24% deflated E2E for op007 with floor of 2.40%, but actual was 1.06%",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "363-365",
+      "claim": "Bottleneck analysis verdict of 'PASS - No red flags' lumped 64.5% BW (down_proj) with 92.2% BW (gate_up_proj), concealing optimization headroom",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.57 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "416-417",
+      "claim": "gate_up_proj at 37% f_decode and 92.2% BW utilization is essentially at the hardware ceiling with only 1.08x per-kernel ceiling",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "314-317",
+      "claim": "op011 exceeded projection by 3x: 3.95% measured vs 1.30% deflated projection",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "139-139",
+      "claim": "Campaign landscape confirmed exhausted by 2 independent R5 debate champions",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "47-48",
+      "claim": "All 3 champions independently proposed GDN merge, demonstrating strong convergence",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op011_nn_layout_gemv/validation_results.md",
+      "line_range": "151-151",
+      "claim": "Shape-dependent conditional was dead code during torch.compile tracing; fix was to remove shape dependency entirely",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op009_fused_gdn_core/validation_results.md",
+      "line_range": "55-62",
+      "claim": "Micro-experiment reported 30.87 us but production pipeline measured 46.42 us -- 1.5x discrepancy from L2 write-back overhead",
+      "verified": true
+    },
+    {
+      "file_path": "postmortem.md",
+      "line_range": "8-9",
+      "claim": "DAG identified 1 trajectory-changing decision and 2 actionable fixes",
+      "verified": false,
+      "errors": [
+        "file_not_found: postmortem.md"
+      ]
+    }
+  ]
+}

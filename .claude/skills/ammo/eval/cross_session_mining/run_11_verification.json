@@ -1,0 +1,326 @@
+{
+  "total": 48,
+  "passed": 38,
+  "failed": 10,
+  "failure_rate": 0.208,
+  "results": [
+    {
+      "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+      "line_range": "38-47",
+      "claim": "Validator independently benchmarked kernel with conservative L2 flush methodology, diverging 1.43x from proposal baseline but still passing kill criterion",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+      "line_range": "26-35",
+      "claim": "Validator independently verified 512-step accuracy stability and non-accumulation of BF16 error",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.63 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op001ext/validation_results.md",
+      "line_range": "42-58",
+      "claim": "Validator independently confirmed Marlin max_abs 7.81e-3 and Triton bit-identical correctness across all batch sizes",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.68 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op002v2/validation_results.md",
+      "line_range": "55-72",
+      "claim": "Validator independently determined FP32 workspace + pipeline depth degradation as root cause of 13-17% regression",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "36-38",
+      "claim": "Campaign exhausted after 3 rounds with 8.11% combined E2E at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "134-134",
+      "claim": "Campaign summary with remaining bottleneck ceiling",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "65-70",
+      "claim": "GPU: 4x NVIDIA L40S, 45 GiB each, using CUDA_VISIBLE_DEVICES=0",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "26-28",
+      "claim": "Champion-1 used f=0.148 while simultaneously citing 7,118 ms FP8 CUTLASS total (internally inconsistent: 7118/94487=0.0753)",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "157-163",
+      "claim": "Champion-1 projected 5.67% E2E at BS=32 using the inflated f=0.148",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "103-107",
+      "claim": "Champion-1 conceded corrected f=0.0753, dropping E2E from 5.7% to 1.8-2.4%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "69-71",
+      "claim": "Champion-1 fabricated 68.5 us/call figure not traceable to any source artifact",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "315-319",
+      "claim": "Actual per-call averages are 31.8 us (variant A) and 46.1 us (variant B), weighted ~34.8 us -- not 68.5 us",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-3_critique_champion-1.md",
+      "line_range": "12-25",
+      "claim": "Champion-3 identified cold times ~2x inflated and challenged 68.5 us as double-count",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_argument.md",
+      "line_range": "128-134",
+      "claim": "Champion-1 cited f=0.148 as 'grounded from profiling' and projected 6.5% E2E in Phase A",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_argument.md",
+      "line_range": "174-180",
+      "claim": "Champion-1 summary table repeated f=0.148 and 4.7-6.5% as official grounded range",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.56 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "14-19",
+      "claim": "Both Round 1 candidates failed: OP-002-splitk (EVT blocks, 1.04x) and OP-001-relu2 (0.58% < 1.0% threshold)",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "21-32",
+      "claim": "Debate scoring gave OP-002-splitk 6/10 feasibility despite zero empirical split-K benchmarks",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_cutlass_splitk_verify.md",
+      "line_range": "62-72",
+      "claim": "Delegate-3a identified StreamK + SplitK interaction and shared_dn prime K factorization",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.65 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_marlin_empty_expert.md",
+      "line_range": "14-18",
+      "claim": "Delegate-2a corrected bottleneck_analysis.md error: empty experts are already excluded, not reading weights",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_roofline_fp8.md",
+      "line_range": "120-127",
+      "claim": "Delegate-3a computed per-shape ceilings differentiating variant A (2.54-2.67x) from variant B (1.40x)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.65 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_fp8_cutlass_research.md",
+      "line_range": "39-62",
+      "claim": "Delegate-1a provided verified tile config mapping but Champion-1 never cited it",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/round_1/champion-1_rebuttal.md",
+      "line_range": "103-107",
+      "claim": "Champion-1 conceded corrected f=0.0753 in rebuttal",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "18-22",
+      "claim": "OP-003-bf16 discovered regime-shift: BF16 state fits L2, FP32 overflows",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "1-6",
+      "claim": "Round 2 context: Round 1 exhausted, exploring new approaches informed by failures",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "44-50",
+      "claim": "All 3 Round 2 candidates target different components, enabling additive E2E up to 8.6-11%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002v2/validation_results.md",
+      "line_range": "85-97",
+      "claim": "Split-K lessons: workspace overhead, pipeline depth, StreamK baseline efficiency",
+      "verified": false,
+      "errors": [
+        "line_range_exceeds_file: 85-97 but file has 96 lines"
+      ]
+    },
+    {
+      "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+      "line_range": "53-57",
+      "claim": "OP-003-bf16 E2E results across all batch sizes",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+      "line_range": "53-57",
+      "claim": "OP-003-bf16 E2E at BS=8",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+      "line_range": "53-57",
+      "claim": "OP-003-bf16 E2E at BS=32: +6.31%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001ext/validation_results.md",
+      "line_range": "99-103",
+      "claim": "OP-001-ext E2E results: BS=1 +2.46%, BS=8 +1.15%, BS=32 +1.31%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001ext/validation_results.md",
+      "line_range": "99-103",
+      "claim": "OP-001-ext E2E at BS=8",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001ext/validation_results.md",
+      "line_range": "99-103",
+      "claim": "OP-001-ext E2E at BS=32: +1.31%",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_combined/e2e_latency_results.md",
+      "line_range": "13-17",
+      "claim": "Combined E2E verified by paired 20-iter sweep: BS=32 +8.11%",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.61 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "14-15",
+      "claim": "OP-002-splitk failed: EVT blocks kGemmSplitKParallel, tile-M halving only 1.04x",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_relu2_fusion/validation_results.md",
+      "line_range": "89-94",
+      "claim": "OP-001-relu2 failed at BS=32 avg 0.58%, P50 1.22%, with only 5 iterations",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002v2/validation_results.md",
+      "line_range": "34-49",
+      "claim": "OP-002-v2 regresses 13-17% on all shapes",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_fused_moe_dispatch/validation_results.md",
+      "line_range": "69-81",
+      "claim": "Single-CTA BW 44 GB/s, 13.6x below proposal. Even theoretical max gives 1.47%.",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op005_bf16_splitk/validation_results.md",
+      "line_range": "96-102",
+      "claim": "Triton loses to cuBLAS due to larger K accumulating per-iteration overhead vs Qwen",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op003_bf16_ssm/validation_results.md",
+      "line_range": "1-6",
+      "claim": "BF16 state enables L2 residency regime shift at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op002v2/validation_results.md",
+      "line_range": "85-97",
+      "claim": "Split-K lessons: workspace overhead, pipeline depth, StreamK baseline efficiency",
+      "verified": false,
+      "errors": [
+        "line_range_exceeds_file: 85-97 but file has 96 lines"
+      ]
+    },
+    {
+      "file_path": "tracks/op005_bf16_splitk/validation_results.md",
+      "line_range": "96-102",
+      "claim": "Triton vs cuBLAS depends on K dimension: 1.07x at K=896, 0.49-0.81x at K=2688-4096",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_fused_moe_dispatch/validation_results.md",
+      "line_range": "69-81",
+      "claim": "Single-CTA BW on L40S is 44 GB/s, 13.6x below 600 GB/s assumption",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "76-77",
+      "claim": "f-value accuracy critical: debate caught f=0.148 -> f=0.0753 correction",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001ext/validation_results.md",
+      "line_range": "77-83",
+      "claim": "E2E from kernel elimination, not speedup; Triton fused time similar to 2-kernel baseline",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001ext/validation_results.md",
+      "line_range": "152-163",
+      "claim": "Round 1 vs Round 2: scope + statistical confidence drove improvement",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "1-16",
+      "claim": "NemotronH: 52 layers, Mamba + MoE + Attention, ~3B active per token",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis_round3.md",
+      "line_range": "76-83",
+      "claim": "Round 1 overcounted FP8 CUTLASS by including prefill variants; true decode share 8.4% not 14.8%",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_combined/e2e_latency_results.md",
+      "line_range": "13-17",
+      "claim": "Combined 8.11% vs individual sum 7.62%, super-additive by 0.49%",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.61 (threshold=0.70)"
+      ]
+    }
+  ]
+}

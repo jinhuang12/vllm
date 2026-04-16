@@ -12,9 +12,9 @@
 
 ## Abstract
 
-Long-horizon coding agents often fail less because they lack raw capability than because they drift: they skip evidence, misread profiler outputs, conflate local speedups with end-to-end wins, or continue along invalid evaluation paths for too long. Existing work has studied coding agents, trajectory observability, and monitorability of reasoning traces, but much of that literature is either post-hoc, focused on sabotage detection, or disconnected from real optimization workflows [5–20]. We present **AMMO**, a transcript-native runtime oversight architecture built around three ideas: (1) an **adversarial transcript monitor** that reads a coding agent’s live machine-readable session transcript, maintains persistent oversight state outside the actor’s context window, and intervenes while work is still in progress; (2) **evidence-demanding review** that grounds optimization claims in staged artifacts for correctness, kernel-level evidence, and end-to-end measurements; and (3) a **delivery-aware intervention path** that lets the monitor steer the implementation agent through the same messaging channel a human supervisor would use, while ensuring that queued monitor messages are actually delivered before more tool use occurs.
+Long-horizon coding agents often fail less because they lack raw capability than because they drift: they skip evidence, misread profiler outputs, conflate local speedups with end-to-end wins, or continue along invalid evaluation paths for too long. Existing work has studied coding agents, trajectory observability, and monitorability of reasoning traces, but much of that literature is either post-hoc, focused on sabotage detection, or disconnected from real optimization workflows [5–20]. We present **AMMO**, a transcript-native runtime oversight architecture built around three ideas: (1) an **adversarial transcript monitor** that reads a coding agent’s live machine-readable session transcript, maintains persistent oversight state outside the actor’s context window, and intervenes while work is still in progress; (2) **evidence-demanding review** that grounds optimization claims in staged artifacts for correctness, kernel-level evidence, and end-to-end measurements; and (3) a **delivery-aware intervention path** that lets the monitor steer the implementation agent through the same messaging channel a human supervisor would use, with mid-turn context injection ensuring that queued monitor messages reach the actor during long tool chains rather than only at turn boundaries.
 
-We instantiate AMMO in an end-to-end optimization workflow for vLLM-like GPU-intensive systems [1] and present a detailed case study of a 12-round, 10-track optimization campaign (Qwen3.5-4B on NVIDIA L40S), in which 30 monitor sessions produced 31 interventions across 4 categories: methodology (29%), evidence quality (23%), reasoning degradation (26%), and correctness/safety (23%). Four interventions had HIGH counterfactual impact — each either unblocked a successful ship or prevented a corrupted measurement from propagating. A natural experiment within the campaign (Rounds 7-9 lost monitor coverage due to a configuration oversight) provides a within-campaign C5-vs-C0 comparison: the only implementation track that failed with multiple unguided fix attempts was the sole unmonitored lossy track. Across qualitative case studies, we find that the most consequential interventions are not generic safety flags but challenges to methodology: invalid optimization targets based on misattributed bandwidth data, runtime memory bugs in compiled graphs, and CUDA graph capture incompatibilities masking accuracy failures. We also analyze failure modes and limitations, including chain-of-thought unfaithfulness [11], monitor-aware evasion [13–15], correlated actor-monitor blind spots, and hardening gaps in a prompt-and-hook-based implementation. Our central claim is that the missing control primitive for long-horizon coding agents is not another offline judge but a **transcript-native monitor that can actively steer a live session while forcing claims through evidence**.
+We instantiate AMMO in an end-to-end optimization workflow for vLLM-like GPU-intensive systems [1] and present a detailed case study of a 12-round, 10-track optimization campaign (Qwen3.5-4B on NVIDIA L40S), in which 30 monitor sessions produced 31 interventions across 4 categories: methodology (29%), evidence quality (23%), reasoning degradation (26%), and correctness/safety (23%). Four interventions had HIGH counterfactual impact — each either unblocked a successful ship or prevented a corrupted measurement from propagating. A configuration oversight during the campaign (Rounds 7-9 lost monitor coverage) provides a descriptive case study of unmonitored operation: the only implementation track that failed with multiple unguided fix attempts was the sole unmonitored lossy track, though confounds (different optimization targets per round, concurrent architectural drift) prevent interpreting this as a controlled ablation. Across qualitative case studies, we find that the most consequential interventions are not generic safety flags but challenges to methodology: invalid optimization targets based on misattributed bandwidth data, runtime memory bugs in compiled graphs, and CUDA graph capture incompatibilities masking accuracy failures. We also analyze failure modes and limitations, including chain-of-thought unfaithfulness [11], monitor-aware evasion [13–15], correlated actor-monitor blind spots, and hardening gaps in a prompt-and-hook-based implementation. Our central claim is that the missing control primitive for long-horizon coding agents is not another offline judge but a **transcript-native monitor that can actively steer a live session while forcing claims through evidence**.
 
 ---
 
@@ -46,7 +46,7 @@ This draft makes the following contributions.
 We describe AMMO, an architecture in which a monitor consumes raw machine-readable actor transcripts, filters them into an oversight digest, stores persistent monitor state outside the actor’s context, and interjects during live execution rather than after the fact. The architecture distributes trust across structurally independent roles — process oversight and product verification operate on orthogonal information inputs.
 
 **(2) A delivery-aware steering mechanism with calibrated enforcement.**  
-We show how a monitor can steer an implementation agent through the same message channel a human supervisor would use, while a message-delivery guard forces the actor to yield when queued oversight messages have not yet been delivered. We describe a broader enforcement design principle in which guard hardness is calibrated to the irreversibility of the violation being prevented.
+We show how a monitor can steer an implementation agent through the same message channel a human supervisor would use, with a mid-turn injection mechanism that delivers queued oversight messages as ambient context during long tool chains. An earlier deny-based mechanism (blocking tool use until the actor yielded) caused livelock; the injection-based replacement preserves the core guarantee while avoiding deadlock. We describe a broader enforcement design principle in which guard hardness is calibrated to both the irreversibility of the violation and the operational feasibility of the enforcement mechanism.
 
 **(3) Evidence-demanding adversarial review for end-to-end optimization.**  
 We formulate optimization oversight as a repeated challenge-response process in which claims must be supported by staged evidence: correctness before performance, kernel-level proof before end-to-end claims, and comparison to the incumbent rather than only to an initial baseline. Beyond adversarial challenge, we show how the monitor’s observational advantage enables constructive coaching through the actor’s own experimental data.
@@ -202,6 +202,8 @@ The **validator**, by contrast, independently verifies the actor's *output artif
 
 These two axes are **structurally independent**, not merely prompted to behave independently. The validator never sees the actor's test code; the monitor never modifies artifacts; neither role can be co-opted by the actor's framing because their information inputs are architecturally separated. This provides a concrete defense against correlated failures (discussed further in Section 9.3): even if the actor and monitor share model-family blind spots, the validator's artifact-based checks remain grounded in external execution rather than shared reasoning patterns.
 
+Cross-session evidence confirms that structural independence catches errors that shared-context testing systematically misses. Across 16 unique campaigns (18 mining runs), 38 validator independence instances were recorded in 10 runs. Three examples illustrate the mechanism: (1) In a 17-round campaign, the validator caught a sigmoid-vs-silu activation bug (max error 6.5) that the champion's own smoke test *masked* because the reference function contained the same conceptual error — only an independently derived test could detect the shared bug. (2) In an FP8 MoE campaign (Qwen3.5-35B-A3B / L40S), the validator benchmarked under CUDA graphs (production parity) while the champion had not; the champion reported 1.10x speedup, but the validator measured a 3.4x *regression* (0.29x) because the Triton baseline included ~25 µs of Python dispatch overhead that CUDA graphs eliminate. (3) In a baseline-v1 skill campaign (run 09), the validator independently discovered warm-cache regressions on two of four projection shapes that the champion had not reported, and independently measured a cold-to-production translation factor of 0.33x — matching a parallel track's 0.37x and establishing a fundamental E2E ceiling of 1.4–1.5% that invalidated the debate's 2.7% projection. Three independent implementation tracks converged on this same ceiling, confirming it was a physical bound rather than an implementation deficiency.
+
 ### 4.3 Transcript-native observation
 
 A key AMMO decision is to monitor the actor’s **native machine-readable transcript**, rather than asking the actor to produce a special report or only looking at end artifacts. In the current implementation, the transcript is a JSONL session log. The monitor discovers the relevant transcript, polls it periodically, and runs a filter that produces a human-readable digest while preserving the load-bearing parts of the session:
@@ -277,7 +279,17 @@ This mode activates most naturally during validation failures. When a correctnes
 
 For example, if an accuracy gate fails and the actor’s own investigation reveals that divergence concentrates in specific tensor shapes, the monitor can suggest restricting the optimization to the non-diverging subset — a suggestion grounded in the actor’s own evidence, not a generic prescription. If the actor appears to be giving up prematurely, the monitor can point to untried fix strategies that the actor’s own data implies could work.
 
-This coaching behavior is structurally enabled by transcript-native observation: the monitor sees the full trajectory of experimental results, including data the actor may have already lost to context compression. It transforms the monitor from a pure cost center (overhead, false positives, forced turn yields) into a **productivity mechanism** that makes the actor more effective, not just less wrong.
+This coaching behavior is structurally enabled by transcript-native observation: the monitor sees the full trajectory of experimental results, including data the actor may have already lost to context compression. It transforms the monitor from a pure cost center (overhead, false positives, injected context) into a **productivity mechanism** that makes the actor more effective, not just less wrong.
+
+Cross-session evidence confirms this pattern is consistent and impactful. Across the 5 monitored campaigns, 26 coaching instances were recorded, all following the same structure: the monitor uses the actor's own experimental data to suggest an unexplored fix path. Three examples from three distinct campaigns:
+
+1. In a 17-round campaign, the monitor used the actor's own benchmark data showing a 0.881x regression for an INT4 kernel to send a CRITICAL halt. The actor diagnosed the root cause (BK_PACKED=16 creating 80 tiny loop iterations), fixed to BK_PACKED=128, and achieved 1.445x — ultimately delivering the campaign's largest single-op E2E gain (12.72%).
+
+2. In a 12-round campaign, the monitor synthesized the actor's per-shape bandwidth delegate results (80–83% already achieved for all shapes) into a redirect away from a speculative tiled weight layout. The actor immediately pivoted, discovering that the production gap was environmental rather than per-kernel. This redirection laid the foundation for the optimization that shipped (SiLU-prologue concatenation, 1.5% E2E).
+
+3. In a 5-round campaign, the monitor flagged an unvalidated 82% BW assumption for a custom FP8 kernel. The actor ran NCU profiling in response, discovering a 16.8% occupancy root cause (SMEM-limited to 2 blocks/SM). This finding became the core evidence for the merged winning debate proposal.
+
+The consistent pattern — actors respond to their own evidence rather than external assertions — is key to coaching acceptance. The monitor's persistent memory across the full session enables it to connect data points the actor may have dismissed or lost to context window compression.
 
 ### 4.6 Evidence-demanding review as a legibility protocol
 
@@ -300,24 +312,28 @@ A monitor is only useful if its messages arrive in time to matter. In many agent
 AMMO closes this loop with a **delivery-aware intervention path**:
 
 1. The monitor sends teammate messages to the implementation agent or escalates to the orchestrator.
-2. A runtime guard checks whether messages are queued for the actor but not yet reflected in the actor’s delivered transcript.
-3. If so, the guard denies further tool use and instructs the actor to end its turn immediately so that the queued oversight messages are delivered.
+2. A runtime guard (PreToolUse hook) checks whether messages are queued for the actor but not yet reflected in the actor’s delivered transcript.
+3. If so, the guard injects the undelivered message content as ambient context attached to the actor’s next tool call. The actor receives full message text mid-turn without any tool-call interruption.
 
-This detail is central to our claim. It is what turns the monitor from a passive observer into something closer to a human supervisor interrupting a live session. Without it, the architecture collapses back into delayed commentary.
+This design was arrived at iteratively. An earlier version used **hard denial** — blocking further tool use until the actor yielded its turn for message delivery. In practice, denial caused **livelock**: monitors sending messages every ~30 seconds each triggered a deny, preventing the actor from completing any tool chain. One session recorded 19 denials in 12 minutes with zero proposals written. The inject-based mechanism resolves this by giving the actor the oversight content without interrupting its work, while a sidecar deduplication file ensures each message is injected exactly once (subsequent tool calls skip already-injected content, and the sidecar is cleaned when turn-boundary delivery catches up).
+
+This evolution is itself evidence for the calibration principle described below: the system’s oversight reach *increased* when enforcement softened from denial to injection, because the actor could absorb and act on monitor feedback during long tool chains rather than being deadlocked by it.
 
 #### Calibrated enforcement: not all violations warrant the same response
 
-The delivery guard is the hardest enforcement point in the system, but it is not the only one. AMMO uses a spectrum of enforcement mechanisms calibrated to the irreversibility of the violation being prevented:
+AMMO uses a spectrum of enforcement mechanisms calibrated to the irreversibility of the violation being prevented:
 
 | Violation class | Enforcement style | Rationale |
 |---|---|---|
-| Undelivered supervisory messages | **Hard deny** (blocks further tool use) | Message delivery is the core oversight mechanism — if it fails, everything downstream is unmonitored |
+| Undelivered supervisory messages | **Mid-turn injection** (ambient context, non-blocking) | Actor receives oversight content during long tool chains without interruption; denial-based enforcement caused livelock (see above) |
 | Evidence gates (claiming a stage passed) | **Hard block** until artifact exists | Claims without evidence are the primary failure mode being prevented |
 | Production-parity violations (e.g., disabling compiler optimizations during benchmarking) | **One-shot warning**, then trust | The actor may have a valid reason; repeated blocking creates adversarial workarounds |
 | Session termination during active work | **One-shot nudge**, then allow | Prevents accidental exit but does not trap the actor in an unrecoverable state |
 | Monitor spawn reminders | **Advisory** | The orchestrator may have operational reasons to defer |
 
-This calibration reflects a design principle: **enforcement hardness should be proportional to the irreversibility and cost of the violation**. An undelivered oversight message cannot be retroactively fixed — the actor has already continued on a potentially flawed trajectory. A production-parity shortcut, by contrast, invalidates one benchmark run that can be re-executed. A system that hard-blocks every violation class is brittle and incentivizes workarounds; a system that only advises is toothless. The spectrum between these extremes is itself a design choice.
+This calibration reflects a design principle: **enforcement hardness should be proportional to the irreversibility and cost of the violation, but must also account for operational feasibility**. An evidence gate that blocks until an artifact exists is both necessary (claims without evidence are unfalsifiable) and cheap (the actor can simply produce the artifact). Message delivery enforcement, by contrast, illustrates the tradeoff: hard denial was conceptually justified (undelivered messages mean unmonitored work) but operationally counterproductive (it prevented the very work it was trying to supervise). Mid-turn injection preserves the core guarantee — the actor has the oversight content before its next decision — while avoiding the livelock pathology. A system that hard-blocks every violation class is brittle and incentivizes workarounds; a system that only advises is toothless. The spectrum between these extremes is itself a design choice, and as the message-delivery experience shows, the right position on the spectrum is an empirical question, not a purely theoretical one.
+
+Cross-session evidence confirms the full spectrum operates as designed. Across 5 monitored campaigns, 25 enforcement instances were recorded spanning all levels: **BLOCK** — a Gate 5.1a correctness failure (sigmoid-vs-silu, max error 6.5) halted the implementation track until the bug was fixed and re-validated. **WARN escalated to HALT** — the monitor detected garbage generation output (prompts 2–3 producing unintelligible text) while the champion assessed its output as "coherent"; the monitor sent a CRITICAL halt to the champion and an ESCALATION to the orchestrator telling the validator to hold. **ADVISORY** — when a candidate's autotuner selected none of the target block sizes for any production shape, the monitor observed the negative result but took no blocking action; the champion was already self-terminating the track with transparent negative reporting. These examples demonstrate that calibrated enforcement avoids the pathology of uniform strictness (which incentivizes workarounds) while still providing hard guarantees where irreversibility demands them.
 
 ### 4.8 Staged validation and maintenance decisions
 
@@ -396,8 +412,8 @@ while not stop_condition(A, T, D):
             send_teammate_message(A or orchestrator, intervention(issues))
 
     if queued_messages_for(A) > delivered_messages_seen_in(T):
-        deny_new_tool_use(A)
-        request_turn_yield(A)
+        inject_as_ambient_context(A, undelivered_messages(A))
+        mark_injected(A, timestamp)
 
     last_line ← end_of(Δ)
     sleep(τ)
@@ -518,8 +534,8 @@ Elapsed time between the first monitor-detectable failure signal and the first i
 To avoid metric drift, we recommend the following adjudication rules:
 
 - A **valid deployable win** must satisfy all staged criteria and be acceptable relative to the incumbent.
-- A **false positive intervention** is a monitor intervention later judged by independent reviewers to be unnecessary or incorrect.
-- A **false negative** is a material issue discovered later by human review or downstream verification that the monitor had enough information to catch earlier but did not.
+- A **false positive intervention** is a monitor intervention later judged by independent reviewers to be unnecessary or incorrect. Across 43 classified interventions in 5 monitored campaigns, the observed false-positive rate is 7.0% (3/43 NONE-impact interventions; see Section 6.9).
+- A **false negative** is a material issue discovered later by human review or downstream verification that the monitor had enough information to catch earlier but did not. Note that the 13 unmonitored campaigns cannot contribute false-negative data (the monitor was absent, not present-and-failing); they instead provide counterfactual evidence of error prevalence without monitoring (see Section 6.9).
 
 ### 5.6 Annotation protocol
 
@@ -590,9 +606,9 @@ We present detailed results from one complete optimization campaign: Qwen3.5-4B 
 
 **Campaign outcome.** The campaign shipped 5 optimizations achieving 1.422x cumulative E2E speedup (1.253x verified-only after excluding unverified lossy ops). Monitors produced 31 interventions: 10 CRITICAL, 17 WARNING, 4 INFO. Of these, 30/31 were addressed by the actor (97% action rate). Four interventions had HIGH counterfactual impact — directly enabling a ship or preventing a corrupted result.
 
-**Monitor coverage and cost.** Across the 30 monitor sessions, each debate monitor consumed approximately 50-125 transcript polls; each implementation monitor consumed 20-85 polls. The total monitor token cost was not separately metered but is estimated at 15-25% of the total agent token budget (436K tokens across all agents). The runtime cost of oversight manifested as additional turn boundaries when queued messages were pending — a measurable but operationally favorable trade since each forced yield surfaced an actionable intervention.
+**Monitor coverage and cost.** Across the 30 monitor sessions, each debate monitor consumed approximately 50-125 transcript polls; each implementation monitor consumed 20-85 polls. The total monitor token cost was not separately metered but is estimated at 15-25% of the total agent token budget (436K tokens across all agents). The runtime cost of oversight manifested as injected context attached to tool calls when queued messages were pending — a lightweight mechanism with no measurable latency impact, since message content is prepended to the tool call's context rather than interrupting the tool chain.
 
-**Natural experiment.** A configuration oversight caused Rounds 7-9 to lose monitor coverage (Section 6.7), providing a within-campaign comparison. The sole unmonitored lossy implementation track (op008) was also the only track that failed with 3 unguided fix attempts. All monitored tracks that failed did so cleanly, with either immediate recognition of fundamental limitations or monitor-guided systematic investigation.
+**Unmonitored rounds.** A configuration oversight caused Rounds 7-9 to lose monitor coverage (Section 6.7). As a descriptive observation (not a controlled ablation — see Section 6.7 for confounds), the sole unmonitored lossy implementation track (op008) was also the only track that failed with 3 unguided fix attempts. All monitored tracks that failed did so cleanly, with either immediate recognition of fundamental limitations or monitor-guided systematic investigation.
 
 **[TABLE 3: SINGLE-CAMPAIGN SUMMARY]**
 
@@ -605,11 +621,11 @@ We present detailed results from one complete optimization campaign: Qwen3.5-4B 
 | Intervention action rate | 97% (30/31) | Monitor logs |
 | HIGH-impact interventions | 4 (13%) | Expert adjudication |
 | Cumulative E2E speedup | 1.422x (1.253x verified-only) | Scorecard |
-| Unmonitored rounds | R7-R9 (natural experiment) | JSONL gap analysis |
+| Unmonitored rounds | R7-R9 (descriptive case study) | JSONL gap analysis |
 
 ### 6.2 Mid-flight steering matters
 
-The strongest evidence for the “monitoring in the loop” claim comes from the natural experiment (Section 6.7) and from the timing of interventions that changed actor behavior within the monitored rounds.
+The strongest evidence for the “monitoring in the loop” claim comes from the timing of interventions that changed actor behavior within the monitored rounds, supplemented by the descriptive comparison with unmonitored rounds (Section 6.7).
 
 **Timing analysis of HIGH-impact interventions.** The four highest-impact interventions all required mid-flight delivery to be effective:
 
@@ -714,11 +730,11 @@ The op006 implementation (INT4 weight-only quantization) triggered the most acti
 
 **Counterfactual.** The CUDA graph fix (step 3) was the most consequential intervention. Without it, accuracy was stuck at 83% with no visible path forward — the champion might have declared FAIL after Fix 1 without discovering that the dequantization path itself was broken. The monitor’s structured fix progression (verify → selective → runtime-bug fix) demonstrates how evidence-demanding review can guide an actor through systematic hypothesis elimination rather than blind retry.
 
-### 6.7 Natural experiment: the R7-R9 monitor coverage gap
+### 6.7 Descriptive case study: the R7-R9 monitor coverage gap
 
-A configuration oversight during the campaign produced a natural experiment. Due to a team lifecycle issue, **Rounds 7-9 had no debate monitors spawned**, and R7 implementation tracks (op008, op009) had no implementation monitors. This is confirmed by JSONL evidence: `grep -c ‘monitor-r7\|monitor-r8\|monitor-champion-r7\|monitor-champion-r8\|monitor-op008\|monitor-op009’` returns 0 matches, despite 154 activity lines for Round 7 and 50 for Round 8.
+A configuration oversight during the campaign produced an unplanned period without monitor coverage. Due to a team lifecycle issue, **Rounds 7-9 had no debate monitors spawned**, and R7 implementation tracks (op008, op009) had no implementation monitors. This is confirmed by JSONL evidence: `grep -c ‘monitor-r7\|monitor-r8\|monitor-champion-r7\|monitor-champion-r8\|monitor-op008\|monitor-op009’` returns 0 matches, despite 154 activity lines for Round 7 and 50 for Round 8.
 
-This creates a within-campaign comparison between monitored rounds (R1-R6, R9-R12) and unmonitored rounds (R7-R8), approximating a paired C5-vs-C0 ablation on the same optimization target.
+This creates a descriptive comparison between monitored rounds (R1-R6, R9-R12) and unmonitored rounds (R7-R8). We stress that this is **not** a controlled ablation: each round targets a different optimization component, the campaign’s bottleneck landscape shifts after each ship, and both debate and implementation monitors were absent simultaneously — confounding monitor type with round-specific difficulty. We present the observations as suggestive, not causal.
 
 **Unmonitored round outcomes.**
 
@@ -761,6 +777,77 @@ The transcript monitor observed Champion-1’s delegate experiment results showi
 - CRITICAL #2 accelerated the pivot from tiled layout, though the champion was already reading the same data. Net effect: saved ~30 minutes of debate time, prevented a weak proposal from entering selection.
 - CRITICAL #3 provided independent confirmation that fused GEMM-SiLU regresses. The champion had the data but the monitor’s explicit “do NOT claim as win” prevented any ambiguity in the proposal.
 - The OOM CRITICAL was the most consequential: without it, op002 would have been blocked at E2E validation with a cryptic OOM during torch.compile. Diagnosing torch.cat inside a compiled graph typically requires understanding of FX tracing internals. **This intervention likely determined whether op002 shipped or was abandoned.**
+
+### 6.9 Cross-session analysis (18 runs, 16 unique campaigns)
+
+The preceding sections draw primarily from one deep campaign. A natural concern is whether the patterns generalize. To address this, we mined 18 archived runs covering **16 unique campaigns** (two campaigns were independently mined twice: run_04/04b are the same 12-round Qwen3.5-4B/L40S campaign, and run_05/06 are the same 3-round Qwen3.5-35B-A3B/L40S campaign). The 16 campaigns span 4 model architectures (Qwen3.5-4B, Qwen3.5-35B-A3B, GLM-5, Nemotron-3-Nano-30B), 2 GPU platforms (L40S / Ada Lovelace SM89, B200 / Blackwell SM100), 2 precision modes (BF16, FP8), and range from 1 to 17 rounds. Five campaigns had active transcript monitors; the remaining 11 had monitors disabled or absent. The two groups differ in campaign length, skill version, and model-hardware configuration, so we treat the unmonitored runs as descriptive comparison points for error prevalence rather than controlled ablations. Findings are backed by structured citations checked against the original artifacts; of 845 extracted citations, 80.2% pass automated fuzzy-match verification (>70% similarity threshold). The remaining 19.8% are primarily near-threshold paraphrases rather than factual errors, but we restrict showcased examples to those whose citations pass verification unless otherwise noted.
+
+#### Campaign metrics
+
+| Statistic | Value |
+|---|---|
+| Mining runs / unique campaigns | 18 / 16 (14 with complete metrics) |
+| Rounds | median 3, mean 4.7, range 1–17 |
+| Cumulative speedup | median 1.053x, mean 1.203x, max 2.648x |
+| Tracks shipped (total) | 36 |
+| Campaigns terminated via exhaustion | 64.3% (9/14 with complete metrics) |
+| Campaigns with zero shipped tracks | 13.3% |
+
+The wide variance (1.0x–2.648x speedup, scores 2.29–8.65) reflects differences in campaign length, skill version maturity, and model-hardware optimization headroom. The 17-round monitored campaign (run 00) achieved 2.648x; single-round campaigns typically achieved 1.05–1.06x.
+
+#### Intervention taxonomy (N=99 across 5 monitored campaigns)
+
+Across the five monitored campaigns (deduplicated at the campaign level), 99 interventions were recorded and classified:
+
+| Category | Count | Share |
+|---|---|---|
+| Evidence quality | 33 | 33.3% |
+| Methodology | 19 | 19.2% |
+| Correctness / safety | 14 | 14.1% |
+| Reasoning degradation | 10 | 10.1% |
+| Coaching (explicit fix-path suggestion) | 1 | 1.0% |
+| Other / topic-classified | 22 | 22.2% |
+| **Total** | **99** | |
+
+The “coaching” category counts interventions whose *primary* classification is a constructive fix-path suggestion (as opposed to an adversarial challenge). The 26 coaching *instances* discussed in Section 4.5d are a behavioral mode that overlaps with evidence and methodology categories — an intervention can be both an evidence challenge and coaching. The “other” category reflects two campaigns whose monitors used topic-based rather than category-based schemas (e.g., “L2 flush too small,” “wrong lm_head shape”); these map approximately to evidence (60%) and methodology (30%) but are not force-classified. Of the 96 interventions with explicit severity annotations, 30 were CRITICAL and 64 were WARNING (3 interventions from one campaign lacked severity labels).
+
+#### Impact distribution and false-positive rate
+
+Of 43 interventions with formal impact classification (rated by the mining agents based on whether the intervention changed the trajectory):
+
+| Impact | Count | Share |
+|---|---|---|
+| HIGH | 15 | 34.9% |
+| MEDIUM | 17 | 39.5% |
+| LOW | 8 | 18.6% |
+| NONE | 3 | 7.0% |
+
+The 3 NONE-impact interventions (7.0% false-positive rate) were a misquoted threshold, a timing concern 6 seconds off, and a procedural GPU-reservation warning — all self-corrected or harmless. In the deep campaign (run 00, the only run with timing annotations), monitors flagged issues *before* the actor independently noticed them in 48% of cases (13/27 interventions); the remaining 52% served as confirmation or urgency reinforcement that prevented the actor from silently dropping the concern. This metric was not computed for the other four monitored campaigns and should not be treated as a corpus-wide estimate.
+
+The 13 unmonitored runs provide counterfactual evidence of the error classes that persist without monitoring (distinct from false negatives, which require the monitor to have been present and to have missed an issue). These include hallucinated E2E improvements (run 01: 6.02% claimed vs. 4.79% actual), unreported regressions (run 01: 2.63% BS=1 regression), and cold-to-production overestimation in 10 runs. We do not claim these are monitor misses; they are error opportunities that illustrate what monitoring is designed to catch.
+
+#### Anti-pattern frequency
+
+| Anti-pattern | Runs | Count |
+|---|---|---|
+| Cold-to-production overestimation | 02, 03, 05, 06, 08, 09, 10, 11, 12, 13 | 10 (55.6%) |
+| Near-optimal framing trap | 05, 06, 07, 08 | 4 (22.2%) |
+| Hallucinated data | 00, 01, 07 | 3 (16.7%) |
+| Kernel speedup with no E2E translation | 02, 09 | 2 (11.1%) |
+| Off-track reasoning (wrong baseline) | 06, 07 | 2 (11.1%) |
+| 25 additional unique patterns | various | 1 each |
+
+Cold-to-production overestimation is the dominant failure mode, appearing in 10 of 18 runs across all 4 models and both hardware platforms. Overestimation ratios range from 1.5x (run 09) to 6.9x (run 03, GLM-5/B200). Root causes include L2 cache residency effects (7 runs), NCCL spin-wait absorption on PCIe TP=4 configurations (2 runs), and monolithic kernel fusion advantages in compiled graphs (1 run). This validates the paper’s claim that runtime monitors should specifically target measurement-to-production translation gaps — it is the single most common and consequential failure class.
+
+The near-optimal framing trap (4 runs) is a subtler failure: bottleneck analysis declares a component “near-optimal” or “no red flags” at 73–80% DRAM bandwidth utilization, discouraging optimization of a component that actually has 20–27% headroom. In all 4 cases, this framing delayed or prevented optimization of the dominant bottleneck.
+
+#### Monitor self-correction
+
+Two instances of monitor self-correction validate healthy adversarial dynamics. In run 00, the monitor incorrectly cited a 5% threshold (actual: 1%); the champion correctly rejected the claim, and the monitor self-corrected with an explicit error log. In run 04, the monitor initially framed a 2.26% FP8 E4M3 error as a “correctness bug,” then sent an INFO correction acknowledging it as expected FP8 precision loss. We identified 2 self-corrections across 2 of the 5 monitored campaigns; the remaining 3 campaigns' transcripts did not exhibit monitor self-correction events.
+
+#### Diminishing monitor value during exhaustion
+
+In the deep campaign (run 00/04), Rounds 10–12 had active monitors but produced zero corrective interventions. All champions in these rounds were honestly reporting negative results (hardware BW ceiling confirmed at 73–77% across 3 technology classes). This suggests that monitor value concentrates during active optimization phases (early/mid campaign) and drops to near-zero during campaign exhaustion, when agents are systematically ruling out remaining approaches rather than pursuing novel strategies.
 
 ---
 
@@ -806,7 +893,7 @@ We do not mean that the monitor matches the best human supervisor at all times. 
 - it sees the live session trace,
 - it maintains its own external notes,
 - it sends messages into the actor’s workflow,
-- and the runtime makes those messages actionable by enforcing turn yields when needed.
+- and the runtime makes those messages actionable by injecting them as ambient context during tool execution.
 
 This is important for adoption. Many organizations already understand what it means for a human to “watch a session and intervene.” AMMO shows how to approximate that pattern in a scalable, machine-mediated way.
 
@@ -885,7 +972,7 @@ AMMO is motivated by performance engineering and may encode assumptions that tra
 
 ### 9.5 Hardening gaps in the current implementation
 
-The open implementation that motivates this paper is pragmatic and real, but it is not yet a fail-closed runtime. As described in Section 4.7, the system deliberately uses a spectrum of enforcement styles — from hard denial (message delivery, evidence gates) to one-shot warnings (production parity) to advisory reminders (monitor spawning). This calibration is a design choice, not an accident: enforcement hardness is proportional to the irreversibility of the violation. But it does mean that some guards are intentionally permissive, and others rely on prompt discipline, file discovery conventions, or best-effort validator scripts.
+The open implementation that motivates this paper is pragmatic and real, but it is not yet a fail-closed runtime. As described in Section 4.7, the system deliberately uses a spectrum of enforcement styles — from hard blocks (evidence gates) to mid-turn injection (message delivery) to one-shot warnings (production parity) to advisory reminders (monitor spawning). This calibration is a design choice, not an accident: enforcement hardness is proportional to the irreversibility of the violation *and* the operational cost of the enforcement mechanism itself (Section 4.7 documents how hard denial of message delivery caused livelock, motivating the shift to non-blocking injection). But it does mean that some guards are intentionally permissive, and others rely on prompt discipline, file discovery conventions, or best-effort validator scripts.
 
 A skeptical reviewer would be right to ask whether the advisory end of this spectrum is too permissive for unattended deployment. In particular, the production-parity guard warns but does not block, the session-termination guard nudges once then allows exit, and all hooks fail open on infrastructure errors. These choices prioritize operational robustness over strict enforcement.
 
@@ -984,7 +1071,7 @@ The monitor appends filtered deltas and its own conclusions into a persistent mo
 
 ### A.3 Message delivery enforcement
 
-Interventions are sent through the same teammate-message substrate that a human would use. Because such messages may be queued until the actor yields, the runtime checks whether undelivered messages are pending. If so, it denies further tool use and instructs the actor to end the turn, forcing message delivery.
+Interventions are sent through the same teammate-message substrate that a human would use. Because such messages may be queued until the actor yields, a PreToolUse hook checks whether undelivered messages are pending. If so, it injects the message content as ambient context attached to the actor's next tool call, with sidecar-based deduplication to ensure each message is injected exactly once. An earlier version used hard denial (blocking tool use until the actor yielded), but this caused livelock when monitors sent frequent messages; the non-blocking injection approach preserves oversight reach without interrupting the actor's work (Section 4.7).
 
 ### A.4 Validation scripts and artifact checks
 
@@ -1139,4 +1226,128 @@ Changes made on 2026-04-15 to better represent the full AMMO architecture. All a
 ### Section numbering
 **What changed**: Old 4.9 (Algorithm sketch) → 4.10. Old 4.10 (Implementation guarantees) → 4.11.
 **Why**: Mechanical renumbering to accommodate the new Section 4.9 on iterative campaigns.
+
+---
+
+Changes made on 2026-04-15 (second batch) to add cross-session generalizability evidence from 18 archived campaign runs. All findings are backed by structured citations verified against original artifacts (845 citations, 80.2% verified). Evidence was mined by per-run agents and aggregated into a cross-session report.
+
+### Section 6.9: New section — Cross-session analysis (N=18)
+**What changed**: Added a new results section presenting aggregate evidence from 18 campaigns spanning 4 models, 2 hardware platforms, 2 precision modes, and 1–17 rounds. Contains: campaign metrics table, intervention taxonomy (initially N=121, later corrected to N=99 after deduplication), impact distribution with false-positive rate (7.0%), anti-pattern frequency table (30 unique patterns, cold-to-production overestimation at 55.6%), monitor self-correction instances, and diminishing-value-during-exhaustion analysis.
+**Why**: The paper's prior results drew from one deep campaign. Reviewers will reasonably object that N=1 cannot support generalizability claims. This section provides aggregate evidence across diverse configurations, with the strongest finding being that cold-to-production overestimation appears in 10/18 runs across all model architectures and hardware platforms — confirming it as the dominant failure mode that transcript-native oversight should target.
+**Evidence source**: `aggregation_report_deduplicated.json` (produced by `deduplicate_aggregate.py` from the original `aggregation_report.json`; deduplicates run_04/04b, corrects totals from 121→99, severity from 41+88→30+64).
+
+### Section 4.2: Added cross-session validator independence evidence
+**What changed**: Added a paragraph after the structural independence discussion citing 38 validator independence instances across 10 runs, with three concrete examples: sigmoid-vs-silu shared bug (run 00), CUDA-graph regression catch (run 06), and co-located baseline drift detection (run 01).
+**Why**: The original text argued for structural independence architecturally but lacked empirical evidence. The three examples demonstrate that independent test derivation from spec catches errors that shared-context testing systematically misses — the strongest being a case where both the implementation and its test shared the same conceptual bug.
+**Evidence source**: `aggregation_report.json` → `validator_independence_examples`.
+
+### Section 4.5d: Added cross-session coaching evidence
+**What changed**: Added two paragraphs after the coaching description citing 26 coaching instances across 6 runs, with three concrete examples: INT4 BK_PACKED regression fix (run 00), per-shape BW redirect (run 04), and NCU occupancy discovery (run 04).
+**Why**: The original text described coaching as a design possibility. The cross-session evidence confirms it is a consistent operational pattern across campaigns, always following the same structure (monitor uses actor's own data to suggest fix paths). The "use their own data" pattern is key to coaching acceptance and distinguishes AMMO's coaching from generic prescription.
+**Evidence source**: `aggregation_report.json` → `top_coaching_examples`.
+
+### Section 4.7: Added cross-session enforcement evidence
+**What changed**: Added a paragraph after the enforcement calibration table citing 25 enforcement instances across 5 runs spanning the full spectrum (BLOCK, WARN-to-HALT, ADVISORY), with three concrete examples.
+**Why**: The original text described enforcement levels in a table. The cross-session evidence demonstrates the spectrum operating as designed: hardest enforcement for correctness bugs (sigmoid-vs-silu BLOCK), proportional escalation for quality failures (garbage output HALT), and lightest touch for negative results where champions self-correct (autotuner ADVISORY).
+**Evidence source**: `aggregation_report.json` → `enforcement_examples`.
+
+---
+
+Changes made on 2026-04-16 to address adversarial review findings (Codex review). Four methodological issues corrected.
+
+### Section 6.9: Weakened verification claim and scoped single-run metric
+**What changed**: (1) Replaced "All findings below are backed by structured citations verified against the original artifacts" with honest disclosure that 80.2% pass automated verification and showcased examples are restricted to verified citations unless noted. (2) Scoped the 48% "before actor noticed" metric to run 00 with explicit caveat that it was not computed for other monitored campaigns. (3) Relabeled "false-negative evidence" from unmonitored runs as "counterfactual error prevalence" — the monitor was absent, not present-and-failing.
+**Why**: The original framing overclaimed verification rigor (a paper whose contribution is empirical process evidence cannot afford credibility breaks), presented a single-run timing metric as cross-session, and committed a category error by labeling unmonitored-run errors as false negatives.
+
+### Section 5.5: Fixed false-negative definition cross-reference
+**What changed**: Clarified that unmonitored campaigns cannot contribute false-negative data; they provide counterfactual error prevalence evidence instead.
+**Why**: The original cross-reference linked a correctly defined metric (false negative = monitor had info but missed) to an incorrectly labeled observation (monitor was absent). Reviewers fluent in evaluation methodology would catch this immediately.
+
+### Section 4.5d: Deduplicated coaching count to unique campaigns
+**What changed**: Changed "26 coaching instances in 6 runs" to "26 coaching instances across the 5 monitored campaigns." Added "from three distinct campaigns" to the examples header.
+**Why**: The original "6 runs" counted run_04 and run_04b (the same 12-round campaign mined by two agents) as separate runs, inflating the breadth claim. Normalizing to unique campaigns is the honest count.
+
+---
+
+Changes made on 2026-04-16 (second adversarial review pass). Three additional methodological issues corrected.
+
+### Section 6.9: Removed causal framing, corrected intervention totals, fixed self-correction rates
+**What changed**: (1) Replaced "providing natural counterfactual baselines" with "descriptive comparison points" and explicit confound disclosure. (2) Corrected intervention total from 121 to 99 after deduplicating run_04/04b (same campaign mined twice). (3) Updated category shares to match new denominator — category counts unchanged, shares adjusted. (4) Corrected severity from "41 CRITICAL, 88 WARNING" to "30 CRITICAL, 64 WARNING" (of 96 with severity annotations). (5) Replaced "~5% of interventions (2-3 per monitored campaign)" self-correction claim with exact count: "2 self-corrections across 2 of the 5 monitored campaigns." (6) Replaced "counterfactual analysis" with "impact classification" in the impact distribution section.
+**Why**: The aggregator double-counted run_04/04b, producing an inflated total that made severity sub-counts exceed the headline number (41+88=129 > 121). The self-correction rate was arithmetically unsupported. The "counterfactual baseline" framing implied a controlled ablation that does not exist.
+
+### Section 4.2: Replaced failed-verification validator-independence example
+**What changed**: Replaced example 3 (run 01 co-located baseline, whose backing citation at `tracks/OP-002/validation_results.md:117-137` fails automated verification at 0.61 similarity) with a verification-passing example from run 09 (validator independently discovering warm-cache regressions and a 0.33x translation factor, all cited lines passing at >0.70).
+**Why**: The paper commits to restricting showcased examples to verification-passing citations. The run 01 content was factually real but failed automated verification due to paraphrasing. Replacing it with a fully passing example maintains the stated guarantee.
+
+---
+
+Changes made on 2026-04-16 to reflect the shift from deny-based to inject-based message delivery enforcement (commit `67049ac`).
+
+### Section 4.7: Rewrote delivery-aware intervention mechanism
+**What changed**: (1) Replaced the 3-step deny-based delivery path (check queue → deny tool use → force turn yield) with the inject-based mechanism (check queue → inject undelivered content as ambient context → deduplicate via sidecar file). (2) Added a paragraph documenting the livelock failure mode that motivated the change: hard denial of tool use during undelivered messages caused champions to deadlock (19 denials in 12 min, 0/3 proposals written) because monitors sent messages every ~30s. (3) Framed the evolution as empirical evidence for the calibration principle — oversight reach increased when enforcement softened from denial to injection.
+**Why**: The paper described the pre-`67049ac` deny-based mechanism. The real system now uses non-blocking mid-turn injection. The livelock incident is a concrete example of the paper's own design principle (enforcement that is too hard incentivizes workarounds / causes operational failure) being validated empirically, strengthening the calibration argument.
+
+### Section 4.7 enforcement table: Updated message delivery row
+**What changed**: Changed "Undelivered supervisory messages" enforcement style from "Hard deny (blocks further tool use)" to "Mid-turn injection (ambient context, non-blocking)" with updated rationale citing the livelock experience.
+**Why**: The enforcement table must match the implemented system. The old "hard deny" entry described a mechanism that was replaced precisely because it was counterproductive.
+
+### Section 4.7 post-table paragraph: Expanded calibration principle
+**What changed**: Added "but must also account for operational feasibility" to the principle statement. Added discussion of the message-delivery case as an illustration: hard denial was conceptually justified but operationally counterproductive, and mid-turn injection preserves the core guarantee (actor has oversight content before its next decision) without the livelock pathology. Added closing observation that the right position on the enforcement spectrum is an empirical question, not purely theoretical.
+**Why**: The original principle was stated as a one-dimensional function of irreversibility. The livelock experience shows a second axis — enforcement feasibility — that the principle must account for. This makes the calibration argument more nuanced and better grounded.
+
+### Section 4.10 pseudocode: Updated delivery enforcement lines
+**What changed**: Replaced `deny_new_tool_use(A)` / `request_turn_yield(A)` with `inject_as_ambient_context(A, undelivered_messages(A))` / `mark_injected(A, timestamp)`.
+**Why**: Pseudocode must match the described mechanism.
+
+### Section 9.5: Updated enforcement spectrum reference
+**What changed**: Changed "from hard denial (message delivery, evidence gates)" to "from hard blocks (evidence gates) to mid-turn injection (message delivery)." Added parenthetical noting that Section 4.7 documents the livelock that motivated the shift.
+**Why**: The limitations section references the enforcement spectrum and must reflect the current ordering. Message delivery is no longer at the "hardest" end.
+
+---
+
+Changes made on 2026-04-16 (second batch) to address Codex adversarial review round 3.
+
+### Abstract: Updated delivery mechanism description
+**What changed**: Replaced "ensuring that queued monitor messages are actually delivered before more tool use occurs" with "mid-turn context injection ensuring that queued monitor messages reach the actor during long tool chains rather than only at turn boundaries."
+**Why**: The abstract still described the obsolete deny-based mechanism after the body was updated. Reviewers reading only the abstract would get a different architecture than the body describes.
+
+### Contribution (2): Updated steering mechanism description
+**What changed**: Replaced "forces the actor to yield when queued oversight messages have not yet been delivered" with description of mid-turn injection mechanism, explicit mention of the livelock that motivated the change, and expanded calibration principle to include operational feasibility.
+**Why**: Same as abstract — contribution list must match the implemented system.
+
+### Section 6.7: Downgraded from "natural experiment" to "descriptive case study"
+**What changed**: (1) Renamed section from "Natural experiment: the R7-R9 monitor coverage gap" to "Descriptive case study: the R7-R9 monitor coverage gap." (2) Replaced "produced a natural experiment" with "produced an unplanned period without monitor coverage." (3) Replaced "approximating a paired C5-vs-C0 ablation on the same optimization target" with explicit acknowledgment that this is NOT a controlled ablation, citing three specific confounds: different optimization components per round, shifting bottleneck landscape, and simultaneous absence of both monitor types. (4) Updated abstract to match: "within-campaign C5-vs-C0 comparison" → "descriptive case study of unmonitored operation" with explicit confound disclosure.
+**Why**: The original framing overclaimed causal evidence. Each round targets a different kernel, the bottleneck landscape shifts after each ship, and both debate and implementation monitors were absent — making "ablation" language indefensible. Downgrading to descriptive framing is more honest and still conveys the observation.
+
+### Cross-session aggregate artifact: Regenerated deduplicated version
+**What changed**: Created `deduplicate_aggregate.py` script and `aggregation_report_deduplicated.json`. The deduplicated artifact matches all paper numbers: 99 interventions (not 121), 5 monitored campaigns (not 6), severity 30+64 (not 41+88), updated category shares, corrected CLE entries, enforcement description updated to reflect injection-based delivery.
+**Why**: Codex correctly identified that the paper's numbers diverged from the committed artifact after manual corrections were applied to the paper but not the JSON. The deduplicated artifact is now the authoritative source, produced by a committed script for reproducibility.
+
+### Section 6.9 evidence source: Updated reference
+**What changed**: Changed evidence source from `aggregation_report.json` to `aggregation_report_deduplicated.json` with note on what the deduplication script corrects.
+**Why**: Paper must reference the artifact that matches its numbers.
+
+---
+
+Changes made on 2026-04-16 (third batch) to address Codex adversarial review round 4.
+
+### Section 6.9 intervention taxonomy table: Added coaching row and total
+**What changed**: (1) Added "Coaching (explicit fix-path suggestion) | 1 | 1.0%" row to the taxonomy table. (2) Added bold "Total | 99" row. (3) Added explanatory note distinguishing the 1 primary-coaching-category intervention from the 26 coaching *instances* in Section 4.5d (coaching is a behavioral mode that overlaps with evidence/methodology categories).
+**Why**: Category rows summed to 98, silently dropping the coaching category. A table whose rows don't sum to the stated total destroys reviewer trust in the entire cross-session section.
+
+### Section 6.9 corpus framing: Clarified mined runs vs unique campaigns
+**What changed**: (1) Changed "18 archived campaign runs" to "18 archived runs covering **16 unique campaigns**" with explicit identification of the two duplicate-mined pairs (run_04/04b, run_05/06). (2) Changed "Five of the 18 runs" to "Five campaigns." (3) Changed "remaining 13" to "remaining 11." (4) Updated campaign metrics table: "Campaigns | 18 (15 with complete metrics)" → "Mining runs / unique campaigns | 18 / 16 (14 with complete metrics)."
+**Why**: Codex correctly identified that presenting 18 as the corpus size without disclosing that 2 pairs are duplicate mining passes of the same campaign overstates the breadth of evidence.
+
+### Section 6.9 exhaustion statistic: Corrected value and label
+**What changed**: (1) Changed "Campaigns exhausted at HW ceiling | 73.3%" to "Campaigns terminated via exhaustion | 64.3% (9/14 with complete metrics)." (2) Removed "at HW ceiling" qualifier — only 2 of 9 exhausted campaigns specifically cite HW/BW ceiling; the rest are generic exhaustion.
+**Why**: 73.3% was computed over a stale denominator of 15 (correct count is 14 complete-metric runs). "At HW ceiling" was an overclaim — most exhausted campaigns simply exhausted all viable approaches, not necessarily at a hardware bandwidth ceiling.
+
+### Section 7.3: Fixed last stale "enforcing turn yields" reference
+**What changed**: Changed "the runtime makes those messages actionable by enforcing turn yields when needed" to "the runtime makes those messages actionable by injecting them as ambient context during tool execution."
+**Why**: Section 7.3 still described the obsolete deny-and-yield mechanism after all other sections were updated. This was the last remaining inconsistency.
+
+### Deduplicated aggregate artifact: Regenerated with all fixes
+**What changed**: Updated `deduplicate_aggregate.py` to also (1) correct other_and_unclassified count from 44→22 so categories sum to 99, (2) add run_05/06 deduplication note, (3) fix exhaustion stat from 73.3%→64.3% with corrected denominator of 14, (4) add `unique_campaigns: 16` field, (5) assert category sum == total_interventions. Regenerated `aggregation_report_deduplicated.json` — verified category sum 99 == total.
+**Why**: The previous version of the script only changed `total_interventions` to 99 without updating individual category counts, leaving the aggregate internally inconsistent (categories summed to 121 while total said 99).
 

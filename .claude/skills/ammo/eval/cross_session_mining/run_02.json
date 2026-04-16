@@ -1,0 +1,583 @@
+{
+  "run_idx": 2,
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "slug": "06f309c83_qwen35-4b-l40s-bf16-tp1-1-round-campaign",
+  "has_monitor_logs": false,
+  "overall_score": 6.34,
+  "transcript_quality_score": 8.25,
+  "cumulative_speedup": 1.06,
+
+  "intervention_inventory": [],
+
+  "coaching_instances": [
+    {
+      "category": "debate_peer_review_error_correction",
+      "description": "Champion-2's critique of Champion-3 identified the L2 cache size miscalculation (48 MB hardcoded vs 96 MB actual), invalidating the in_proj_ba 2.50x speedup claim. Champion-3 conceded and revised E2E estimate from 14.0% to 11.4-13.0%.",
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-2_critique_champion-3.md",
+          "line_start": 10,
+          "line_end": 17,
+          "claim": "Champion-2 identifies L2_SIZE_MB=48 bug in Champion-3's script when actual L40S L2 is 96 MB",
+          "quoted_content": "Champion-3's micro-experiment script (`champion3_triton_skinny_gemm_v2.py`, line 18) hardcodes:\n```python\nL2_SIZE_MB = 48.0\n```\nBut L40S actually has **96 MB L2** (verified: `torch.cuda.get_device_properties(0).L2_cache_size = 100663296 bytes = 96 MB`)."
+        },
+        {
+          "file_path": "debate/round_1/champion-3_rebuttal.md",
+          "line_start": 9,
+          "line_end": 17,
+          "claim": "Champion-3 concedes L2 cache bug and revises E2E estimate downward",
+          "quoted_content": "**Champion-2 is correct.** My script hardcodes `L2_SIZE_MB = 48.0` when L40S has 96 MB L2. This is a bug.\n\n### Impact analysis\n\nFor the five large GEMMs (gate_up_proj through out_proj), Champion-2's own analysis confirms the chain totals still exceed 96 MB L2 by 2x-4x, so those results remain valid."
+        }
+      ]
+    },
+    {
+      "category": "debate_peer_review_error_correction",
+      "description": "Champion-3 identified Champion-1's BLOCK_M=max(M,16)=16 hardcode as the root cause of false claims that Triton fundamentally cannot avoid M-padding. Champion-1 fully retracted the claim.",
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-3_argument.md",
+          "line_start": 50,
+          "line_end": 58,
+          "claim": "Champion-3 identifies BLOCK_M=max(M,16) hardcode in Champion-1's script as root cause of false Triton limitation claim",
+          "quoted_content": "Champion-1's code (`champion1_skinny_gemm_bench.py`, line 113): `BLOCK_M=max(M, 16),  # Triton requires power-of-2 >= 16 for tl.dot`\nThis forces BLOCK_M=16 for M=8, causing **exactly the same M-padding problem as CUTLASS WMMA**."
+        },
+        {
+          "file_path": "debate/round_1/champion-1_rebuttal.md",
+          "line_start": 9,
+          "line_end": 17,
+          "claim": "Champion-1 concedes the error and retracts the Triton M-padding claim",
+          "quoted_content": "Champion-3 is correct. My Triton benchmark used `BLOCK_M=max(M, 16)` which forced M-padding identical to CUTLASS WMMA. The claim \"Triton requires power-of-2 >= 16 for tl.dot\" was based on an older Triton version constraint that no longer applies on sm_89 with current Triton."
+        }
+      ]
+    },
+    {
+      "category": "delegate_enables_debate_critique",
+      "description": "Delegate-2a prepared a detailed critique of Champion-3's micro-experiment methodology, discovering the L2 cache bug and computing per-GEMM L2-bust status. Champion-2 used this directly in their Phase B critique.",
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-2a_champion3_critique_prep.md",
+          "line_start": 56,
+          "line_end": 67,
+          "claim": "Delegate analysis confirms in_proj_ba chain (21 MB) is 0.22x of actual 96 MB L2 -- entirely L2-warm",
+          "quoted_content": "| **in_proj_ba** | **0.33** | **64** (capped) | **21.1 MB** | **0.22x** | **L2-WARM, NOT BUSTED** |"
+        }
+      ]
+    },
+    {
+      "category": "delegate_enables_proposal_grounding",
+      "description": "Delegate-1a verified L40S L2 cache = 96 MB via hardware query, which Champion-1 used as an offensive weapon to attack Champion-3's L2 methodology in the debate.",
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-1a_l2_verification.md",
+          "line_start": 8,
+          "line_end": 15,
+          "claim": "Delegate report confirms L40S L2 = 96 MB from hardware query",
+          "quoted_content": "**L40S L2 cache = 96.0 MB** (100,663,296 bytes exactly)\n\ntorch.cuda.get_device_properties(0).L2_cache_size = 100663296  (= 96.0 MB)"
+        },
+        {
+          "file_path": "debate/round_1/champion-1_argument.md",
+          "line_start": 73,
+          "line_end": 89,
+          "claim": "Champion-1 cites L2=96 MB finding to identify that in_proj_ba chain is entirely L2-cached in Champion-3's experiment",
+          "quoted_content": "Champion-3's script also uses `L2_SIZE_MB = 48.0` (line 18), not the 96 MB claimed in their proposal table... Their chain sizing formula uses the wrong L2 size... **completely insufficient for in_proj_ba** (64x0.33 = 21 MB << 96 MB L2)."
+        }
+      ]
+    }
+  ],
+
+  "intervention_timing": [],
+
+  "validator_independence": [
+    {
+      "description": "The TaskCompleted gate validator hook never fired during the entire campaign session. All gate enforcement was performed manually by the lead orchestrator agent reading files and making judgment calls inline. The hook infrastructure (329 lines of shell script, 674 lines of test harness) was dead code.",
+      "citations": [
+        {
+          "file_path": "../../ammo_gate_validator_analysis.md",
+          "line_start": 8,
+          "line_end": 10,
+          "claim": "Gate validator hook provided zero value -- never fired during campaign",
+          "quoted_content": "**The TaskCompleted gate validator hook provided zero value during this campaign session.** It never fired. Not once. The `TaskCompleted` hook event type does not appear in the session JSONL, nor in any other session JSONL across the entire project history."
+        },
+        {
+          "file_path": "../../ammo_gate_validator_analysis.md",
+          "line_start": 57,
+          "line_end": 64,
+          "claim": "Gates were enforced manually by orchestrator, not by automated hooks",
+          "quoted_content": "Instead of the hook, the **lead orchestrator agent manually ran gates inline** in its conversation:\n\n- **Stage 1->2 gate (line 329):** \"Stage 1->2 gate: PASS. All gates green.\" -- The assistant read constraint files and checked them manually.\n- **Phase 0 eligibility gate (line 424):** Manually checked 3 champion proposals against gate criteria"
+        },
+        {
+          "file_path": "../../ammo_gate_validator_analysis.md",
+          "line_start": 88,
+          "line_end": 96,
+          "claim": "Zero hook events fired vs 6 manual gate checks by orchestrator",
+          "quoted_content": "| TaskCompleted hook events fired | 0 |\n| Meaningful gate validations by hook | 0 |\n| Trivial passes (non-gate fast bail) | 0 |\n| Gate failures that blocked progression | 0 |\n| Manual gate checks by orchestrator | ~6 |\n| Subagent task completions | 6 |"
+        }
+      ]
+    },
+    {
+      "description": "OP-002 validation report independently identified that same-session co-located baseline is the correct comparison method, revealing the optimization had zero E2E benefit (-0.19%) despite kernel-level speedup (1.64x).",
+      "citations": [
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 139,
+          "line_end": 149,
+          "claim": "Validator independently concluded co-located baseline is the correct comparison, revealing zero E2E benefit",
+          "quoted_content": "The co-located baseline comparison (vs CoLoc column) is the correct way to evaluate this optimization because both baseline and opt were measured in the same session on the same hardware under the same thermal and system conditions. Against this baseline:\n\n- **BS=4 is the only batch size showing any improvement (+0.60%)**"
+        }
+      ]
+    }
+  ],
+
+  "enforcement_instances": [
+    {
+      "description": "OP-002 Fused GDN Core kernel was killed (verdict: FAIL) based on kill criterion 5: zero E2E benefit (-0.19% vs co-located baseline at BS=8, below 1.0% threshold). The kernel had passed correctness (Gate 5.1) and kernel performance (Gate 5.2) but failed E2E (Gate 5.3).",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 171,
+          "line_end": 185,
+          "claim": "OP-002 track recorded FAIL verdict with explicit kill criterion reference",
+          "quoted_content": "\"OP-002\": {\n  \"status\": \"completed\",\n  \"verdict\": \"FAIL\",\n  \"verdict_reason\": \"Kill criterion 5: zero E2E benefit (-0.19% vs co-located baseline at BS=8, below 1.0% threshold)\",\n  \"gate_5_1\": \"PASS\",\n  \"gate_5_2\": \"CONDITIONAL_PASS\",\n  \"gate_5_3\": \"FAIL\""
+        },
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 170,
+          "line_end": 183,
+          "claim": "Kill criteria evaluation table shows binding constraint was criterion 5",
+          "quoted_content": "| # | Criterion | Threshold | Measured | Result |\n| 1 | Fused kernel per-layer time | > 40 us | 26.3 us (BS=8) | PASS |\n| 2 | BW utilization | < 55% | 76.2% (BS=8) | PASS |\n| 3 | Correctness max abs error | > 0.01 | 0.001 (with L2 norm) | PASS |\n| 4 | CUDA graph capture | fails | succeeds | PASS |\n| 5 | E2E improvement at BS=8 | < 1.0% | **-0.19% vs co-located BL** | **FAIL** |"
+        }
+      ]
+    },
+    {
+      "description": "Campaign terminated due to diminishing returns: remaining candidates (OP-007 at 0.36-0.42% and OP-R2-001 at 0.22-0.25%) were below the 3% diminishing returns threshold.",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 57,
+          "line_end": 67,
+          "claim": "Pending queue contains only sub-threshold candidates, triggering campaign completion",
+          "quoted_content": "\"pending_queue\": [\n  {\n    \"id\": \"OP-007\",\n    \"name\": \"Fused Gumbel-Max Sampling\",\n    \"e2e_estimate\": \"0.36-0.42%\",\n    \"source\": \"campaign_round_2\"\n  },\n  {\n    \"id\": \"OP-R2-001\",\n    \"name\": \"Fused Head-Split (BF16 copies)\",\n    \"e2e_estimate\": \"0.22-0.25%\""
+        },
+        {
+          "file_path": "state.json",
+          "line_start": 232,
+          "line_end": 233,
+          "claim": "Campaign summary confirms completion due to sub-threshold remaining candidates",
+          "quoted_content": "\"summary\": \"CAMPAIGN COMPLETE. Shipped OP-003 Triton Skinny-GEMM: +6.02% E2E at BS=8. Cumulative speedup 1.06x. OP-002 Fused GDN Core failed (kernel works but no E2E benefit). Round 2 candidates (0.2-0.4% E2E) below diminishing returns threshold.\""
+        }
+      ]
+    },
+    {
+      "description": "Champion-1 (CUDA GEMV) eliminated from debate with score 4.8, below the 5.0 selection threshold.",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 20,
+          "line_end": 22,
+          "claim": "Champion-1 eliminated below 5.0 threshold",
+          "quoted_content": "| Champion-1: CUDA GEMV | ELIMINATED | Below 5.0 threshold. No prototype, conceded BLOCK_M error, acknowledged Champion-3's empirical advantage |"
+        }
+      ]
+    },
+    {
+      "description": "First researcher agent was killed for running an unnecessary optimization sweep, replaced with a second researcher.",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 3,
+          "line_end": 9,
+          "claim": "Agent record shows researcher was killed with explicit reason",
+          "quoted_content": "\"agent_id\": \"researcher-stage1-killed\", \"role\": \"researcher\", \"total_tokens\": 0, \"duration_ms\": 0, \"note\": \"killed (ran opt sweep unnecessarily)\""
+        }
+      ]
+    }
+  ],
+
+  "campaign_metrics": {
+    "overall_score": 6.34,
+    "e2e_outcome_score": 6.0,
+    "gate_pass_rates_score": 1.0,
+    "debate_quality_score": 9.0,
+    "campaign_efficiency_score": 8.0,
+    "transcript_quality_score": 8.25,
+    "cumulative_speedup": 1.06,
+    "shipped_optimizations": 1,
+    "total_rounds": 1,
+    "total_proposals": 3,
+    "total_tracks": 2,
+    "tracks_passed": 1,
+    "tracks_failed": 1,
+    "delegation_enabled": true,
+    "delegates_spawned": 3,
+    "delegate_citation_rate": 1.0,
+    "delegation_causality_chains": 3,
+    "delegation_causality_bonus": 1.5,
+    "total_agent_invocations": 8,
+    "total_tokens": 252297,
+    "total_duration_ms": 1509082,
+    "total_tracked_seconds": 6530,
+    "citations": [
+      {
+        "file_path": "../../scorecard.json",
+        "line_start": 1,
+        "line_end": 10,
+        "claim": "Overall score 6.34, E2E outcome 6.0 at 40% weight, transcript quality 8.25 at 15% weight",
+        "quoted_content": "\"overall_score\": 6.34,\n\"overall_score_without_transcript\": 6.0,\n\"dimensions\": {\n  \"e2e_outcome\": { \"score\": 6.0, \"weight\": 0.4, \"weighted_contribution\": 2.4 }"
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 56,
+        "line_end": 58,
+        "claim": "Cumulative E2E speedup 1.06x across 1 round, campaign complete",
+        "quoted_content": "\"cumulative_e2e_speedup\": 1.06,\n\"current_round\": 1,\n\"diminishing_returns_threshold_pct\": 3"
+      },
+      {
+        "file_path": "../../artifacts_snapshot.json",
+        "line_start": 140,
+        "line_end": 170,
+        "claim": "Delegation metrics: 3 delegates spawned, 100% citation rate, 8 artifacts produced",
+        "quoted_content": "\"delegation\": {\n  \"enabled\": true,\n  \"delegates_per_champion\": 1,\n  \"total_delegates_spawned\": 3,\n  \"delegate_artifacts_count\": 8,\n  \"delegate_citation_rate\": 1.0"
+      }
+    ]
+  },
+
+  "anti_patterns": [
+    {
+      "pattern": "cold_to_production_overestimation",
+      "description": "Campaign headline records 6.02% E2E improvement at BS=8 as the shipped result. The actual in-sweep co-located measurement (same session, env var toggle) shows only 1.94%. The 6.02% figure conflates Triton kernel contribution (~2%), in_proj_ba fusion effect (~4%), and ~0.76% systematic drift. Ratio 6.02/1.94 = 3.1x exceeds the 2x overestimation threshold.",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 83,
+          "line_end": 90,
+          "claim": "Campaign records 6.02% as official E2E improvement",
+          "quoted_content": "\"OP-003\": { \"status\": \"PASSED\", \"e2e_speedup\": 1.0602, \"detail\": \"6.02% at BS=8 vs Stage 1\" }"
+        },
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 113,
+          "line_end": 124,
+          "claim": "In-sweep comparison gives only 1.94% at BS=8, isolating Triton kernel contribution",
+          "quoted_content": "| 8 | 7.473 | 7.329 | 1.020x | +1.94% |\n\nNote: The in-sweep baseline (SKINNY_GEMM=0) still includes the ba fusion effect... the in-sweep delta isolates only the Triton kernel contribution (~2%), while the Stage 1 comparison captures the full effect (kernel + fusion ~6%)."
+        },
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 130,
+          "line_end": 133,
+          "claim": "OP-002 validation confirms systematic 0.5-1.0% drift between Stage 1 and same-session baselines",
+          "quoted_content": "- **S1 gap**: The Stage 1 baseline is consistently 0.5-1.0% slower than the co-located baseline across all batch sizes. This systematic drift (likely due to different thermal conditions, different day, or different system state) is **larger than the claimed optimization effect**."
+        }
+      ]
+    },
+    {
+      "pattern": "hallucinated_micro_experiment_data",
+      "description": "Champion-3 presented in_proj_ba speedup of 2.50x (6.2 us vs 15.6 us) as production-representative in both proposal and round 1 argument. The measurement was entirely L2-cached (21 MB chain vs 96 MB L2). Champion-3 later conceded in rebuttal.",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 65,
+          "line_end": 71,
+          "claim": "Champion-3 proposal cites 2.50x speedup for in_proj_ba as measured result",
+          "quoted_content": "| in_proj_ba | 15.6 | 6.2 | 6.1% | 2.50x | (fusion eliminates this) |"
+        },
+        {
+          "file_path": "debate/round_1/champion-3_rebuttal.md",
+          "line_start": 17,
+          "line_end": 18,
+          "claim": "Champion-3 concedes the in_proj_ba speedup is unreliable due to L2 caching",
+          "quoted_content": "For **in_proj_ba**: Champion-2 is right that 64 copies x 0.33 MB = 21 MB fits entirely within 96 MB L2, making the reported 6.2 us / 2.50x speedup unreliable."
+        }
+      ]
+    },
+    {
+      "pattern": "self_inflicted_parameter_bug",
+      "description": "Champion-1 concluded Triton fundamentally cannot use BLOCK_M=8, based on a micro-experiment that hardcoded BLOCK_M=max(M,16)=16. This replicated the same M-padding as CUTLASS WMMA. Champion-1 retracted after Champion-3 identified the bug.",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 54,
+          "line_end": 55,
+          "claim": "Proposal concludes Triton fundamentally cannot avoid M-padding",
+          "quoted_content": "**Why Triton fails**: Triton's `tl.dot` maps to tensor cores with WMMA-like tiling. It cannot avoid the M-padding overhead or generate the vectorized streaming access pattern needed for GEMV-style execution."
+        },
+        {
+          "file_path": "debate/round_1/champion-1_rebuttal.md",
+          "line_start": 9,
+          "line_end": 17,
+          "claim": "Champion-1 concedes the error after Champion-3 identifies the BLOCK_M hardcode bug",
+          "quoted_content": "Champion-3 is correct. My Triton benchmark used `BLOCK_M=max(M, 16)` which forced M-padding identical to CUTLASS WMMA. The claim \"Triton requires power-of-2 >= 16 for tl.dot\" was based on an older Triton version constraint that no longer applies on sm_89 with current Triton."
+        }
+      ]
+    },
+    {
+      "pattern": "kernel_speedup_no_e2e_translation",
+      "description": "OP-002 Fused GDN Core achieved 1.64x isolated kernel speedup at BS=8 but delivered -0.19% E2E (regression). The isolated benchmark ran a tight CUDA graph loop on ~17 MB fitting in L2, while production processes 384 MB across 24 layers.",
+      "citations": [
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 1,
+          "line_end": 10,
+          "claim": "OP-002 showed 1.64x kernel speedup but zero E2E benefit",
+          "quoted_content": "## Overall Verdict: FAIL (Zero E2E benefit; Kill Criterion 5 triggered)\n\nThe fused kernel shows a 1.64x isolated kernel speedup at BS=8, but **delivers zero measurable E2E improvement**. A same-session co-located baseline comparison shows the optimization actually regresses slightly (-0.19%) at BS=8."
+        },
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 153,
+          "line_end": 168,
+          "claim": "Root cause: isolated benchmark L2 flattery, redundant ba dot-product, ba_weight transpose overhead",
+          "quoted_content": "Expected: 16.8 us/layer * 24 layers = 403 us saved per step = 2.7% E2E improvement.\nMeasured vs co-located baseline: -0.19% (slight regression).\n\nPossible explanations for the full 2.7% gap:\n1. **Isolated benchmark overstates the gain**: The kernel benchmark uses a tight CUDA graph loop on small tensors that fit in L2 cache."
+        }
+      ]
+    },
+    {
+      "pattern": "dead_hook_infrastructure",
+      "description": "Gate validator hook infrastructure (329 LOC shell script + 674 LOC test harness + Sonnet agent prompt) never fired during the entire campaign. TaskCompleted hook event type was either unsupported or never triggered in Claude Code versions 2.1.72/2.1.73.",
+      "citations": [
+        {
+          "file_path": "../../ammo_gate_validator_analysis.md",
+          "line_start": 98,
+          "line_end": 107,
+          "claim": "Gate validator hook is dead code that never executes; all enforcement was manual",
+          "quoted_content": "**The gate validator hook is 100% rubber-stamping -- or more precisely, it is dead code that never executes.**\n\nThe entire gate enforcement mechanism designed around `TaskCompleted` hooks (both the shell script and the Sonnet agent) has never provided any value because the hook event type does not fire in the Claude Code versions used."
+        }
+      ]
+    }
+  ],
+
+  "impact_classification": [
+    {
+      "optimization": "OP-003 Triton Skinny-GEMM + in_proj_ba fusion",
+      "status": "SHIPPED",
+      "headline_e2e_pct": 6.02,
+      "in_sweep_e2e_pct": 1.94,
+      "kernel_speedup": "1.049x aggregate",
+      "bw_utilization_before": "62.4%",
+      "bw_utilization_after": "80.3%",
+      "decomposition": "Triton kernel ~2% E2E + in_proj_ba fusion ~4% E2E at BS=8",
+      "active_range": "BS=2-16 (M=2-16 shape guard)",
+      "citations": [
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 1,
+          "line_end": 11,
+          "claim": "OP-003 passed all gates: correctness (48/48), kernel 4.9% speedup, E2E 6.02% at BS=8",
+          "quoted_content": "## Summary\n\n| Gate | Result | Notes |\n| 5.1 Correctness | **PASS** | 48/48 kernel tests pass; model generates correctly with fusion |\n| 5.2 Kernel Performance | **PASS** | 4.9% aggregate kernel speedup, no regressions |\n| 5.3 E2E Latency | **PASS** | 6.02% at BS=8 vs Stage 1 (kill criterion: >5%) |"
+        },
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 80,
+          "line_end": 92,
+          "claim": "Kernel-level results show BW utilization improved from 76.6% to 80.3%",
+          "quoted_content": "| gate_up_proj | 134.2 | 132.9 | 82.2% | 81.4% | 1.010x |\n| in_proj_qkvz | 96.6 | 89.7 | 81.2% | 75.4% | 1.077x |\n| down_proj | 69.8 | 67.1 | 81.4% | 78.2% | 1.042x |\n| qkv_proj | 75.8 | 75.2 | 80.7% | 80.1% | 1.008x |\n| out_proj | 32.9 | 30.6 | 79.4% | 73.8% | 1.076x |\n| in_proj_ba | 11.9 | 6.5 | 5.8% | 3.2% | 1.815x |"
+        }
+      ]
+    },
+    {
+      "optimization": "OP-002 Fused GDN Core Kernel",
+      "status": "FAILED",
+      "headline_e2e_pct": -0.19,
+      "kernel_speedup": "1.64x at BS=8",
+      "failure_reason": "Zero E2E benefit despite real kernel speedup; L2 cache flattery in isolated benchmark",
+      "citations": [
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 256,
+          "line_end": 260,
+          "claim": "Decision: STOP -- zero E2E benefit despite 1.64x isolated kernel speedup",
+          "quoted_content": "## Decision: STOP\n\nThe optimization delivers zero E2E benefit despite a real 1.64x isolated kernel speedup. Against a same-session co-located baseline, BS=8 shows -0.19% (regression), not improvement. Kill criterion 5 is definitively triggered."
+        }
+      ]
+    },
+    {
+      "optimization": "OP-001 CUDA GEMV for decode GEMMs",
+      "status": "ELIMINATED_IN_DEBATE",
+      "debate_score": 4.8,
+      "elimination_reason": "Below 5.0 threshold, no prototype, conceded BLOCK_M error",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 14,
+          "line_end": 22,
+          "claim": "Debate scores: Champion-3 7.10, Champion-2 6.40, Champion-1 4.80 (eliminated)",
+          "quoted_content": "| **Weighted Total** | **4.80** | **6.40** | **7.10** |\n\n## Decisions\n\n| **Champion-3: Triton Skinny-GEMM** | **SELECTED (Winner 1)** | Highest score, empirically validated, targets 88.6% bottleneck |\n| **Champion-2: Fused GDN Core** | **SELECTED (Winner 2)** | Complementary component (7.6%), zero file conflicts |\n| Champion-1: CUDA GEMV | ELIMINATED | Below 5.0 threshold."
+        }
+      ]
+    }
+  ],
+
+  "changelog_entries": [
+    {
+      "description": "New Triton BF16 skinny-GEMM kernel (~120 LOC) for decode GEMMs with M<=16 on sm_89, using BLOCK_M=8 with zero M-padding, autotuned BLOCK_N/BLOCK_K, FP32 accumulation.",
+      "files_modified": [
+        "vllm/kernels/triton/skinny_gemm.py",
+        "vllm/kernels/triton/__init__.py"
+      ],
+      "citations": [
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 19,
+          "line_end": 24,
+          "claim": "Files modified for Triton skinny-GEMM kernel and dispatch path",
+          "quoted_content": "- `vllm/envs.py` -- Added `VLLM_CUDA_SKINNY_GEMM` environment variable (2 LOC)\n- `vllm/model_executor/layers/utils.py` -- Added CUDA skinny GEMM dispatch path (~45 LOC)\n- `vllm/kernels/triton/__init__.py` -- New module init\n- `vllm/kernels/triton/skinny_gemm.py` -- Triton kernel implementation (~120 LOC)"
+        }
+      ]
+    },
+    {
+      "description": "Shape-gated dispatch in dispatch_unquantized_gemm() routes 2<=M<=16 BF16 contiguous GEMMs to Triton skinny-GEMM kernel, with VLLM_CUDA_SKINNY_GEMM env var toggle.",
+      "files_modified": [
+        "vllm/model_executor/layers/utils.py",
+        "vllm/envs.py"
+      ],
+      "citations": [
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 196,
+          "line_end": 206,
+          "claim": "Shape guard and env var toggle control Triton kernel dispatch",
+          "quoted_content": "The optimization has two components:\n1. **Triton skinny-GEMM kernel**: Gated by `VLLM_CUDA_SKINNY_GEMM` env var (default: True), shape guard (2 <= M <= 16, bf16, contiguous), platform guard (CUDA only).\n2. **in_proj_ba fusion**: Always active for Qwen3.5 models after weight loading."
+        }
+      ]
+    },
+    {
+      "description": "in_proj_ba weight fusion: merged N=64 GEMM into N=12288 in_proj_qkvz projection via weight concatenation at load time, eliminating 24 standalone GEMM launches per decode step.",
+      "files_modified": [
+        "vllm/model_executor/models/qwen3_5.py"
+      ],
+      "citations": [
+        {
+          "file_path": "REPORT.md",
+          "line_start": 226,
+          "line_end": 228,
+          "claim": "in_proj_ba fusion eliminates 24 standalone GEMM launches via weight concatenation",
+          "quoted_content": "**Secondary contribution**: The `in_proj_ba` weight (N=64) is fused into `in_proj_qkvz` (N=12288) via weight concatenation at load time, forming a single N=12352 GEMM. This eliminates 24 standalone GEMM launches per decode step that each achieved only 2.6% BW utilization."
+        }
+      ]
+    }
+  ],
+
+  "verified_e2e_results": [
+    {
+      "batch_size": 1,
+      "baseline_e2e_s": 6.462,
+      "optimized_e2e_s": 6.427,
+      "in_sweep_delta_pct": 0.53,
+      "vs_stage1_delta_pct": 1.96,
+      "note": "M=1 excluded from Triton dispatch; improvement is within noise"
+    },
+    {
+      "batch_size": 4,
+      "baseline_e2e_s": 7.034,
+      "optimized_e2e_s": 6.919,
+      "in_sweep_delta_pct": 1.63,
+      "vs_stage1_delta_pct": 6.14,
+      "note": "In-sweep 1.63% isolates Triton kernel contribution"
+    },
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 7.473,
+      "optimized_e2e_s": 7.329,
+      "in_sweep_delta_pct": 1.94,
+      "vs_stage1_delta_pct": 6.02,
+      "note": "Primary target batch size; 6.02% headline includes fusion + drift"
+    },
+    {
+      "batch_size": 16,
+      "baseline_e2e_s": 8.190,
+      "optimized_e2e_s": 8.037,
+      "in_sweep_delta_pct": 1.86,
+      "vs_stage1_delta_pct": 4.49,
+      "note": "M=16 at upper dispatch boundary"
+    },
+    {
+      "batch_size": 32,
+      "baseline_e2e_s": 10.144,
+      "optimized_e2e_s": 10.089,
+      "in_sweep_delta_pct": 0.53,
+      "vs_stage1_delta_pct": 1.68,
+      "note": "M=32 exceeds M<=16 guard; Triton kernel does not fire"
+    }
+  ],
+
+  "delegation_causality_chains": [
+    {
+      "delegate": "delegate-1a",
+      "champion": "champion-1",
+      "finding": "Verified L40S L2 = 96 MB via torch.cuda.get_device_properties, exposing champion-3's L2_SIZE_MB=48 bug",
+      "impact": "Champion-1 used this to mount primary methodological critique of champion-3; critique accepted, leading to corrected E2E estimate (14.0% down to 11.4-13.0%)",
+      "bonus": 0.5,
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-1a_l2_verification.md",
+          "line_start": 8,
+          "line_end": 15,
+          "claim": "Delegate verified L40S L2 = 96 MB",
+          "quoted_content": "**L40S L2 cache = 96.0 MB** (100,663,296 bytes exactly)\n\ntorch.cuda.get_device_properties(0).L2_cache_size = 100663296  (= 96.0 MB)"
+        }
+      ]
+    },
+    {
+      "delegate": "delegate-2a",
+      "champion": "champion-2",
+      "finding": "Full roofline of fused_recurrent_gated_delta_rule_fwd_kernel: grid (1,4,256)=1024 blocks, 16 MB state I/O, 61% BW util, AI=1.88",
+      "impact": "Champion-2's proposal built directly on delegate-2a's kernel measurements; figures cited verbatim",
+      "bonus": 0.5,
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-2a_gdn_research.md",
+          "line_start": 44,
+          "line_end": 55,
+          "claim": "Delegate provides exact grid config and BW utilization used by champion-2",
+          "quoted_content": "| Grid | **(1, 4, 256)** | `(NK=1, NV=4, N=8 x HV=32)` = **1024 blocks** |\n| num_warps | **1** | hardcoded at `fused_recurrent.py:199` |"
+        }
+      ]
+    },
+    {
+      "delegate": "delegate-3a",
+      "champion": "champion-3",
+      "finding": "Confirmed direct_register_custom_op + fake_impl mechanism, ROCm AITER dispatch pattern, no existing BF16 custom GEMM for CUDA sm_89",
+      "impact": "Champion-3's integration path cites delegate-3a directly; debate summary cited this as evidence for score advantage",
+      "bonus": 0.5,
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-3a_triton_gemm_precedents.md",
+          "line_start": 143,
+          "line_end": 152,
+          "claim": "Delegate confirms no existing BF16 custom GEMM for CUDA sm_89",
+          "quoted_content": "| BF16 custom GEMM for sm_89 | N/A | **DOES NOT EXIST** |\n| Shape-dispatch hook (CUDA) | `layers/utils.py:298` | Returns `F.linear` -- **no dispatch** |\n| `direct_register_custom_op` | `utils/torch_utils.py:757` | Ready to use |"
+        }
+      ]
+    }
+  ],
+
+  "counterfactual_assessment": {
+    "would_errors_have_been_caught_without_delegates": false,
+    "would_proposals_be_less_grounded": true,
+    "estimated_quality_delta": "strong_positive",
+    "citation": {
+      "file_path": "../../transcript_grading.json",
+      "line_start": 249,
+      "line_end": 252,
+      "claim": "Counterfactual assessment: delegates were essential for catching L2 cache error and grounding proposals",
+      "quoted_content": "\"would_errors_have_been_caught_without_delegates\": \"No. The L2 cache size error (96 MB vs 48 MB) was caught because delegate-1a ran torch.cuda.get_device_properties(0).L2_cache_size directly and produced a verification report.\""
+    }
+  },
+
+  "bottleneck_profile": {
+    "gemm_share_pct": 88.6,
+    "gemm_bw_utilization_pct": 62.4,
+    "gemm_physical_ceiling": "1.60x",
+    "recurrent_gdn_share_pct": 4.9,
+    "flash_attention_share_pct": 1.2,
+    "small_kernel_soup_share_pct": 2.9,
+    "bf16_copies_share_pct": 1.0,
+    "citation": {
+      "file_path": "bottleneck_analysis.md",
+      "line_start": 7,
+      "line_end": 15,
+      "claim": "Executive summary showing 88.6% GEMM dominance at 62.4% BW utilization",
+      "quoted_content": "| 1 | GEMM (all linear layers) | 88.6% | 1.60x | 33.2% | 1.50x |\n| 2 | Recurrent delta rule | 4.9% | uncharacterized | -- | -- |\n| 3 | Flash Attention (decode) | 1.2% | ~1.20x | 0.2% | 1.00x |\n| 4 | Small kernel soup | 2.9% | ~2.0x (fusion) | 1.4% | 1.01x |\n| 5 | BF16 layout copies | 1.0% | eliminated | 1.0% | 1.01x |"
+    }
+  }
+}

@@ -1,0 +1,368 @@
+{
+  "total": 55,
+  "passed": 45,
+  "failed": 10,
+  "failure_rate": 0.182,
+  "results": [
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "169-177",
+      "claim": "Champion vs validator E2E cross-check converges within 5ms at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "130-136",
+      "claim": "Validator independently passed 23/23 correctness tests across all shapes and batch sizes",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "140-147",
+      "claim": "Validator independently found warm regressions on down_proj (0.754x) and in_proj (0.925x)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op004_triton_gemm/validation_results.md",
+      "line_range": "74-80",
+      "claim": "Champion vs validator kernel benchmark cross-check within 2% at BS=32 cold",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "28-38",
+      "claim": "Validator independently verified correctness with 1678x-3344x margin below kill criterion",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "130-141",
+      "claim": "Validator NCU profiling revealed actual register count and occupancy, correcting debate estimates",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "3-24",
+      "claim": "Campaign completed 3 rounds, shipped op007 + op006, cumulative speedup 1.0x",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "114-114",
+      "claim": "Campaign summary with combined ~2% E2E at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "env.json",
+      "line_range": "56-61",
+      "claim": "Hardware: 4x NVIDIA L40S, SM89, 46GB each",
+      "verified": true
+    },
+    {
+      "file_path": "target.json",
+      "line_range": "25-34",
+      "claim": "Target: Qwen/Qwen3.5-4B, BF16, TP=1, batch sizes [1, 8, 32]",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.56 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/campaign_round_3/proposals/champion-1_proposal.md",
+      "line_range": "138-146",
+      "claim": "Champion-1 projected 0.556 translation factor to reach 2.0% E2E from 723 us/step kernel savings",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "118-126",
+      "claim": "Actual validation showed translation factor of 0.33, far below 0.556 projection",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "182-188",
+      "claim": "Kill criterion #2 failed: E2E only 1.41-1.46%, below 1.5% threshold",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "190-195",
+      "claim": "Op007 fails 2 kill criteria: E2E below 1.5% and warm regressions on down_proj/in_proj",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "99-107",
+      "claim": "Op006 fails 2 kill criteria: kernel regression at BS=32 and E2E below 1.0%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "125-129",
+      "claim": "Op006 explicitly determined as FAIL, should NOT be shipped",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "8-17",
+      "claim": "Round 1 selected two BV=128 GDN candidates that both failed",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/delegate_work/delegate-1a_proactive_summary.md",
+      "line_range": "20-32",
+      "claim": "Delegate identified root cause: kernel already at BW ceiling, BV=128 reduces data by only 1.16%",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.63 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "46-52",
+      "claim": "Op001 persistent CTA kernel was 0.57x at BS=32 in best case (anti-optimal)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.08 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op008_splitk_gemm/validation_results.md",
+      "line_range": "39-54",
+      "claim": "Split-K fixes warm regression but down_proj operates near-cold in production due to L2 eviction",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_splitk_gemm/validation_results.md",
+      "line_range": "66-68",
+      "claim": "Op008 E2E identical to op004: Split-K provides zero additional benefit",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "44-45",
+      "claim": "Champion-3 extrapolated from measured 1.29x at BS=8 to projected 2.0-2.9% E2E at BS=32",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.36 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "56-69",
+      "claim": "Actual BS=32 cold-cache was 0.992x regression due to 115 wave scheduling overhead",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "214-221",
+      "claim": "Three independent attempts converge on 1.4-1.5% E2E ceiling for GEMM optimizations",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_splitk_gemm/validation_results.md",
+      "line_range": "93-99",
+      "claim": "Op008 confirms same 1.4% ceiling, proving gap is from production cache state not warm regressions",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.13 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "88-94",
+      "claim": "Op007 E2E results at BS=32: -145ms (1.41% champion), -150ms (1.46% validator)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "77-83",
+      "claim": "Op006 E2E: 0.66% at BS=32, fails 1.0% threshold",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op004_triton_gemm/validation_results.md",
+      "line_range": "86-94",
+      "claim": "Op004 E2E at BS=32: P50 1.4%, avg inflated by outlier iterations",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "43-51",
+      "claim": "Op001 CUDA BV=128 kernel 0.57x at BS=32 after 3 iterations of bug fixes",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_splitk_gemm/validation_results.md",
+      "line_range": "59-68",
+      "claim": "Op008 E2E at BS=32: 1.4% P50, identical to op004 within noise",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/delegate_work/delegate-1a_proactive_summary.md",
+      "line_range": "20-32",
+      "claim": "Delegate identified BW ceiling as root cause of Round 1 failure, accelerating pivot",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.50 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/campaign_round_2/delegate_work/delegate-1a_proactive_summary.md",
+      "line_range": "64-77",
+      "claim": "Delegate identified multi-layer kernel with L2 reuse as highest-potential path",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.11 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "44-45",
+      "claim": "Champion-3 BV=8 proposal backed by delegate occupancy analysis",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "69-75",
+      "claim": "BV=128 was shared foundation of all Round 1 proposals; SMEM binding limits all to 1 block/SM",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "6-7",
+      "claim": "Round 2 pivoted to GEMM after GDN exhausted in Round 1",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "197-202",
+      "claim": "No dispatch configuration satisfies both kill criteria simultaneously",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_3/round_1/champion-3_critique_champion-1.md",
+      "line_range": "39-45",
+      "claim": "Champion-3 correctly identified SiLU elimination as illusory under CUDA graphs",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "124-126",
+      "claim": "Translation factor 0.33 matches op004's 0.37, establishing fundamental ceiling",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "155-161",
+      "claim": "Validator E2E at BS=1: 6.495s, -72ms (1.1%)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "155-161",
+      "claim": "Validator E2E at BS=8: 7.732s, -122ms (1.6%)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "155-161",
+      "claim": "Validator E2E at BS=32: 10.136s, -150ms (1.46%)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "77-83",
+      "claim": "Op006 E2E at BS=1: 6488ms, -79ms (1.20%)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "77-83",
+      "claim": "Op006 E2E at BS=8: 7737ms, -117ms (1.49%)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "77-83",
+      "claim": "Op006 E2E at BS=32: 10218ms, -68ms (0.66%), fails 1.0% threshold",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op001_persistent_cta/validation_results.md",
+      "line_range": "72-92",
+      "claim": "BV=128 occupancy regression: 25% -> 16.7%, 33% fewer concurrent warps",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op004_triton_gemm/validation_results.md",
+      "line_range": "110-127",
+      "claim": "Warm-cache regressions on down_proj and in_proj_qkvz reduce production speedup",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op006_bv8_recurrent/validation_results.md",
+      "line_range": "110-116",
+      "claim": "BV=8 tradeoff: wave count penalty dominates at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_splitk_gemm/validation_results.md",
+      "line_range": "23-24",
+      "claim": "Split-K fixes warm regression but not E2E due to production cache state",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "118-126",
+      "claim": "Translation factor 0.33 matches op004's 0.37",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "214-221",
+      "claim": "1.4-1.5% E2E ceiling for GEMM validated across 3 independent attempts",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "224-231",
+      "claim": "GDN kernel exceeds HBM peak via L2, leaving <5% headroom",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "66-69",
+      "claim": "Triton confirmed to beat cuBLAS by two independent champions with reproducible evidence",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "69-76",
+      "claim": "Op004 failed kill criterion: E2E 1.4% vs 2.0% threshold",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.52 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/op007_selective_silu_gemm/validation_results.md",
+      "line_range": "112-114",
+      "claim": "SiLU fusion negligible: intermediate fits L2, saves <50 us/step",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/delegate_work/delegate-1a_proactive_summary.md",
+      "line_range": "64-77",
+      "claim": "Multi-layer kernel identified as highest potential but never pursued",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.39 (threshold=0.70)"
+      ]
+    }
+  ]
+}

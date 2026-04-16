@@ -1,0 +1,701 @@
+{
+  "run_idx": 10,
+  "model": "Qwen3.5-4B",
+  "hardware": "L40S",
+  "dtype": "BF16",
+  "tp": 1,
+  "skill_version": "refactored",
+  "slug": "99a0fbed6_refactored-skill-by-simplifying-campaign",
+  "mined_at": "2026-04-15T23:45:00Z",
+  "has_monitor_logs": false,
+
+  "campaign_metrics": {
+    "overall_score": 3.79,
+    "overall_score_without_transcript": 3.18,
+    "e2e_outcome_score": 1.7,
+    "gate_pass_rate_score": 1.0,
+    "debate_quality_score": 8.5,
+    "campaign_efficiency_score": 4.0,
+    "transcript_quality_score": 7.25,
+    "cumulative_e2e_speedup": 1.0182,
+    "shipped_count": 2,
+    "total_rounds": 2,
+    "total_tracks": 5,
+    "tracks_passed": 2,
+    "tracks_failed": 3,
+    "campaign_status": "campaign_exhausted",
+    "total_agent_invocations": 24,
+    "total_proposals": 6,
+    "total_tokens": 342798,
+    "debate_wall_time_s": 2157.5,
+    "impl_wall_time_s": 2504.9,
+    "integration_wall_time_s": 37096.0,
+    "total_wall_time_s": 41758.4,
+    "citations": [
+      {
+        "file_path": "scorecard.json",
+        "line_start": 3,
+        "line_end": 4,
+        "claim": "Overall score was 3.79, dropping to 3.18 without transcript quality component",
+        "quoted_content": "\"overall_score\": 3.79,\n  \"overall_score_without_transcript\": 3.18,"
+      },
+      {
+        "file_path": "scorecard.json",
+        "line_start": 11,
+        "line_end": 14,
+        "claim": "Cumulative speedup 1.0182x with 2 shipped optimizations across 2 rounds",
+        "quoted_content": "\"cumulative_speedup\": 1.0182,\n        \"shipped_count\": 2,\n        \"speedup_tier\": \"exhausted_shipped (>=1.02x \u00d7 0.6)\",\n        \"base_score\": 1.2,"
+      },
+      {
+        "file_path": "scorecard.json",
+        "line_start": 98,
+        "line_end": 109,
+        "claim": "Campaign efficiency: 60% failed implementation ratio (3/5 tracks), 4.0 penalty applied, campaign did not converge",
+        "quoted_content": "\"rounds_to_completion\": 2,\n        \"rounds_base_score\": 8.0,\n        \"total_impl_tracks\": 5,\n        \"failed_impl_tracks\": 3,\n        \"failed_implementation_ratio\": 0.6,\n        \"fail_penalty\": 4.0,\n        \"campaign_converged\": false,\n        \"convergence_bonus\": 0.0"
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 69,
+        "line_end": 69,
+        "claim": "Campaign status was campaign_exhausted after 2 rounds",
+        "quoted_content": "\"status\": \"campaign_exhausted\""
+      }
+    ]
+  },
+
+  "anti_patterns": [
+    {
+      "pattern_id": "cold_to_production_overestimation",
+      "description": "Champion-3 OP-001 and debate summary projected 4.0-5.3% E2E improvement from 1.063x cold-cache kernel speedup. OP-001v2 (which fixed the torch.compile integration failure) measured only 0.82% mean E2E improvement in a same-session paired A/B sweep. The ratio 5.3/0.82 = 6.5x far exceeds the 2x threshold. The overestimation arose from projecting all 7 GEMM shapes would use Triton; in production the highest-frequency shape (K=2560, N=12288, 24 calls/step) consistently fell back to CUTLASS.",
+      "deduction": -1.0,
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 22,
+          "line_end": 26,
+          "claim": "Debate judge accepted 4.0-5.3% E2E projection for OP-001 based solely on cold-cache 1.063x kernel speedup",
+          "quoted_content": "- **Measured kernel speedup**: 1.063x (cold-cache, all 7 shapes improve, CUDA graph captured)\n- **Expected E2E**: 4.0-5.3% improvement\n- **Implementation**: ~230 LOC new Triton code, ~40 LOC integration"
+        },
+        {
+          "file_path": "tracks/OP-001v2/validation_results.md",
+          "line_start": 132,
+          "line_end": 140,
+          "claim": "Actual measured E2E improvement in paired A/B sweep: 0.82% mean, 6.5x below the 5.3% projected",
+          "quoted_content": "| Metric | Paired baseline (20 iters) | Optimized (20 iters) | Improvement (paired) |\n|--------|---------------------------|---------------------|---------------------|\n| Mean latency | 7.738 s | 7.675 s | 0.82% |\n| P10 | 7.737 s | 7.525 s | 2.74% |"
+        },
+        {
+          "file_path": "tracks/OP-001v2/validation_results.md",
+          "line_start": 101,
+          "line_end": 107,
+          "claim": "Primary GEMM shape (24 calls/step, largest contributor) fell back to CUTLASS, explaining the gap",
+          "quoted_content": "| GDN in_proj_qkvz | 8 | 2560 | 12288 | 24 | 130.7 | 132.1 | **CUTLASS (fallback)** |\n...\n**Critical observation**: The single most-called M=8 shape (K=2560, N=12288 -- GDN in_proj_qkvz, 24 instances/step) falls back to CUTLASS during production dispatch."
+        }
+      ]
+    }
+  ],
+
+  "debate_quality_evidence": [
+    {
+      "aspect": "grounding_rate",
+      "value": 1.0,
+      "description": "All 6 proposals across 2 campaign rounds had grounded data -- 100% grounding rate with micro-experiments in every proposal.",
+      "citations": [
+        {
+          "file_path": "scorecard.json",
+          "line_start": 86,
+          "line_end": 95,
+          "claim": "6 total proposals with 100% grounding rate and 100% micro-experiment rate; filtering partially correct; component diversity achieved",
+          "quoted_content": "\"total_proposals\": 6,\n        \"grounding_rate\": 1.0,\n        \"grounding_points\": 3.0,\n        \"micro_experiment_rate\": 1.0,\n        \"micro_experiment_points\": 3.0,\n        \"filtering_correct\": false,\n        \"filtering_points\": 0.5,\n        \"component_diversity\": true,\n        \"diversity_points\": 2.0"
+        }
+      ]
+    },
+    {
+      "aspect": "debate_scoring_fidelity",
+      "value": null,
+      "description": "Round 1 debate selected OP-001 (Champion-3 Triton GEMM, 7.50) over Champion-1 (5.25) via same-component tiebreak. Champion-2 (GDN fused, 7.65) selected as orthogonal complement. The same-component rule forced one GEMM champion to be eliminated despite both having micro-experiment data.",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 5,
+          "line_end": 14,
+          "claim": "Champion-1 scored 5.25, Champion-2 scored 7.65, Champion-3 scored 7.50; two GEMM champions competing, tiebreak eliminates lower scorer",
+          "quoted_content": "| Custom kernel gate | PASS | PASS | PASS |\n| Proposal quality (15%) | 7/10 | 8/10 | 9/10 |\n| Feasibility evidence (25%) | 6/10 | 9/10 | 8/10 |\n| E2E impact potential (20%) | 5/10 | 4/10 | 8/10 |\n| Survived critiques (25%) | 4/10 | 8/10 | 7/10 |\n| Implementation complexity (10%) | 7/10 | 9/10 | 8/10 |\n| Complementarity (5%) | 0/10 | 10/10 | 0/10 |\n| **Weighted Total** | **5.25** | **7.65** | **7.50** |"
+        }
+      ]
+    },
+    {
+      "aspect": "filtering_failure",
+      "value": false,
+      "description": "Debate filtering scored as partially incorrect (0.5/2 pts). Debate accepted OP-001 with 4.0-5.3% E2E projection that proved to be a 6.5x overestimate. Combined projected E2E was ~6.0% but actual total shipped was 1.82%.",
+      "citations": [
+        {
+          "file_path": "debate/summary.md",
+          "line_start": 63,
+          "line_end": 66,
+          "claim": "Combined projected E2E impact was ~6.0% (GEMM 5.3% + GDN 0.75%) vs actual 1.82% cumulative",
+          "quoted_content": "If both optimizations ship: ~5.3% (GEMM) + ~0.75% (GDN) = **~6.0% total E2E improvement** (multiplicative: 1.053 \u00d7 1.0075 = 1.061x)"
+        }
+      ]
+    },
+    {
+      "aspect": "round2_sub_threshold_candidates",
+      "value": null,
+      "description": "Round 2 debate correctly identified all candidates were below the 3% diminishing returns threshold individually. OP-003 scored 5.95 (GDN inter-GEMM fusion, ~1.55% f_decode), OP-004 scored 5.60 (flash-decode hd=256, ~1.30% f_decode).",
+      "citations": [
+        {
+          "file_path": "debate/campaign_round_2/summary.md",
+          "line_start": 22,
+          "line_end": 36,
+          "claim": "Round 2 noted all candidates below 3% threshold; OP-003 and OP-004 queued to pending_queue",
+          "quoted_content": "**All candidates are below the 3% diminishing returns threshold individually.** No candidate can deliver meaningful standalone E2E improvement.\n\n### Queued for pending_queue (conditional on re-profiling):\n\n1. **OP-003: GDN Inter-GEMM Fusion** (Champion-1, 5.95) \u2014 Targets ~1.55% f_decode across launch-overhead-dominated micro-kernels."
+        }
+      ]
+    }
+  ],
+
+  "bottleneck_profile": {
+    "top_component": "GEMM (CUTLASS WMMA)",
+    "top_share_pct": 89.0,
+    "bw_utilization_pct": 69.5,
+    "physical_speedup_ceiling": 1.44,
+    "model_architecture_notes": "Qwen3.5-4B uses GDN (Gated Delta Network) with 24 linear attention layers + 8 full attention layers. Decode is M=8 BW-bound. 585 kernel launches/step.",
+    "citations": [
+      {
+        "file_path": "bottleneck_analysis.md",
+        "line_start": 43,
+        "line_end": 54,
+        "claim": "GEMM dominates at 89.0% of GPU time; GDN recurrent at 4.9%; FlashAttention at 1.2%",
+        "quoted_content": "| **GEMM (all CUTLASS + cuBLAS)** | **89.0%** | **13,315** | **34,087** |\n| GDN Recurrent | 4.9% | 737 | 1,886 |\n| FlashAttention (incl. combine) | 1.2% | 183 | 468 |"
+      },
+      {
+        "file_path": "bottleneck_analysis.md",
+        "line_start": 79,
+        "line_end": 87,
+        "claim": "Measured BW utilization 69.5% with 1.44x physical ceiling; 8.0 GB GEMM weight per decode step",
+        "quoted_content": "| Total GEMM weight bytes per decode step | ~8.0 GB |\n| BW-bound floor (864 GB/s) | 9,260 us |\n| Observed GEMM per decode step | 13,315 us |\n| **Measured BW utilization** | **69.5%** |\n| Physical speedup ceiling (at 100% BW) | 1.44x |"
+      }
+    ]
+  },
+
+  "hallucinated_data": [
+    {
+      "description": "bottleneck_analysis.md Section 2 lists GDN in_proj_ba as K=2560, N=8192, Weight=40 MB. Actual production shape is K=2560, N=64 (weight=320 KB). Error is 128x in N dimension. Propagated to Champion-1 and Champion-3 proposals.",
+      "citations": [
+        {
+          "file_path": "bottleneck_analysis.md",
+          "line_start": 96,
+          "line_end": 101,
+          "claim": "bottleneck_analysis.md incorrectly lists GDN in_proj_ba with N=8192, K=2560, Weight=40 MB",
+          "quoted_content": "| GDN in_proj_ba | 24 | 2560 | 8192 | 24 | 40.0 | 48.7 ea |"
+        },
+        {
+          "file_path": "debate/delegate_work/delegate-1a_gemm_research.md",
+          "line_start": 52,
+          "line_end": 68,
+          "claim": "Delegate-1a discovered actual shape K=2560, N=64 from source code; bottleneck_analysis shape wrong by 128x in N",
+          "quoted_content": "**The bottleneck_analysis.md has an incorrect shape for in_proj_ba.**\n\nFrom source code `qwen3_next.py:415-420`:\n```python\nself.in_proj_ba = MergedColumnParallelLinear(\n    input_size=self.hidden_size,       # K = 2560\n    output_sizes=[self.num_v_heads] * 2,  # [32, 32] \u2192 total N = 64"
+        }
+      ]
+    },
+    {
+      "description": "Champion-3 proposal reports 1.037x cold-cache speedup for 'GDN in_proj_ba (K=2560, N=8192)' -- a kernel shape that does not exist in production decode. Contributed to the weighted 1.063x aggregate speedup.",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-3_proposal.md",
+          "line_start": 55,
+          "line_end": 63,
+          "claim": "Champion-3 reported 1.037x speedup for GDN in_proj_ba at N=8192 -- a production shape that does not exist",
+          "quoted_content": "| GDN in_proj_ba | 24 | 88.9 | 85.7 | 1.037x | 54.6% | 56.6% |"
+        }
+      ]
+    },
+    {
+      "description": "Champion-1 proposal lists GDN in_proj_ba K=2560, N=8192 with 1.049x speedup from same non-existent shape. Corrected in argument via delegate-1a but proposal micro-experiment data was never re-run.",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-1_proposal.md",
+          "line_start": 33,
+          "line_end": 38,
+          "claim": "Champion-1 reported 1.049x speedup for GDN in_proj_ba at N=8192 in proposal micro-experiment",
+          "quoted_content": "| GDN in_proj_ba | 48.5 us | 89.0 us | 84.9 us | **1.049x** | 54.5% | 57.2% |"
+        }
+      ]
+    }
+  ],
+
+  "wasted_retries": [
+    {
+      "description": "OP-001 E2E sweep run with --labels opt only, leaving no valid paired baseline. The baseline run failed (returncode=1).",
+      "citations": [
+        {
+          "file_path": "tracks/OP-001/validation_results.md",
+          "line_start": 113,
+          "line_end": 118,
+          "claim": "OP-001 baseline E2E run failed; sweep was opt-only, no paired comparison",
+          "quoted_content": "### Failure 2: No valid paired baseline measurement\n\nThe E2E sweep was run with `--labels opt` (optimized only). The baseline run in the sweep **failed** (`returncode=1`, `ok=null`, `metrics={}`)."
+        }
+      ]
+    },
+    {
+      "description": "OP-003 required 4 separate E2E measurement runs to resolve an Amdahl violation. Gate 5.2 isolated benchmarks underestimated production component share (f=0.88% isolated vs f=1.35% nsys production).",
+      "citations": [
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 150,
+          "line_end": 157,
+          "claim": "Amdahl violation triggered: 0.92% measured vs 0.59% expected max; ratio 2.33x exceeds 1.5x threshold",
+          "quoted_content": "**FLAG: Amdahl violation: claimed 0.92% but expected max 0.59% (Gate 5.2: f_split=0.00880 s=1.71x, f_norm=0.00530 s=1.06x; expected_e2e=0.395%; 0.395%x1.5=0.593%). Possible cross-track contamination or measurement error. Investigate before proceeding.**"
+        },
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 238,
+          "line_end": 248,
+          "claim": "Root cause: isolated benchmark underestimates production copy kernel time by 2.2x",
+          "quoted_content": "| Component | Gate 5.2 isolated (us/step) | nsys production (us/step) | Ratio |\n|-----------|---------------------------|--------------------------|-------|\n| Eliminated copies (72/step) | 54.6 | 120.7 | 2.2x |"
+        }
+      ]
+    },
+    {
+      "description": "OP-004 ran E2E sweep with broken dispatch before the CUDA graph constexpr freeze bug was identified.",
+      "citations": [
+        {
+          "file_path": "state.json",
+          "line_start": 173,
+          "line_end": 182,
+          "claim": "OP-004 failed with CUDA graph constexpr bug; weighted kernel speedup 0.90x (regression)",
+          "quoted_content": "\"OP-004\": {\n  \"status\": \"fail\",\n  \"correctness\": \"fail\",\n  \"kernel_speedup\": 0.9,\n  \"e2e_note\": \"FAIL: CUDA graph constexpr bug (MAX_NUM_KV_ITERS=1 during capture). Weighted kernel speedup 0.90x (regression). Even with bug fix, kernel too slow.\""
+        }
+      ]
+    }
+  ],
+
+  "off_track_reasoning": [
+    {
+      "description": "Champion-2 Round 2 (OP-004 flash-decode for head_dim=256) projected 1.48x component speedup without a working prototype kernel. The implemented kernel achieved only 0.90x weighted speedup (10% regression) and failed correctness under CUDA graphs.",
+      "citations": [
+        {
+          "file_path": "debate/campaign_round_2/summary.md",
+          "line_start": 20,
+          "line_end": 28,
+          "claim": "Debate summary selected OP-004 based on 1.30% f_decode target with no prototype kernel speedup measurement",
+          "quoted_content": "2. **OP-004: Custom Flash-Decode hd=256** (Champion-2, 5.60) \u2014 Targets ~1.30% f_decode. Technically interesting (single-pass softmax, fused output gate). Higher complexity."
+        },
+        {
+          "file_path": "tracks/OP-004/validation_results.md",
+          "line_start": 86,
+          "line_end": 96,
+          "claim": "Kernel regressed at medium-long sequences: weighted speedup 0.90x, not the projected 1.48x",
+          "quoted_content": "| seq_len | Baseline (us) | Custom (us) | Speedup | Status |\n|---------|--------------|------------|---------|--------|\n| 65 | 16.3 | 9.8 | 1.65x | PASS |\n| 128 | 16.3 | 11.2 | 1.45x | PASS |\n| 256 | 17.5 | 19.1 | 0.92x | REGR |\n| 320 | 21.8 | 23.1 | 0.94x | REGR |\n| 576 | 24.8 | 39.0 | 0.64x | REGR |\n\n**Weighted speedup: 0.90x (10% regression)**"
+        }
+      ]
+    }
+  ],
+
+  "track_outcomes": [
+    {
+      "op_id": "OP-001",
+      "campaign_round": 1,
+      "champion": "champion-3",
+      "target": "GEMM (89%)",
+      "technique": "Triton autotuned GEMM for M=8 decode",
+      "status": "fail",
+      "correctness": "pass",
+      "kernel_speedup": 1.032,
+      "e2e_speedup": null,
+      "failure_reason": "torch.compile bypasses dispatch point; Triton GEMM never executes for target decode shapes under production parity",
+      "citations": [
+        {
+          "file_path": "tracks/OP-001/validation_results.md",
+          "line_start": 100,
+          "line_end": 112,
+          "claim": "Gate 5.3 FAIL: torch.compile with custom_ops: ['none'] traces through F.linear, bypassing dispatch_unquantized_gemm",
+          "quoted_content": "**Root cause**: vLLM uses `torch.compile` with `custom_ops: ['none']` (production default). This means torch.compile traces through ALL custom ops, including `torch.nn.functional.linear`. The inductor compiler fuses the linear operations into compiled CUDA kernels, bypassing `default_unquantized_gemm()` entirely"
+        }
+      ]
+    },
+    {
+      "op_id": "OP-002",
+      "campaign_round": 1,
+      "champion": "champion-2",
+      "target": "GDN recurrent+gating (5.1%)",
+      "technique": "BV=8 + gating fusion in Triton GDN kernel",
+      "status": "pass",
+      "correctness": "pass",
+      "kernel_speedup": 1.29,
+      "e2e_speedup": 1.0094,
+      "e2e_improvement_pct": 0.94,
+      "failure_reason": null,
+      "citations": [
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 109,
+          "line_end": 120,
+          "claim": "Same-session paired A/B: baseline 7.737s, opt 7.664s, 0.94% improvement; Amdahl ratio 0.81x",
+          "quoted_content": "| baseline | 7.737 | 7.738 | 7.736 | 7.740 | (none) |\n| **opt** | **7.664** | **7.665** | **7.663** | **7.667** | VLLM_GDN_BV8=1 |\n\n| Metric | Value |\n|--------|-------|\n| **Same-session improvement (avg)** | **0.94%** |"
+        }
+      ]
+    },
+    {
+      "op_id": "OP-003",
+      "campaign_round": 2,
+      "champion": "R2-champion-1",
+      "target": "GDN inter-GEMM ops (conv1d+copies+gating, RMSNormGated)",
+      "technique": "Fused GDN pre-recurrent + post-recurrent Triton kernels",
+      "status": "pass",
+      "correctness": "pass",
+      "kernel_speedup": 2.6,
+      "e2e_speedup": 1.0087,
+      "e2e_improvement_pct": 0.92,
+      "failure_reason": null,
+      "citations": [
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 134,
+          "line_end": 147,
+          "claim": "Paired A/B v3: baseline 7.739s, opt 7.668s, 0.92% improvement; reproduced in v4 (fresh cache) at 0.85%",
+          "quoted_content": "| Metric | Baseline (flag OFF) | Optimized (flag ON) |\n|--------|--------------------|--------------------|\\n| Avg latency | 7.739 s | 7.668 s |"
+        }
+      ]
+    },
+    {
+      "op_id": "OP-004",
+      "campaign_round": 2,
+      "champion": "R2-champion-2",
+      "target": "FlashAttention decode (8/32 layers)",
+      "technique": "Custom Triton flash-decoding for head_dim=256 + fused output gate",
+      "status": "fail",
+      "correctness": "fail",
+      "kernel_speedup": 0.9,
+      "e2e_speedup": null,
+      "failure_reason": "CUDA graph constexpr bug (MAX_NUM_KV_ITERS=1 during capture) + weighted kernel regression (0.90x)",
+      "citations": [
+        {
+          "file_path": "tracks/OP-004/validation_results.md",
+          "line_start": 30,
+          "line_end": 38,
+          "claim": "CUDA graph constexpr freeze: MAX_NUM_KV_ITERS frozen at 1, kernel only reads first 64 tokens",
+          "quoted_content": "The Triton kernel parameter `MAX_NUM_KV_ITERS` is a `tl.constexpr` (compile-time constant). During CUDA graph capture, `attn_metadata.max_seq_len = 1` (capture uses dummy metadata), so `MAX_NUM_KV_ITERS = ceil(1/64) = 1`."
+        }
+      ]
+    },
+    {
+      "op_id": "OP-001v2",
+      "campaign_round": 2,
+      "champion": "champion-3 (revised)",
+      "target": "GEMM (89%)",
+      "technique": "Triton GEMM via torch.compile-safe custom op dispatch",
+      "status": "fail",
+      "correctness": "pass",
+      "kernel_speedup": 1.025,
+      "e2e_speedup": 1.008,
+      "e2e_improvement_pct": 0.82,
+      "failure_reason": "Kernel not fast enough; primary shape K=2560,N=12288 falls back to CUTLASS; 0.82% mean below 2% threshold",
+      "citations": [
+        {
+          "file_path": "tracks/OP-001v2/validation_results.md",
+          "line_start": 170,
+          "line_end": 179,
+          "claim": "Primary shape CUTLASS fallback: K=2560,N=12288 (24/step) probes slower for Triton",
+          "quoted_content": "| GDN in_proj_qkvz | 8 | 2560 | 12288 | 24 | 130.7 | 132.1 | **CUTLASS (fallback)** |"
+        }
+      ]
+    }
+  ],
+
+  "delegation_evidence": {
+    "enabled": true,
+    "delegates_per_champion": 1,
+    "total_delegates_spawned": 3,
+    "delegate_artifacts_count": 12,
+    "delegate_citation_rate": 0.0,
+    "counterfactual_quality_delta": "moderate_positive",
+    "causality_chains": [
+      {
+        "delegate": "delegate-1a",
+        "finding": "in_proj_ba has actual shape N=64 (not N=8192); weight=320 KB not 40 MB; overhead-dominated not BW-bound (15.5 us vs 0.36 us BW floor = 43x overhead)",
+        "impact": "Champion-1 incorporated correction in Round 1 argument Section 2A, restructuring selective dispatch focus",
+        "bonus": 0.5,
+        "citations": [
+          {
+            "file_path": "debate/delegate_work/delegate-1a_gemm_research.md",
+            "line_start": 52,
+            "line_end": 68,
+            "claim": "Delegate-1a discovered in_proj_ba actual shape N=64 from source code",
+            "quoted_content": "**The bottleneck_analysis.md has an incorrect shape for in_proj_ba.**\n\nFrom source code `qwen3_next.py:415-420`:\n```python\nself.in_proj_ba = MergedColumnParallelLinear(\n    input_size=self.hidden_size,       # K = 2560\n    output_sizes=[self.num_v_heads] * 2,  # [32, 32] \u2192 total N = 64"
+          },
+          {
+            "file_path": "debate/round_1/champion-1_argument.md",
+            "line_start": 9,
+            "line_end": 22,
+            "claim": "Champion-1 cited delegate finding and corrected shape",
+            "quoted_content": "### 2A. Corrected Shape Analysis (Critical Correction)\n\nCodebase verification by delegate-1a [Source: `debate/delegate_work/delegate-1a_gemm_research.md`] reveals that **`in_proj_ba` has N=64, NOT N=8192**"
+          }
+        ]
+      },
+      {
+        "delegate": "delegate-1a (Round 2)",
+        "finding": "GDN inter-GEMM analysis: custom op boundary is hard torch.compile barrier; per-kernel overhead ratios quantified",
+        "impact": "Champion-1 R2 cited as primary justification for OP-003. OP-003 shipped with 0.87% E2E improvement.",
+        "bonus": 0.5,
+        "citations": [
+          {
+            "file_path": "debate/campaign_round_2/delegate_work/delegate-1a_gdn_inter_gemm_analysis.md",
+            "line_start": 1,
+            "line_end": 5,
+            "claim": "Delegate-1a R2 produced GDN inter-GEMM analysis",
+            "quoted_content": "# Delegate Research Report: GDN Inter-GEMM Analysis\n\n**Delegate**: delegate-1a\n**Champion**: champion-1 (Round 2)"
+          },
+          {
+            "file_path": "debate/campaign_round_2/proposals/champion-1_proposal.md",
+            "line_start": 34,
+            "line_end": 36,
+            "claim": "Champion-1 R2 cited delegate-1a analysis in proposal",
+            "quoted_content": "[Source: delegate-1a analysis, debate/campaign_round_2/delegate_work/delegate-1a_gdn_inter_gemm_analysis.md]"
+          }
+        ]
+      },
+      {
+        "delegate": "delegate-3a",
+        "finding": "Wave quantization: CUTLASS grid (4,1,1) for out_proj = 4 blocks for 142 SMs (2.8% utilization); MLP down_proj (8,20,1) = 56.3%",
+        "impact": "Champion-3 cited to explain shape-differentiated speedups, strengthening critique survival (7/10)",
+        "bonus": 0.5,
+        "citations": [
+          {
+            "file_path": "debate/delegate_work/delegate-3a_research.md",
+            "line_start": 40,
+            "line_end": 52,
+            "claim": "Delegate-3a produced wave quantization table with per-shape SM utilization",
+            "quoted_content": "| Grid Config | Total Blocks | L40S SMs | Waves | Effective SM Util |\n|-------------|-------------|----------|-------|---------|\n| (8, 20, 1) \u2014 MLP down_proj | 160 | 142 | 2 | **56.3%** |\n| (4, 1, 1) \u2014 GDN/attn out_proj | 4 | 142 | 1 | **2.8%** |"
+          }
+        ]
+      }
+    ],
+    "delegation_failures": [
+      {
+        "description": "Delegate-1a incorrectly claimed dispatch_unquantized_gemm hook 'bypasses torch.compile entirely'. In production, torch.compile traces through F.linear. Directly caused OP-001 Gate 5.3 failure.",
+        "citations": [
+          {
+            "file_path": "debate/delegate_work/delegate-1a_dimension_verification.md",
+            "line_start": 117,
+            "line_end": 121,
+            "claim": "Delegate-1a incorrectly stated dispatch hook bypasses torch.compile",
+            "quoted_content": "1. **Default case (CUTLASS WMMA)**: A custom Triton GEMV/split-K kernel bypasses torch.compile entirely via `dispatch_unquantized_gemm()` hook \u2014 operates in both modes."
+          },
+          {
+            "file_path": "tracks/OP-001/validation_results.md",
+            "line_start": 104,
+            "line_end": 112,
+            "claim": "Production shows dispatch hook is never reached; torch.compile fuses through F.linear",
+            "quoted_content": "**Root cause**: vLLM uses `torch.compile` with `custom_ops: ['none']` (production default). This means torch.compile traces through ALL custom ops, including `torch.nn.functional.linear`."
+          }
+        ]
+      }
+    ],
+    "delegation_efficiency_issues": [
+      {
+        "description": "Delegate-1a and delegate-3a both independently researched CUTLASS WMMA kernel identity, grid analysis, and per-shape roofline for the same decode GEMM target with same hardware constants.",
+        "citations": [
+          {
+            "file_path": "debate/delegate_work/delegate-1a_dimension_verification.md",
+            "line_start": 64,
+            "line_end": 78,
+            "claim": "Delegate-1a produced CUTLASS kernel trace and grid analysis, overlapping delegate-3a",
+            "quoted_content": "### Task 2: Production GEMM Kernel Identity\n\n### Authoritative Answer: CUTLASS WMMA (Confirmed from nsys CSV)"
+          },
+          {
+            "file_path": "debate/delegate_work/delegate-3a_research.md",
+            "line_start": 1,
+            "line_end": 18,
+            "claim": "Delegate-3a produced overlapping CUTLASS WMMA analysis",
+            "quoted_content": "## Task 1: CUTLASS WMMA Kernel Analysis \u2014 Per-Shape Roofline\n\n### Hardware Constants\n- Peak BW: 864 GB/s\n- Peak BF16 Compute: 366 TFLOPS\n- **Breakeven AI = 366e12 / 864e9 = 423.6 FLOP/byte**"
+          }
+        ]
+      }
+    ],
+    "delegation_utilization_failures": [
+      {
+        "description": "Champion-3 never corrected GDN in_proj_ba shape error (N=8192) despite delegate-1a report being available in shared delegate_work/ directory.",
+        "citations": [
+          {
+            "file_path": "debate/round_1/champion-3_argument.md",
+            "line_start": 17,
+            "line_end": 28,
+            "claim": "Champion-3 argument still uses N=8192 for in_proj_ba, ignoring delegate correction",
+            "quoted_content": "| GDN in_proj_ba (K=2560, N=8192) | 24 | 88.9 | 85.7 | 1.037x | 54.6% \u2192 56.6% |"
+          }
+        ]
+      }
+    ]
+  },
+
+  "verified_e2e_measurements": [
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 7.737,
+      "optimized_e2e_s": 7.664,
+      "delta_pct": 0.94,
+      "technique": "OP-002: GDN BV=8 + inline gating fusion",
+      "methodology": "Same-session paired A/B, 20 iters each, CUDA graphs + torch.compile",
+      "amdahl_consistent": true,
+      "citations": [
+        {
+          "file_path": "tracks/OP-002/validation_results.md",
+          "line_start": 109,
+          "line_end": 134,
+          "claim": "OP-002 delivered 0.94% E2E with 0.81x Amdahl ratio (below 1.16% ceiling)",
+          "quoted_content": "| **Same-session improvement (avg)** | **0.94%** |\n| **Speedup** | **1.0095x** |\n...\nRatio = 0.94 / 1.16 = 0.81x (BELOW ceiling)"
+        }
+      ]
+    },
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 7.739,
+      "optimized_e2e_s": 7.668,
+      "delta_pct": 0.92,
+      "technique": "OP-003: Fused GDN inter-GEMM Triton kernels",
+      "methodology": "Paired A/B v3, 20 iters each; reproduced v4 (fresh cache) at 0.85%",
+      "amdahl_consistent": true,
+      "citations": [
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 219,
+          "line_end": 232,
+          "claim": "OP-003 reproduced across compile cache states: v3=0.92%, v4=0.85%; Amdahl resolved via nsys f_production=1.35%",
+          "quoted_content": "| Run | Cache state | Baseline | Opt | Improvement | p-value |\n|-----|------------|----------|-----|-------------|---------|\\n| v3 | Cached | 7.739s | 7.668s | 0.921% | 1.1e-17 |\n| v4 | Fresh (cleared) | 7.735s | 7.669s | 0.848% | 3.8e-30 |"
+        }
+      ]
+    },
+    {
+      "batch_size": 8,
+      "baseline_e2e_s": 7.738,
+      "optimized_e2e_s": 7.675,
+      "delta_pct": 0.82,
+      "technique": "OP-001v2: Triton skinny GEMM via custom op (FAILED -- not shipped)",
+      "methodology": "Paired A/B, 20 iters each. Not shipped: 0.82% mean < 2% threshold.",
+      "amdahl_consistent": false,
+      "citations": [
+        {
+          "file_path": "tracks/OP-001v2/validation_results.md",
+          "line_start": 134,
+          "line_end": 140,
+          "claim": "OP-001v2 mean 0.82% with P50 2.73% exceeding Amdahl ceiling -- unexplained",
+          "quoted_content": "| Mean latency | 7.738 s | 7.675 s | 0.82% |\n| P10 | 7.737 s | 7.525 s | 2.74% |\n| P50 | 7.739 s | 7.528 s | 2.73% |"
+        }
+      ]
+    }
+  ],
+
+  "torch_compile_interactions": [
+    {
+      "description": "OP-001 FAIL: torch.compile with custom_ops: ['none'] traces through F.linear, bypassing GEMM dispatch hook entirely for decode shapes.",
+      "citations": [
+        {
+          "file_path": "tracks/OP-001/validation_results.md",
+          "line_start": 100,
+          "line_end": 112,
+          "claim": "torch.compile fusion through F.linear prevents dispatch hook from executing",
+          "quoted_content": "vLLM uses `torch.compile` with `custom_ops: ['none']` (production default). This means torch.compile traces through ALL custom ops, including `torch.nn.functional.linear`."
+        }
+      ]
+    },
+    {
+      "description": "OP-001v2 FIX: Registered cuda_unquantized_gemm as opaque custom op via direct_register_custom_op(). Integration fix works (38 shapes probed vs 0 for OP-001) but kernel not fast enough.",
+      "citations": [
+        {
+          "file_path": "tracks/OP-001v2/validation_results.md",
+          "line_start": 24,
+          "line_end": 30,
+          "claim": "Opaque custom op registration makes GEMM dispatch survive torch.compile",
+          "quoted_content": "Register a `torch.ops.vllm.cuda_unquantized_gemm` custom op via `direct_register_custom_op()`. This makes the entire GEMM dispatch opaque to torch.compile"
+        }
+      ]
+    },
+    {
+      "description": "OP-003 SURPRISE: torch.compile graph restructuring produced non-deterministic kernel redistribution when copy kernels removed. Net 0.92% improvement includes inductor recompilation side effects.",
+      "citations": [
+        {
+          "file_path": "tracks/OP-003/validation_results.md",
+          "line_start": 196,
+          "line_end": 208,
+          "claim": "torch.compile generated different Triton kernel compositions: 6 removed, 3 added, 5 increased",
+          "quoted_content": "- 6 Triton kernels exist ONLY in baseline (306.72 ms total, removed)\n- 3 Triton kernels exist ONLY in opt (121.63 ms total, added)\n- Several common kernels show INCREASED time in opt"
+        }
+      ]
+    },
+    {
+      "description": "OP-004 FAIL: Triton constexpr parameter frozen at CUDA graph capture time with dummy metadata. Produces incorrect output for seq_len > 64.",
+      "citations": [
+        {
+          "file_path": "tracks/OP-004/validation_results.md",
+          "line_start": 160,
+          "line_end": 170,
+          "claim": "Architectural mismatch: vLLM pipeline requires static shapes per captured graph, Triton constexpr freezes at capture time",
+          "quoted_content": "Both bugs stem from the same architectural mismatch: vLLM's production pipeline (torch.compile + CUDA graphs) requires kernels with **static shapes and fixed loop bounds** per captured graph."
+        }
+      ]
+    }
+  ],
+
+  "skill_version_evidence": {
+    "version": "refactored",
+    "git_commit": "99a0fbed6",
+    "key_changes": "Simplified campaign loop by merging campaign-loop.md into SKILL.md; merged Lead rules into SKILL.md; removed deprecated state.json fields (opportunity_attempts, status, verification_run); gate scoring changed from first-attempt pass rate to pure pass/fail; hook enforcement section added",
+    "citations": [
+      {
+        "file_path": "meta.json",
+        "line_start": 3,
+        "line_end": 4,
+        "claim": "Refactored skill version: simplified campaign loop, merged rules/ammo.md",
+        "quoted_content": "\"git_commit\": \"99a0fbed6\",\n  \"description\": \"refactored skill by simplifying campaign loop, merge in rules/ammo.md\","
+      }
+    ]
+  },
+
+  "gemm_intractability_evidence": {
+    "description": "GEMM (89% of decode time) proved intractable under torch.compile across all 3 attempts. OP-001 failed dispatch bypass. OP-001v2 fixed integration but primary shape falls back to CUTLASS. The 30.5% BW utilization gap remains unaddressed.",
+    "attempts": ["OP-001 (dispatch bypass)", "OP-001v2 (kernel not fast enough)", "Champion-3 R2 eliminated (below 5.0 threshold)"],
+    "citations": [
+      {
+        "file_path": "state.json",
+        "line_start": 224,
+        "line_end": 226,
+        "claim": "Campaign summary confirms GEMM intractability",
+        "quoted_content": "\"summary\": \"Campaign EXHAUSTED (threshold disabled). Shipped: OP-002 (0.94%) + OP-003 (0.87%). Cumulative: 1.0182x (1.8%). GEMM (89%) remains intractable: torch.compile integration works but kernel not fast enough.\""
+      },
+      {
+        "file_path": "bottleneck_analysis.md",
+        "line_start": 82,
+        "line_end": 88,
+        "claim": "30.5% BW gap root cause not diagnosed; would require ncu analysis",
+        "quoted_content": "The 30.5% BW gap is expected for small-M (M=8) GEMM: insufficient work to fully saturate memory bandwidth channels, plus tiling/padding overhead. The root cause of the gap has not been diagnosed -- ncu analysis would be needed"
+      }
+    ]
+  },
+
+  "cold_to_production_translation_factors": [
+    {
+      "op_id": "OP-002",
+      "cold_cache_kernel_speedup": 1.29,
+      "e2e_improvement_pct": 0.94,
+      "amdahl_ceiling_pct": 1.16,
+      "translation_ratio": 0.81,
+      "notes": "GDN kernel (state-machine, BW-bound) 0.81x ratio consistent"
+    },
+    {
+      "op_id": "OP-003",
+      "cold_cache_kernel_speedup": 1.71,
+      "e2e_improvement_pct": 0.92,
+      "amdahl_ceiling_pct": 1.34,
+      "translation_ratio": 0.95,
+      "notes": "Using corrected nsys f_production=1.35%. Copy kernel overhead 2.2x higher in production vs isolated."
+    },
+    {
+      "op_id": "OP-001v2",
+      "cold_cache_kernel_speedup": 1.025,
+      "e2e_improvement_pct": 0.82,
+      "amdahl_ceiling_pct": 1.31,
+      "translation_ratio": null,
+      "notes": "Not applicable -- primary shape falls back to CUTLASS. Effective kernel speedup ~1.01x, not 1.025x."
+    }
+  ]
+}

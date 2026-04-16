@@ -1,0 +1,335 @@
+{
+  "total": 48,
+  "passed": 35,
+  "failed": 13,
+  "failure_rate": 0.271,
+  "results": [
+    {
+      "file_path": "scorecard.json",
+      "line_range": "3-4",
+      "claim": "Overall score was 3.79, dropping to 3.18 without transcript quality component",
+      "verified": false,
+      "errors": [
+        "file_not_found: scorecard.json"
+      ]
+    },
+    {
+      "file_path": "scorecard.json",
+      "line_range": "11-14",
+      "claim": "Cumulative speedup 1.0182x with 2 shipped optimizations across 2 rounds",
+      "verified": false,
+      "errors": [
+        "file_not_found: scorecard.json"
+      ]
+    },
+    {
+      "file_path": "scorecard.json",
+      "line_range": "98-109",
+      "claim": "Campaign efficiency: 60% failed implementation ratio (3/5 tracks), 4.0 penalty applied, campaign did not converge",
+      "verified": false,
+      "errors": [
+        "file_not_found: scorecard.json"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "69-69",
+      "claim": "Campaign status was campaign_exhausted after 2 rounds",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "22-26",
+      "claim": "Debate judge accepted 4.0-5.3% E2E projection for OP-001 based solely on cold-cache 1.063x kernel speedup",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001v2/validation_results.md",
+      "line_range": "132-140",
+      "claim": "Actual measured E2E improvement in paired A/B sweep: 0.82% mean, 6.5x below the 5.3% projected",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001v2/validation_results.md",
+      "line_range": "101-107",
+      "claim": "Primary GEMM shape (24 calls/step, largest contributor) fell back to CUTLASS, explaining the gap",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.38 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "scorecard.json",
+      "line_range": "86-95",
+      "claim": "6 total proposals with 100% grounding rate and 100% micro-experiment rate; filtering partially correct; component diversity achieved",
+      "verified": false,
+      "errors": [
+        "file_not_found: scorecard.json"
+      ]
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "5-14",
+      "claim": "Champion-1 scored 5.25, Champion-2 scored 7.65, Champion-3 scored 7.50; two GEMM champions competing, tiebreak eliminates lower scorer",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "63-66",
+      "claim": "Combined projected E2E impact was ~6.0% (GEMM 5.3% + GDN 0.75%) vs actual 1.82% cumulative",
+      "verified": false,
+      "errors": [
+        "line_range_exceeds_file: 63-66 but file has 65 lines"
+      ]
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "22-36",
+      "claim": "Round 2 noted all candidates below 3% threshold; OP-003 and OP-004 queued to pending_queue",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "43-54",
+      "claim": "GEMM dominates at 89.0% of GPU time; GDN recurrent at 4.9%; FlashAttention at 1.2%",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "79-87",
+      "claim": "Measured BW utilization 69.5% with 1.44x physical ceiling; 8.0 GB GEMM weight per decode step",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "96-101",
+      "claim": "bottleneck_analysis.md incorrectly lists GDN in_proj_ba with N=8192, K=2560, Weight=40 MB",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_gemm_research.md",
+      "line_range": "52-68",
+      "claim": "Delegate-1a discovered actual shape K=2560, N=64 from source code; bottleneck_analysis shape wrong by 128x in N",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "55-63",
+      "claim": "Champion-3 reported 1.037x speedup for GDN in_proj_ba at N=8192 -- a production shape that does not exist",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "33-38",
+      "claim": "Champion-1 reported 1.049x speedup for GDN in_proj_ba at N=8192 in proposal micro-experiment",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.45 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/OP-001/validation_results.md",
+      "line_range": "113-118",
+      "claim": "OP-001 baseline E2E run failed; sweep was opt-only, no paired comparison",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "150-157",
+      "claim": "Amdahl violation triggered: 0.92% measured vs 0.59% expected max; ratio 2.33x exceeds 1.5x threshold",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "238-248",
+      "claim": "Root cause: isolated benchmark underestimates production copy kernel time by 2.2x",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "173-182",
+      "claim": "OP-004 failed with CUDA graph constexpr bug; weighted kernel speedup 0.90x (regression)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.49 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/campaign_round_2/summary.md",
+      "line_range": "20-28",
+      "claim": "Debate summary selected OP-004 based on 1.30% f_decode target with no prototype kernel speedup measurement",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-004/validation_results.md",
+      "line_range": "86-96",
+      "claim": "Kernel regressed at medium-long sequences: weighted speedup 0.90x, not the projected 1.48x",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001/validation_results.md",
+      "line_range": "100-112",
+      "claim": "Gate 5.3 FAIL: torch.compile with custom_ops: ['none'] traces through F.linear, bypassing dispatch_unquantized_gemm",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "109-120",
+      "claim": "Same-session paired A/B: baseline 7.737s, opt 7.664s, 0.94% improvement; Amdahl ratio 0.81x",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "134-147",
+      "claim": "Paired A/B v3: baseline 7.739s, opt 7.668s, 0.92% improvement; reproduced in v4 (fresh cache) at 0.85%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-004/validation_results.md",
+      "line_range": "30-38",
+      "claim": "CUDA graph constexpr freeze: MAX_NUM_KV_ITERS frozen at 1, kernel only reads first 64 tokens",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001v2/validation_results.md",
+      "line_range": "170-179",
+      "claim": "Primary shape CUTLASS fallback: K=2560,N=12288 (24/step) probes slower for Triton",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.35 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_gemm_research.md",
+      "line_range": "52-68",
+      "claim": "Delegate-1a discovered in_proj_ba actual shape N=64 from source code",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-1_argument.md",
+      "line_range": "9-22",
+      "claim": "Champion-1 cited delegate finding and corrected shape",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/delegate_work/delegate-1a_gdn_inter_gemm_analysis.md",
+      "line_range": "1-5",
+      "claim": "Delegate-1a R2 produced GDN inter-GEMM analysis",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_2/proposals/champion-1_proposal.md",
+      "line_range": "34-36",
+      "claim": "Champion-1 R2 cited delegate-1a analysis in proposal",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_research.md",
+      "line_range": "40-52",
+      "claim": "Delegate-3a produced wave quantization table with per-shape SM utilization",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.18 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_dimension_verification.md",
+      "line_range": "117-121",
+      "claim": "Delegate-1a incorrectly stated dispatch hook bypasses torch.compile",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001/validation_results.md",
+      "line_range": "104-112",
+      "claim": "Production shows dispatch hook is never reached; torch.compile fuses through F.linear",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_dimension_verification.md",
+      "line_range": "64-78",
+      "claim": "Delegate-1a produced CUTLASS kernel trace and grid analysis, overlapping delegate-3a",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.27 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_research.md",
+      "line_range": "1-18",
+      "claim": "Delegate-3a produced overlapping CUTLASS WMMA analysis",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_1/champion-3_argument.md",
+      "line_range": "17-28",
+      "claim": "Champion-3 argument still uses N=8192 for in_proj_ba, ignoring delegate correction",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-002/validation_results.md",
+      "line_range": "109-134",
+      "claim": "OP-002 delivered 0.94% E2E with 0.81x Amdahl ratio (below 1.16% ceiling)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.70 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "219-232",
+      "claim": "OP-003 reproduced across compile cache states: v3=0.92%, v4=0.85%; Amdahl resolved via nsys f_production=1.35%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001v2/validation_results.md",
+      "line_range": "134-140",
+      "claim": "OP-001v2 mean 0.82% with P50 2.73% exceeding Amdahl ceiling -- unexplained",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001/validation_results.md",
+      "line_range": "100-112",
+      "claim": "torch.compile fusion through F.linear prevents dispatch hook from executing",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-001v2/validation_results.md",
+      "line_range": "24-30",
+      "claim": "Opaque custom op registration makes GEMM dispatch survive torch.compile",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-003/validation_results.md",
+      "line_range": "196-208",
+      "claim": "torch.compile generated different Triton kernel compositions: 6 removed, 3 added, 5 increased",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/OP-004/validation_results.md",
+      "line_range": "160-170",
+      "claim": "Architectural mismatch: vLLM pipeline requires static shapes per captured graph, Triton constexpr freezes at capture time",
+      "verified": true
+    },
+    {
+      "file_path": "meta.json",
+      "line_range": "3-4",
+      "claim": "Refactored skill version: simplified campaign loop, merged rules/ammo.md",
+      "verified": false,
+      "errors": [
+        "file_not_found: meta.json"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "224-226",
+      "claim": "Campaign summary confirms GEMM intractability",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "82-88",
+      "claim": "30.5% BW gap root cause not diagnosed; would require ncu analysis",
+      "verified": true
+    }
+  ]
+}

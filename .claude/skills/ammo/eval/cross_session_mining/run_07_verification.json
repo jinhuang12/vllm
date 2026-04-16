@@ -1,0 +1,323 @@
+{
+  "total": 48,
+  "passed": 39,
+  "failed": 9,
+  "failure_rate": 0.188,
+  "results": [
+    {
+      "file_path": "tracks/fused_gdn_decode/validation_results.md",
+      "line_range": "42-63",
+      "claim": "Validator independently benchmarked with L2 flush revealing champion BS=32 measurement was 156% divergent due to artificial L2 caching",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.55 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "tracks/fused_gdn_decode/validation_results.md",
+      "line_range": "26-37",
+      "claim": "Validator ran independent correctness tests with softplus boundary cases not shared with champion",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/fused_gdn_decode/validation_results.md",
+      "line_range": "81-89",
+      "claim": "Validator verified Amdahl coherence: cold projections correctly predict near-zero E2E within noise",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "6-24",
+      "claim": "Campaign exhausted after 1 round with 0 shipped optimizations, cumulative speedup 1.0x",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.60 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "104-104",
+      "claim": "Campaign summary: model operates at ~80% theoretical BW limit with no kernel path to >1% E2E",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "47-50",
+      "claim": "Hardware: 1x NVIDIA L40S, 45 GiB",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "57-58",
+      "claim": "Solo winner fused_gdn_decode scored 5.25/10 with 0.30-0.59% E2E projection",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.34 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "194-195",
+      "claim": "ampere_64x128 kernel at BS=32 achieves 73% BW utilization, below the 85% near-optimal threshold",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "212-212",
+      "claim": "bottleneck_analysis.md uses 'NO red flags detected' framing covering the 73% BW component at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-1_proposal.md",
+      "line_range": "147-148",
+      "claim": "Champion-1 dismisses GEMM as near-optimal based on experiments at BS=1 gemvx shapes only, not the BS=32 CUTLASS kernels at 73% BW",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_2026-03-23T203809Z/logs/baseline_bs1.log",
+      "line_range": "2-2",
+      "claim": "First baseline sweep used wrong --output-len 3 --num-iters 1 flags",
+      "verified": true
+    },
+    {
+      "file_path": "e2e_latency_2026-03-24T150534Z/logs/baseline_bs1.log",
+      "line_range": "2-2",
+      "claim": "Second invalid baseline run on 2026-03-24 again used wrong --output-len 3 --num-iters 1 flags",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-2_proposal.md",
+      "line_range": "29-29",
+      "claim": "Champion-2 claims SSM decode-only gating+recurrent is ~2.5% at BS=1 with no delegate citation supporting this number",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_2/champion-2_argument.md",
+      "line_range": "7-9",
+      "claim": "Champion-2 accepts the corrected 1.56% f_decode at BS=1 in Round 2, confirming the 2.5% was wrong",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_2/champion-3_argument.md",
+      "line_range": "31-31",
+      "claim": "Champion-3's Round 2 portfolio table claims champion-1 projects 0.38% E2E at BS=1, a fabricated number",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_2/champion-1_argument.md",
+      "line_range": "6-9",
+      "claim": "Champion-1's own Round 2 argument states the corrected E2E is 0.06%, not 0.38%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "9-9",
+      "claim": "Champion-3 explicitly acknowledges C++ is never used in production, yet proceeds to benchmark against it",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_2/champion-3_argument.md",
+      "line_range": "10-13",
+      "claim": "Champion-3 retracts the 1.86x claim in Round 2, confirming the baseline was wrong",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "70-71",
+      "claim": "Debate acknowledged the selected candidate projected below 1.0% threshold",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "15-17",
+      "claim": "Implementation result confirmed sub-threshold: 0.046% E2E, status PASS_BELOW_THRESHOLD",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "27-39",
+      "claim": "All batch sizes deeply memory-bound with ~80% BW utilization",
+      "verified": true
+    },
+    {
+      "file_path": "ncu_sanity_check_results.md",
+      "line_range": "116-124",
+      "claim": "Per-kernel ncu measurements confirm 70-87% DRAM BW utilization across all shapes",
+      "verified": true
+    },
+    {
+      "file_path": "debate/round_2/champion-3_argument.md",
+      "line_range": "10-13",
+      "claim": "torch.compile Triton is 0.67 us/layer faster than custom Triton with statistical significance",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_activation_kernel_identity.md",
+      "line_range": "53-56",
+      "claim": "C++ silu_and_mul is NEVER called during production; torch.compile traces forward_native",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.41 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "79-79",
+      "claim": "cuBLAS is near-optimal: Custom Triton GEMV 14-55% slower at all tested shapes",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "196-199",
+      "claim": "BS=1 cuBLAS gemvx achieves 79-93% BW utilization across projection shapes",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "77-77",
+      "claim": "Corrected SSM f_decode: headline 20.4% is misleading, decode-only is ~4.1% at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_ssm_chain_analysis.md",
+      "line_range": "34-37",
+      "claim": "Delegate-2a established decode-only path uses only 3 kernels; gather/index are strictly prefill",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.10 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-2a_ssm_chain_analysis.md",
+      "line_range": "34-37",
+      "claim": "Delegate-2a establishes the decode-only path uses only 3 kernels and gather/index are strictly prefill",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.10 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-3a_activation_kernel_identity.md",
+      "line_range": "53-62",
+      "claim": "Delegate-3a confirms C++ silu_and_mul is never called; production always uses Inductor-generated Triton",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_ssm_state_code.md",
+      "line_range": "22-38",
+      "claim": "Delegate-1a provides exact Python line numbers showing prefill-only gather/index",
+      "verified": true
+    },
+    {
+      "file_path": "debate/delegate_work/delegate-1a_ssm_state_code.md",
+      "line_range": "26-31",
+      "claim": "Delegate-1a identifies gather/index as prefill-only at lines 774/791 -- overlapping with delegate-2a",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.14 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/proposals/champion-3_proposal.md",
+      "line_range": "9-9",
+      "claim": "Champion-3 states the delegate finding that C++ is never used, then proceeds to use C++ as baseline",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.68 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "15-17",
+      "claim": "Implementation confirmed the predictable sub-threshold result: 0.046% E2E",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/fused_gdn_decode/validation_results.md",
+      "line_range": "69-78",
+      "claim": "E2E results are indistinguishable from noise with no kernel execution proof",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "78-102",
+      "claim": "Stage 4-5 implementation ran from 16:24 to 17:05 (~39 minutes) for a result below threshold",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/fused_gdn_decode/validation_results.md",
+      "line_range": "73-73",
+      "claim": "BS=1 E2E is -0.058%, verdict NOISE",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/fused_gdn_decode/validation_results.md",
+      "line_range": "74-74",
+      "claim": "BS=8 E2E is +0.046%, verdict PASS",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/fused_gdn_decode/validation_results.md",
+      "line_range": "75-75",
+      "claim": "BS=32 E2E is -0.031%, verdict NOISE",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "77-77",
+      "claim": "Decode-only SSM f is ~4.1% at BS=32, not 20.4%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "79-79",
+      "claim": "cuBLAS gemvx outperforms custom Triton GEMV by 14-55%",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "81-81",
+      "claim": "Inductor-generated SiLU outperforms custom Triton with statistical significance",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "83-83",
+      "claim": "Model extracts ~80% of theoretical DRAM bandwidth",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "85-85",
+      "claim": "23% of SiLU invocations show ~100 us vs 3.9 us median -- unexplained",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "89-89",
+      "claim": "Champion-1 corrected champion-2's f_decode inflation",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "90-90",
+      "claim": "Champion-2 delivered fatal wrong-baseline critique to champion-3",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "91-91",
+      "claim": "Champion-3 revealed champion-1's DRAM savings are zero",
+      "verified": true
+    },
+    {
+      "file_path": "env.md",
+      "line_range": "6-21",
+      "claim": "Environment: L40S, CUDA 12.8, torch 2.10.0, vLLM 0.16.0rc2.dev479",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.58 (threshold=0.70)"
+      ]
+    }
+  ]
+}

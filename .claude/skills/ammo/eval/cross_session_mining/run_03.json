@@ -1,0 +1,510 @@
+{
+  "run_idx": 3,
+  "model": "GLM-5",
+  "hardware": "B200",
+  "dtype": "FP8",
+  "slug": "2075d7d1e_glm-5-fp8-b200-tp8-fp8-round-1-shipped-m",
+  "tp": 8,
+  "ep": 1,
+  "compute_capability": "10.0",
+  "vllm_version": "0.17.2rc1.dev195+gc57d38d60",
+  "session_id": "190b247b-4064-4589-92b3-934a51a49d89",
+  "mined_at": "2026-04-15T23:30:00Z",
+
+  "campaign_metrics": {
+    "cumulative_e2e_speedup": 1.0156,
+    "shipped_count": 1,
+    "total_rounds": 2,
+    "total_proposals": 3,
+    "total_tracks": 2,
+    "tracks_passed": 1,
+    "tracks_failed": 1,
+    "campaign_status": "active",
+    "overall_score": 4.21,
+    "overall_score_without_transcript": 3.94,
+    "transcript_quality_score": 5.75,
+    "debate_quality_score": 9.0,
+    "campaign_efficiency_score": 4.0,
+    "gate_pass_rate": 0.5,
+    "total_agent_invocations": 24,
+    "total_tokens": 138241,
+    "total_duration_ms": 559221,
+    "delegation_enabled": true,
+    "delegates_per_champion": 1,
+    "total_delegates_spawned": 3,
+    "delegate_citation_rate": 1.0,
+    "citations": [
+      {
+        "file_path": "state.json",
+        "line_start": 4,
+        "line_end": 4,
+        "claim": "Cumulative E2E speedup is 1.0156x after Round 1",
+        "quoted_content": "\"cumulative_e2e_speedup\": 1.0156,"
+      },
+      {
+        "file_path": "state.json",
+        "line_start": 23,
+        "line_end": 23,
+        "claim": "One optimization (mla_gemv) was shipped in Round 1",
+        "quoted_content": "\"shipped_optimizations\": [\"mla_gemv\"],"
+      }
+    ]
+  },
+
+  "e2e_outcomes": [
+    {
+      "track_id": "mla_gemv",
+      "status": "PASSED",
+      "batch_size": 1,
+      "baseline_e2e_s": 16.465,
+      "optimized_e2e_s": 16.209,
+      "delta_pct": -1.56,
+      "technique": "MLA q_b_proj direct CUTLASS dispatch bypass for M<=4",
+      "correctness": "PASS (0.0 max_abs_err, bitwise identical)",
+      "kernel_speedup": "2.1x (dispatch-level: FlashInfer BMM 44.8us -> CUTLASS 21us)",
+      "lines_changed": 91,
+      "files_modified": 1,
+      "citations": [
+        {
+          "file_path": "tracks/mla_gemv/validation_results.md",
+          "line_start": 73,
+          "line_end": 76,
+          "claim": "MLA q_b_proj optimization delivered -1.56% E2E improvement at BS=1",
+          "quoted_content": "| 1 | 16.465 | 16.209 | **-0.256** | **-1.56%** |"
+        },
+        {
+          "file_path": "tracks/mla_gemv/validation_results.md",
+          "line_start": 24,
+          "line_end": 29,
+          "claim": "Correctness verified as bitwise identical (max_abs_err = 0.0) across all tested M values",
+          "quoted_content": "| 1 | fast | 0.0 | PASS | PASS |\n| 2 | fast | 0.0 | PASS | PASS |\n| 4 | fast (boundary) | 0.0 | PASS | PASS |\n| 5 | fallback | 0.0 | PASS | PASS |"
+        },
+        {
+          "file_path": "tracks/mla_gemv/validation_results.md",
+          "line_start": 9,
+          "line_end": 10,
+          "claim": "Implementation was 91 lines in a single Python file (mla.py)",
+          "quoted_content": "**Implementation**: Modified `vllm/model_executor/layers/mla.py` (+91 lines):"
+        }
+      ]
+    },
+    {
+      "track_id": "moe_gemv",
+      "status": "FAILED",
+      "batch_size": 1,
+      "baseline_e2e_s": null,
+      "optimized_e2e_s": null,
+      "delta_pct": -0.39,
+      "technique": "Custom Triton FP8 GEMV for MoE routed experts (modular replacement)",
+      "correctness": "PASS (0.23% max rel error)",
+      "kernel_speedup": "2.44x raw GEMV, 1.20x pipeline",
+      "failure_reason": "TRT-LLM monolithic kernel fusion advantage negates modular GEMV benefit. 5+ separate launches vs 1 fused launch adds ~10 us overhead per layer.",
+      "citations": [
+        {
+          "file_path": "tracks/moe_gemv/validation_results.md",
+          "line_start": 55,
+          "line_end": 59,
+          "claim": "Pipeline benchmark showed only 1.20x speedup at BS=1, with BS=8 regression at 0.84x",
+          "quoted_content": "| BS | Baseline Cold (us) | Optimized Cold (us) | Speedup |\n|---:|---:|---:|---:|\n| 1 | 40.47 | 33.75 | **1.20x** |\n| 8 | 85.14 | 101.78 | **0.84x (REGRESSION)** |"
+        },
+        {
+          "file_path": "tracks/moe_gemv/validation_results.md",
+          "line_start": 72,
+          "line_end": 73,
+          "claim": "Root cause: modular GEMV requires 5+ separate kernel launches vs TRT-LLM single fused launch",
+          "quoted_content": "The TRT-LLM monolithic kernel (`trtllm_fp8_block_scale_routed_moe`) fuses W1 GEMM + activation + inter-expert FP8 quantization + W2 GEMM + finalize into **a single kernel launch**. The modular GEMV approach requires **5+ separate kernel launches**..."
+        }
+      ]
+    }
+  ],
+
+  "debate_quality": {
+    "total_proposals": 3,
+    "grounding_rate": 1.0,
+    "micro_experiment_rate": 1.0,
+    "component_diversity": true,
+    "debate_rounds": 1,
+    "early_termination": true,
+    "citations": [
+      {
+        "file_path": "debate/summary.md",
+        "line_start": 7,
+        "line_end": 8,
+        "claim": "Debate terminated early after 1 round because all positions were well-developed and no new evidence would emerge",
+        "quoted_content": "- **Rounds**: 1 (Phase A -> Phase B critique -> Phase C rebuttal)\n- **Early termination rationale**: All positions well-developed after Round 1. Champion-1 made major concessions. No new evidence would emerge in Round 2 that changes the ranking."
+      },
+      {
+        "file_path": "debate/summary.md",
+        "line_start": 44,
+        "line_end": 57,
+        "claim": "Champion-3 scored highest (7.70) with strongest empirical evidence: 8.5x measured speedup under CUDA graph + cold-cache, lowest implementation risk (~250 LOC), and unique MLA target orthogonal to MoE proposals",
+        "quoted_content": "**Key strengths**: Strongest measured evidence of all proposals -- 8.5x speedup validated with BOTH per-tensor and blockwise [128,128] FP8 under CUDA graph + cold-cache. Demolished blockwise overhead critique with new data (0% overhead). Lowest implementation risk (~250 LOC, single dispatch..."
+      },
+      {
+        "file_path": "debate/summary.md",
+        "line_start": 64,
+        "line_end": 68,
+        "claim": "Winner selection ranked Champion-3 first (7.70), Champion-2 second (6.65), Champion-1 third (5.80)",
+        "quoted_content": "| 1 | Champion-3 | 7.70 | MLA q_b_proj | 2.61% | 2.2% |\n| 2 | Champion-2 | 6.65 | MoE routed GEMV | 4.15% | 2.7-3.2% |\n| 3 | Champion-1 | 5.80 | MoE routed GEMV | 4.15% | 2.1-3.1% |"
+      }
+    ]
+  },
+
+  "delegation_causality": {
+    "chains_count": 3,
+    "total_bonus": 1.5,
+    "chains": [
+      {
+        "delegate": "delegate-3a",
+        "finding_summary": "kv_b_proj is absorbed at model load time; only q_b_proj uses FlashInfer BMM in decode. 600 BMM instances = q_b_proj only.",
+        "impact": "Champion-3 correctly scoped proposal to q_b_proj only, avoiding unnecessary kv_b_proj targeting",
+        "citations": [
+          {
+            "file_path": "debate/delegate_work/delegate-3a_mla_projection_trace.md",
+            "line_start": 52,
+            "line_end": 62,
+            "claim": "Delegate-3a confirmed kv_b_proj is absorbed in decode -- new information not in bottleneck_analysis.md",
+            "quoted_content": "**Step 5: kv_b_proj -- ABSORBED (decode path only)**\nSource: `mla_attention.py:716-803` `process_weights_after_loading()`\nkv_b_proj weight `[3584, 512]` per rank is de-quantized to BF16 and split:\n  - `W_UK_T = W_UK.permute(1, 2, 0)` -> shape `[8, 192, 512]`\n  - `W_UV = W_UV.transpose(0, 1)` -> shape `[8, 512, 256]`\n- **kv_b_proj.forward() is NOT called in decode path**"
+          }
+        ]
+      },
+      {
+        "delegate": "delegate-3a",
+        "finding_summary": "Exact integration intercept for q_b_proj at mla.py:139. No attention backend changes required.",
+        "impact": "Shipped implementation used exactly this location (91-line patch to mla.py)",
+        "citations": [
+          {
+            "file_path": "debate/delegate_work/delegate-3a_mla_projection_trace.md",
+            "line_start": 199,
+            "line_end": 210,
+            "claim": "Delegate-3a identified mla.py:139 as the exact integration intercept",
+            "quoted_content": "### Recommended intercept\n**`mla.py:139`** inside `MultiHeadLatentAttentionWrapper.forward()`:\n```python\nq = self.q_b_proj(q_c)[0]\n```\nReplace `q_b_proj` with a `DeepSeekV2MinLatencyQBProjLinear` subclass...\nNo attention backend changes needed. No model architecture changes."
+          }
+        ]
+      },
+      {
+        "delegate": "delegate-1a",
+        "finding_summary": "B200 L2 cache = 126 MB via live hardware query. MoE working set 22x L2 capacity.",
+        "impact": "All three champions' cache audit sections cited this value; grounded cold-cache validity arguments",
+        "citations": [
+          {
+            "file_path": "debate/delegate_work/delegate-1a_b200_specs.md",
+            "line_start": 13,
+            "line_end": 16,
+            "claim": "Delegate-1a confirmed B200 L2 cache = 126 MB via live hardware query",
+            "quoted_content": "torch.cuda.get_device_properties(0):\n  Name:                   NVIDIA B200\n  ...  \n  L2 cache:               126 MB"
+          }
+        ]
+      }
+    ]
+  },
+
+  "delegation_failures": [
+    {
+      "delegate": "delegate-2a",
+      "description": "Wrong BMM attribution (shared expert 'most likely') that champion-2 used definitively to build invalid Target A integration path",
+      "impact": "Champion-2 planned replacing the wrong code path for 18.8% f_compute; corrected only after adversarial critique",
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-2a_moe_gemm_codepath.md",
+          "line_start": 96,
+          "line_end": 105,
+          "claim": "Delegate-2a provided wrong BMM attribution (shared expert 'most likely') that champion-2 used without correction",
+          "quoted_content": "Most likely origin: The shared expert uses `Glm4MoeMLP` (standard `MergedColumnParallelLinear` + `RowParallelLinear`, `glm4_moe.py:170`). These are separate from the `FusedMoE` TRTLLM path. On B200, small FP8 linear GEMMs for these layers may dispatch to the FlashInfer BMM kernel..."
+        }
+      ]
+    },
+    {
+      "delegate": "delegate-1a",
+      "description": "Incorrect W2 weight dimensions for MoE down projection ([256, 768, 2048] vs correct [256, 6144, 256])",
+      "impact": "Champion-1 used wrong dimensions in grid analysis without correction; caught by champion-3's critique, not self-identified",
+      "citations": [
+        {
+          "file_path": "debate/delegate_work/delegate-1a_moe_gemm_codepath.md",
+          "line_start": 108,
+          "line_end": 112,
+          "claim": "Delegate-1a reported W2 per-rank shape as [256, 768, 2048] -- K and N are transposed vs the correct [256, 6144, 256]",
+          "quoted_content": "| W2 down | [256, 6144, 2048] | [256, 768, 2048] | FP8 e4m3 | FlashInfer TRTLLM BMM |"
+        }
+      ]
+    }
+  ],
+
+  "hallucinated_data": [
+    {
+      "description": "Champion-1 presented BS=8 E2E improvement claims (f_decode=8-12%, E2E=6.4-9.6%) with zero BS=8 profiling data",
+      "severity": "medium",
+      "self_corrected": true,
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-1_argument.md",
+          "line_start": 143,
+          "line_end": 147,
+          "claim": "Champion-1 claimed f_decode(BS=8) ~8-12% and E2E ~6.4-9.6% without any BS=8 measurement",
+          "quoted_content": "Conservative estimate: f_decode(BS=8) ≈ 8-12%, yielding E2E improvement ≈ 6.4-9.6%."
+        },
+        {
+          "file_path": "debate/round_1/champion-1_rebuttal.md",
+          "line_start": 70,
+          "line_end": 73,
+          "claim": "Champion-1 conceded BS=8 estimates were speculative with no measurement basis",
+          "quoted_content": "Concession: Both the spin-wait compression and BS=8 estimates are speculative. I withdraw the 'amplify E2E gain by up to 2x' claim and the specific BS=8 numbers."
+        }
+      ]
+    }
+  ],
+
+  "off_track_reasoning": [
+    {
+      "description": "Champion-2 built entire Target A (primary integration path) on incorrect attribution of FlashInfer BMM to shared expert computation",
+      "corrected_by": "adversarial_debate",
+      "citations": [
+        {
+          "file_path": "debate/proposals/champion-2_proposal.md",
+          "line_start": 33,
+          "line_end": 36,
+          "claim": "Champion-2 attributed FlashInfer BMM 18.8% to shared expert code path and built Target A on it",
+          "quoted_content": "**Shared expert (FlashInfer BMM, 18.8% f_compute, 42.7 ms)**: `SharedFusedMoE.forward()` -> `self._shared_experts(hidden_states)` -> `Glm4MoeMLP` (standard `MergedColumnParallelLinear` + `RowParallelLinear`) -> dispatches to FlashInfer BMM (`bmm_E4m3_E4m3E4m3_Fp32`). This is a standard FP8..."
+        },
+        {
+          "file_path": "debate/round_1/champion-2_rebuttal.md",
+          "line_start": 3,
+          "line_end": 11,
+          "claim": "Champion-2 conceded the code path misidentification in rebuttal after adversarial critique",
+          "quoted_content": "**I concede this point.** Champion-1 is correct that the FlashInfer BMM kernel (`bmm_E4m3_E4m3E4m3_Fp32`) handles **routed expert** computation via the TRT-LLM monolithic kernel, not the shared expert."
+        }
+      ]
+    },
+    {
+      "description": "Champion-1 claimed all-reduce spin-wait compression 'could amplify E2E gain by up to 2x' with no quantitative basis",
+      "corrected_by": "self_withdrawal_in_rebuttal",
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-1_argument.md",
+          "line_start": 149,
+          "line_end": 152,
+          "claim": "Champion-1 claimed spin-wait compression could amplify E2E gain by 2x without any measurement data",
+          "quoted_content": "With TP=8 PIECEWISE graphs, all-reduce spin-wait dominates the 128.6 ms E2E. When ALL 8 ranks finish MoE compute ~4.3 ms faster (uniformly), the spin-wait at subsequent all-reduce barriers compresses by a similar amount. This could amplify the E2E gain by up to 2x beyond the Amdahl's prediction."
+        }
+      ]
+    }
+  ],
+
+  "anti_patterns": [
+    {
+      "pattern": "cold_to_production_overestimation",
+      "description": "Debate champions projected 2.7-3.2% E2E for moe_gemv but validator measured only 0.39% -- a 6.9x overestimation. Root cause: proposals used raw GEMV kernel speedup without accounting for TRT-LLM monolithic fusion advantage.",
+      "overestimation_ratio": 6.9,
+      "projected_e2e_pct": 2.7,
+      "actual_e2e_pct": 0.39,
+      "citations": [
+        {
+          "file_path": "debate/round_1/champion-2_rebuttal.md",
+          "line_start": 107,
+          "line_end": 113,
+          "claim": "Champion-2's final revised E2E projection was 2.7-3.2% at BS=1",
+          "quoted_content": "| E2E (primary) | 2.3-2.8% | **2.7-3.2%** | Slightly improved |"
+        },
+        {
+          "file_path": "tracks/moe_gemv/validation_results.md",
+          "line_start": 83,
+          "line_end": 88,
+          "claim": "Validator projected only 0.39% E2E improvement -- well below the 1.5% kill criterion",
+          "quoted_content": "| 1 | 128.6 ms/token | 6.7 µs | 0.50 ms | **0.39%** |"
+        },
+        {
+          "file_path": "debate/delegate_work/delegate-1a_moe_act_quant_analysis.md",
+          "line_start": 90,
+          "line_end": 97,
+          "claim": "Delegate-1a had confirmed TRTLLM-GEN IS fully fused during debate -- this info was available but not incorporated into E2E projections",
+          "quoted_content": "**Finding**: **YES -- the TRTLLM-GEN kernel IS fused.**\nEvidence:\n1. `TrtLlmFp8ExpertsModular` calls a single monolithic `trtllm_fp8_block_scale_routed_moe` which handles GEMM1->activation->GEMM2 in one call.\n2. The `activationDeepSeekKernel` appears with 600 instances..."
+        }
+      ]
+    }
+  ],
+
+  "monitor_events": {
+    "has_monitor_logs": false,
+    "events": [],
+    "notes": "No monitor_log_*.md files found in the artifact directory. This is a pre-monitor-era run."
+  },
+
+  "causal_analysis": {
+    "critical_path_length": 2,
+    "trajectory_changing_decisions": 1,
+    "actionable_fixes": 2,
+    "anomalies": [
+      {
+        "node": "bottleneck_mining",
+        "type": "QUALITY_DROP",
+        "description": "5 of 7 nsys profiling runs failed, leaving only BS=1 data. Champions lacked empirical basis for BS>1 claims.",
+        "citations": [
+          {
+            "file_path": "bottleneck_analysis.md",
+            "line_start": 5,
+            "line_end": 6,
+            "claim": "Stage 2 profiling was BS=1 only -- only baseline_bs1_node.nsys-rep captured successfully",
+            "quoted_content": "- **Profile**: `nsys/baseline_bs1_node.nsys-rep` (6.4 MB, node-expanded)\n- **Mode**: Two-step delimited capture with `--cuda-graph-trace=node`"
+          }
+        ]
+      },
+      {
+        "node": "debate",
+        "type": "WASTED_EFFORT",
+        "description": "Round 2 debate team (6 agents) was spawned but produced zero output artifacts due to apparent session interruption (2-day gap).",
+        "citations": [
+          {
+            "file_path": "state.json",
+            "line_start": 48,
+            "line_end": 48,
+            "claim": "Round 2 debate team was named and configured but produced no results",
+            "quoted_content": "\"team_name\": \"ammo-round-2-glm5fp8-b200\""
+          }
+        ]
+      }
+    ]
+  },
+
+  "cross_model_generalizability": {
+    "notes": "This is a non-Qwen run: GLM-5-FP8 on B200 (Blackwell, sm_100) with TP=8. Evidence supports generalizability of AMMO patterns across model families and hardware generations.",
+    "findings": [
+      {
+        "claim": "Cold-to-production overestimation anti-pattern recurs on non-Qwen MoE model on B200 hardware",
+        "detail": "Champion projected 2.7-3.2% E2E for MoE GEMV but actual was 0.39% (6.9x overestimation). Same root cause as Qwen campaigns: raw kernel speedup does not account for monolithic fusion overhead in modular replacement.",
+        "citations": [
+          {
+            "file_path": "tracks/moe_gemv/validation_results.md",
+            "line_start": 129,
+            "line_end": 131,
+            "claim": "Primary failure reason: pipeline-level speedup (1.20x) insufficient to meet E2E kill criterion due to monolithic kernel fusion advantage",
+            "quoted_content": "**Primary reason**: The pipeline-level speedup (1.20x) is insufficient to meet the E2E kill criterion (>=1.5% at BS=1). The projected 0.39% E2E improvement is well below threshold."
+          }
+        ]
+      },
+      {
+        "claim": "Dispatch-level optimization (not custom kernel) delivered measurable E2E improvement on B200 Blackwell hardware with FP8 blockscale",
+        "detail": "MLA q_b_proj CUTLASS redirect achieved 1.56% E2E on GLM-5 B200 with 91 LOC, demonstrating dispatch audit value generalizes beyond L40S/Qwen",
+        "citations": [
+          {
+            "file_path": "REPORT.md",
+            "line_start": 462,
+            "line_end": 467,
+            "claim": "Lesson 2: Dispatch-level optimization can be more impactful than kernel replacement -- 91 lines delivered 1.56% E2E with zero correctness risk",
+            "quoted_content": "The shipped MLA q_b_proj optimization does not use a custom kernel at all -- it redirects the existing CUTLASS GEMM call to bypass an inefficient dispatch chain. The 91 lines of Python changes delivered 1.56% E2E improvement with zero correctness risk (bitwise identical output)."
+          }
+        ]
+      },
+      {
+        "claim": "Adversarial debate corrected code-path misattribution on novel architecture (GLM-5/GlmMoeDsaForCausalLM)",
+        "detail": "Champion-2 built primary integration path on wrong BMM attribution (shared vs routed expert). Adversarial critique from champion-1 forced concession. This error correction pattern works across model families.",
+        "citations": [
+          {
+            "file_path": "debate/round_1/champion-2_rebuttal.md",
+            "line_start": 3,
+            "line_end": 11,
+            "claim": "Adversarial debate forced champion-2 to concede code path misidentification",
+            "quoted_content": "**I concede this point.** Champion-1 is correct that the FlashInfer BMM kernel (`bmm_E4m3_E4m3E4m3_Fp32`) handles **routed expert** computation via the TRT-LLM monolithic kernel, not the shared expert."
+          }
+        ]
+      },
+      {
+        "claim": "Delegation causality chains function on Blackwell (sm_100) hardware -- delegate findings traced into shipped implementation",
+        "detail": "Delegate-3a's kv_b_proj absorption finding and mla.py:139 intercept directly influenced the winning proposal's scope and integration point. The shipped 91-line patch used exactly the delegate-identified location.",
+        "citations": [
+          {
+            "file_path": "debate/proposals/champion-3_proposal.md",
+            "line_start": 27,
+            "line_end": 31,
+            "claim": "Champion-3 cited delegate-3a's finding and scoped target to q_b_proj only",
+            "quoted_content": "**Critical finding**: Only q_b_proj uses the FlashInfer BMM in decode. kv_b_proj is **absorbed** at model load time into pre-materialized BF16 tensors (W_UK_T, W_UV) and executed as plain BF16 torch.bmm.\n  [Source: delegate-3a analysis, `debate/delegate_work/delegate-3a_mla_projection_trace.md`]"
+          }
+        ]
+      },
+      {
+        "claim": "MoE monolithic vs modular kernel tradeoff is architecture-independent -- applies to GLM-5 with TRT-LLM fused MoE just as it would to Qwen",
+        "detail": "The TRT-LLM monolithic kernel fuses routing+GEMM+activation+quant+finalize in one launch. Modular GEMV replacement (5+ launches, ~10us overhead/layer) fails the E2E threshold regardless of model architecture.",
+        "citations": [
+          {
+            "file_path": "REPORT.md",
+            "line_start": 451,
+            "line_end": 457,
+            "claim": "Lesson 1: Monolithic kernel fusion trumps modular kernel speedup -- raw 2.44x GEMV became only 1.20x at pipeline level",
+            "quoted_content": "The MoE GEMV kernel achieved 2.44x raw speedup over FlashInfer BMM, but the full pipeline (5+ separate launches) only achieved 1.20x over TRT-LLM's single-launch monolithic kernel. The ~10 us launch overhead per layer..."
+          }
+        ]
+      },
+      {
+        "claim": "Amdahl's Law cross-check validated within 1.14x on B200 hardware with FP8",
+        "detail": "MLA q_b_proj: Amdahl predicted 1.37%, measured 1.56% (ratio 1.14x). The prediction framework generalizes to B200.",
+        "citations": [
+          {
+            "file_path": "tracks/mla_gemv/validation_results.md",
+            "line_start": 90,
+            "line_end": 96,
+            "claim": "Amdahl's Law prediction validated within 1.14x of measured result on B200 hardware",
+            "quoted_content": "| E2E improvement | 1.37% | **1.56%** |\n| Within 1.5x of prediction? | -- | YES (1.56/1.37 = 1.14x) |"
+          }
+        ]
+      }
+    ]
+  },
+
+  "profiling_methodology": {
+    "production_parity": true,
+    "cuda_graphs": "PIECEWISE (DeepseekV32IndexerBackend has AttentionCGSupport.NEVER)",
+    "torch_compile": true,
+    "fusions_active": ["norm_quant", "act_quant"],
+    "nsys_trace_size_mb": 6.4,
+    "total_kernel_instances": 40456,
+    "total_gpu_kernel_time_s": 1.349,
+    "non_comm_compute_ms": 227.5,
+    "comm_pct_of_total": 83.2,
+    "top_bottleneck_f_compute_pct": 39.5,
+    "citations": [
+      {
+        "file_path": "bottleneck_analysis.md",
+        "line_start": 10,
+        "line_end": 11,
+        "claim": "Profiling under production parity: CUDA graphs (PIECEWISE) + torch.compile with norm_quant, act_quant fusions active",
+        "quoted_content": "- **Production parity**: CUDA graphs (PIECEWISE) + torch.compile (`VLLM_TORCH_COMPILE_LEVEL=3`)\n  enabled; fusions active: `norm_quant`, `act_quant`"
+      },
+      {
+        "file_path": "bottleneck_analysis.md",
+        "line_start": 15,
+        "line_end": 15,
+        "claim": "nsys trace captured 40,456 kernel instances across 8 TP ranks",
+        "quoted_content": "- **Total GPU kernel time across all 8 ranks**: 1.349 s across 40,456 kernel instances"
+      },
+      {
+        "file_path": "bottleneck_analysis.md",
+        "line_start": 46,
+        "line_end": 46,
+        "claim": "Communication accounts for 83.2% of total GPU time, with 227.5 ms non-communication compute",
+        "quoted_content": "| Communication (all_reduce) | 1123.0 | 83.2 | -- |"
+      }
+    ]
+  },
+
+  "hardware_context": {
+    "gpu_model": "NVIDIA B200",
+    "gpu_count": 8,
+    "sm_count": 148,
+    "compute_capability": "10.0",
+    "memory_total_gib": 178.4,
+    "l2_cache_mb": 126,
+    "hbm_bandwidth_tb_s": 8.0,
+    "max_sm_clock_mhz": 1965,
+    "driver_version": "580.126.09",
+    "cuda_version": "12.9",
+    "torch_version": "2.10.0+cu129",
+    "citations": [
+      {
+        "file_path": "env.json",
+        "line_start": 79,
+        "line_end": 83,
+        "claim": "B200 hardware confirmed: sm_100 CC 10.0, 183359 MiB total memory, 1965 MHz max SM clock",
+        "quoted_content": "\"clocks.max.sm\": \"1965\",\n\"compute_cap\": \"10.0\",\n\"driver_version\": \"580.126.09\",\n\"memory.total\": \"183359\",\n\"name\": \"NVIDIA B200\","
+      }
+    ]
+  }
+}

@@ -1,0 +1,320 @@
+{
+  "total": 49,
+  "passed": 43,
+  "failed": 6,
+  "failure_rate": 0.122,
+  "results": [
+    {
+      "file_path": "state.json",
+      "line_range": "5-6",
+      "claim": "Cumulative E2E speedup of 1.2873x across 4 rounds",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "400-406",
+      "claim": "BS=32 latency progression from 10.222s baseline to ~8.00s after Round 4",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "20-23",
+      "claim": "Round 1 op001 shipped with 1.1258x E2E speedup",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "37-41",
+      "claim": "Five shipped optimizations with individual E2E improvements at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "267-268",
+      "claim": "op001 FP16 state delivered 11.18% E2E vs 6.2% Amdahl prediction, 1.8x overperformance",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "296-297",
+      "claim": "op004 FP8 state delivered 5.85% E2E vs 2.70% Amdahl prediction, 2.2x overperformance",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "501-512",
+      "claim": "Three lossy optimizations reduce precision in SSM state, KV cache, and lm_head; no model-level quality evaluation performed",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "150-158",
+      "claim": "Component shares at BS=32: GEMM 70.9% in R1 baseline, growing across rounds",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.48 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "bottleneck_analysis_round4.md",
+      "line_range": "71-73",
+      "claim": "Round 4 GEMM share reached 87.92% at BS=32 after three rounds of non-GEMM optimization",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.41 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "89-94",
+      "claim": "All decode GEMMs are memory-BW-bound with arithmetic intensity 1-31.5 FLOP/byte vs ridge at 424",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "93-94",
+      "claim": "Model weight footprint 8.4 GB is 88x larger than L2 cache, requiring cold-cache benchmarks",
+      "verified": true
+    },
+    {
+      "file_path": "ncu_sanity_check.md",
+      "line_range": "144-146",
+      "claim": "Red Flag Summary classified gate_up_proj GEMM (74% BW) as 'PASS' against >20% threshold",
+      "verified": true
+    },
+    {
+      "file_path": "ncu_sanity_check.md",
+      "line_range": "162-165",
+      "claim": "Key Findings stated 'All top-3 kernels are operating normally' despite gate_up_proj having 26% BW headroom",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_skinny_gemm/validation_results.md",
+      "line_range": "20-21",
+      "claim": "R4 op007 exploited the 'no red flags' kernel: cuBLAS wastes 50% M-tile at M=32, Triton BLOCK_M=32 achieves +3.3% E2E",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "37-38",
+      "claim": "Debate scoring accepted generic Triton GEMM benchmark as proof custom GEMM is unviable",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.32 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "456-464",
+      "claim": "3/3 GEMM replacement failures persisted 'cuBLAS unbeatable' narrative; op007 succeeded by learning all three lessons",
+      "verified": true
+    },
+    {
+      "file_path": "debate/summary.md",
+      "line_range": "20-24",
+      "claim": "Round 1 op001 scored 8.65/10: physically grounded 1.97x speedup on BW-bound kernel, ~60 LOC, no regressions",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "232-234",
+      "claim": "Cold-cache vs warm-cache methodology pitfall caught during debate: op002 2.52x warm but only 1.06x cold at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "418-419",
+      "claim": "op002 failed: torch.compile traces both branches of shape-conditional dispatch, degrading all batch sizes",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "44-46",
+      "claim": "op003 CATASTROPHIC at BS=8 (-25.9%) from CUTLASS sm89 FP8 tile regression",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "69-71",
+      "claim": "op005 CATASTROPHIC regression (0.56-0.66x) from torch.compile/inductor integration overhead",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_skinny_gemm/validation_results.md",
+      "line_range": "22-29",
+      "claim": "op007 explicitly learned from op002/op005 failures: static dispatch, direct Triton call, pre-transpose at load time",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_skinny_gemm/validation_results.md",
+      "line_range": "58-62",
+      "claim": "Validator E2E results: BS=32 +3.3% (8.563s to 8.292s), BS=1 regressed -1.7%, hence GATED_PASS",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_fp8_lmhead/validation_results.md",
+      "line_range": "121-125",
+      "claim": "op008 E2E sweep: +3.27% BS=1, +3.32% BS=8, +3.48% BS=32 -- all pass with no regressions",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_fp8_lmhead/validation_results.md",
+      "line_range": "136-140",
+      "claim": "Amdahl sanity check: f=12.5%, s=1.412x cold, expected 3.65%, actual 3.48% (ratio 0.95x -- no violation)",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis.md",
+      "line_range": "48-53",
+      "claim": "fused_recurrent kernel evolved: R1 FP32 102.7us, R2 FP16 50.3us (2.04x), R3 FP8 29.4us (1.71x), total 3.49x at BS=32",
+      "verified": true
+    },
+    {
+      "file_path": "ncu_sanity_check.md",
+      "line_range": "110-113",
+      "claim": "fused_recurrent at BS=32 achieves 86.8-87.8% DRAM BW utilization -- near DRAM ceiling",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_4/proposals/r4-champion-2_proposal.md",
+      "line_range": "6-6",
+      "claim": "Champion-2 claimed f_decode BS=32 = 10.7% for lm_head; actual was 12.5%",
+      "verified": true
+    },
+    {
+      "file_path": "bottleneck_analysis_round4.md",
+      "line_range": "71-72",
+      "claim": "Authoritative R4 data: GEMM at 87.92% (not 86.77%) and lm_head at 12.5% (not 10.7%)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.32 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "debate/campaign_round_4/proposals/r4-champion-1_proposal.md",
+      "line_range": "17-21",
+      "claim": "Champion-1 explicitly cited 'Round 3 BS=32' 33.8% for gate_up_proj when R4 shows 34.2%",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_skinny_gemm/validation_results.md",
+      "line_range": "66-73",
+      "claim": "Four approaches tested for op007, first three all failed with BS=32 regression (0.993x)",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_fp8_lmhead/validation_results.md",
+      "line_range": "164-165",
+      "claim": "op008 Gate 5.1 test file overwritten with wrong tolerances (ATOL=0.1) causing failure and retry",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_3/proposals/r3-champion-2_proposal.md",
+      "line_range": "109-118",
+      "claim": "R3 Champion-2 proposed Triton GEMM replacement despite R1 failure, arguing fused approach was different",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "69-71",
+      "claim": "op005 failed catastrophically (0.56-0.66x) from the same torch.compile/inductor overhead failure class as op002",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_4/proposals/r4-champion-1_proposal.md",
+      "line_range": "107-111",
+      "claim": "Champion-1 projected 4.91% E2E from 1.17x pipeline speedup on 33.8% component share",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_skinny_gemm/validation_results.md",
+      "line_range": "89-93",
+      "claim": "Validator measured 1.10x kernel speedup (cold) and 3.3% E2E; Amdahl at 1.10x predicts 3.1%, consistent",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_4/delegate_work/delegate-r4-2a_linear_attention_research.md",
+      "line_range": "2-7",
+      "claim": "Delegate researched wrong model (35B-A3B-FP8 TP=4) with wrong f_decode values for this campaign",
+      "verified": true
+    },
+    {
+      "file_path": "debate/campaign_round_4/proposals/r4-champion-2_proposal.md",
+      "line_range": "300-310",
+      "claim": "Champion-2 references section lists no delegate_work reference -- delegate research was entirely unused",
+      "verified": false,
+      "errors": [
+        "line_range_exceeds_file: 300-310 but file has 309 lines"
+      ]
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "109-117",
+      "claim": "5 shipped optimizations, campaign exhausted after R5 consensus: no viable >1% target remains",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "209-218",
+      "claim": "8 total candidates across 4 rounds: 5 shipped, 3 failed (op002, op003, op005)",
+      "verified": false,
+      "errors": [
+        "content_mismatch: similarity=0.67 (threshold=0.70)"
+      ]
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "481-488",
+      "claim": "Three reasons for campaign exhaustion: no >4.3% non-GEMM target, GEMM needs C++, diminishing returns",
+      "verified": true
+    },
+    {
+      "file_path": "state.json",
+      "line_range": "155-156",
+      "claim": "R5 consensus: no viable >1% E2E target remains",
+      "verified": true
+    },
+    {
+      "file_path": "env.json",
+      "line_range": "83-86",
+      "claim": "4x NVIDIA L40S GPUs with SM 8.9, 47.7 GB each",
+      "verified": true
+    },
+    {
+      "file_path": "constraints.md",
+      "line_range": "14-20",
+      "claim": "L40S hardware specs: 864 GB/s BW, ~366 TFLOPS BF16 TC, 142 SMs, 96 MB L2",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "524-527",
+      "claim": "Cold-cache is the only honest benchmark: op002 showed 2.52x warm but only 1.06x cold; 8.4 GB model vs 96 MB L2",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "546-548",
+      "claim": "op007 succeeded by incorporating lessons from op002 and op005 failures",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op008_fp8_lmhead/validation_results.md",
+      "line_range": "51-64",
+      "claim": "op008 Gate 5.1 correctness: max_abs_err 0.14-0.16, accepted at wide tolerance atol=0.3, rtol=0.2 for FP8 per-tensor quant",
+      "verified": true
+    },
+    {
+      "file_path": "tracks/op007_skinny_gemm/validation_results.md",
+      "line_range": "39-42",
+      "claim": "op007 Gate 5.1 correctness: max_abs_err <= 0.016 (excellent BF16 precision), CUDA graph PASS",
+      "verified": true
+    },
+    {
+      "file_path": "REPORT.md",
+      "line_range": "491-497",
+      "claim": "Three most promising future candidates: C++ GEMM (3-5%), GDN fusion (0.5-1%), FP8 CUTLASS fix (5-15%)",
+      "verified": true
+    }
+  ]
+}
