@@ -1,17 +1,22 @@
 #!/bin/bash
-# PreToolUse hook — AMMO champion mid-turn message gate (tmux agents).
+# PreToolUse hook — AMMO mid-turn message injection (non-blocking).
 #
 # Problem: SendMessage delivery is queued between turns. Champions are
 # deaf during long tool execution chains (GPU benchmarks, E2E sweeps).
 #
-# Detection: timestamp comparison — checks if the newest non-self inbox
-# message arrived AFTER the last teammate-message delivery in the transcript.
-# If so, deny the tool call via JSON permissionDecision.
+# Approach: Inject undelivered inbox messages as additionalContext BEFORE
+# each tool call. Never deny — champions keep working with full awareness.
+#
+# Dedup: Sidecar file tracks last-injected timestamp. Only new messages
+# since last injection get injected. Includes "ignore if delivered again"
+# context so turn-end delivery of the same messages doesn't confuse the agent.
+#
+# Cleanup: Sidecar deleted when all inbox messages have been delivered
+# (inbox_ts <= delivery_ts in transcript).
 #
 # Identity: agentName + teamName from the transcript JSONL (first 5 lines).
-# Targets: ammo-champion and ammo-impl-champion agents only.
-# Applies to all tool calls.
-# Behavior: fail-open (exit 0 on any error).
+# Targets: champion-* and impl-champion-* agents only.
+# Applies to all tool calls. Fail-open (exit 0 on any error).
 set -euo pipefail
 trap 'exit 0' ERR
 
@@ -23,7 +28,7 @@ if ! command -v jq &>/dev/null; then exit 0; fi
 
 INPUT=$(cat)
 
-# ── Parse hook input (merged: tool_name + transcript_path + agent_type) ──
+# ── Parse hook input ──
 read -r TOOL_NAME TRANSCRIPT_PATH AGENT_TYPE < <(
     echo "$INPUT" | jq -r '[.tool_name // "", .transcript_path // "", .agent_type // ""] | @tsv' 2>/dev/null
 ) || true
@@ -31,7 +36,7 @@ dbg "tool=$TOOL_NAME"
 
 [ -z "$TOOL_NAME" ] && exit 0
 
-# ── P0 FIX: Skip in-process subagents (they cannot receive messages) ──
+# ── Skip in-process subagents (they cannot receive messages) ──
 if [ -n "$AGENT_TYPE" ]; then
     dbg "skip: in-process subagent (agent_type=$AGENT_TYPE)"
     exit 0
@@ -42,12 +47,12 @@ AGENT_NAME=""
 TEAM_NAME=""
 RESOLVED_TRANSCRIPT="$TRANSCRIPT_PATH"
 
-# ── P2 FIX: EnterWorktree breaks transcript_path ──
+# ── EnterWorktree breaks transcript_path — try parent ──
 if [ -n "$TRANSCRIPT_PATH" ] && [ ! -f "$TRANSCRIPT_PATH" ]; then
     PARENT_DIR=$(echo "$(dirname "$TRANSCRIPT_PATH")" | sed 's/--claude-worktrees-[^/]*//')
     PARENT_TRANSCRIPT="$PARENT_DIR/$(basename "$TRANSCRIPT_PATH")"
     if [ -f "$PARENT_TRANSCRIPT" ]; then
-        dbg "p2-fix: using parent transcript: $PARENT_TRANSCRIPT"
+        dbg "worktree-fix: using parent transcript: $PARENT_TRANSCRIPT"
         RESOLVED_TRANSCRIPT="$PARENT_TRANSCRIPT"
     fi
 fi
@@ -58,6 +63,29 @@ if [ -n "$RESOLVED_TRANSCRIPT" ] && [ -f "$RESOLVED_TRANSCRIPT" ]; then
     ' 2>/dev/null) || true
     if [ -n "$result" ]; then
         IFS=$'\t' read -r AGENT_NAME TEAM_NAME <<< "$result"
+    fi
+
+    # ── Fallback: some tmux agents lack agentName — parse first message ──
+    if [ -z "$AGENT_NAME" ]; then
+        FALLBACK=$(head -1 "$RESOLVED_TRANSCRIPT" 2>/dev/null | jq -r '
+            .message.content // "" |
+            capture("You are (?<name>(champion|impl-champion)-\\S+) in the AMMO") |
+            .name
+        ' 2>/dev/null) || true
+        if [ -n "$FALLBACK" ]; then
+            AGENT_NAME="$FALLBACK"
+            # Extract team name from teammate_id's team config search
+            TEAMS_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/teams"
+            if [ -d "$TEAMS_ROOT" ]; then
+                for tdir in "$TEAMS_ROOT"/*/; do
+                    if jq -e --arg n "$AGENT_NAME" '.members[] | select(.name == $n)' "$tdir/config.json" &>/dev/null; then
+                        TEAM_NAME=$(jq -r '.name' "$tdir/config.json" 2>/dev/null) || true
+                        break
+                    fi
+                done
+            fi
+            dbg "fallback identity: agent=$AGENT_NAME team=$TEAM_NAME"
+        fi
     fi
 fi
 
@@ -71,21 +99,30 @@ case "$AGENT_NAME" in
 esac
 
 # ── Read inbox ──
-TEAM_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/teams/$TEAM_NAME"
+# Claude Code sanitizes team dir names (dots → dashes), so try both
+TEAMS_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/teams"
+TEAM_DIR="$TEAMS_ROOT/$TEAM_NAME"
+if [ ! -d "$TEAM_DIR" ]; then
+    SANITIZED=$(echo "$TEAM_NAME" | tr '.' '-')
+    TEAM_DIR="$TEAMS_ROOT/$SANITIZED"
+    dbg "team dir sanitized: $SANITIZED"
+fi
 MY_INBOX="$TEAM_DIR/inboxes/$AGENT_NAME.json"
 [ -f "$MY_INBOX" ] || exit 0
 
-# ── Get newest non-self inbox timestamp + count (merged: 1 jq fork) ──
-IFS="|" read -r LAST_INBOX_TS NON_SELF_COUNT < <(jq -r --arg me "$AGENT_NAME" '
-    [.[] | select(.from != $me)] as $others |
-    ($others | [.[].timestamp // empty] | map(select(. != null and . != ""))
-        | if length == 0 then "" else max end) as $max_ts |
-    "\($max_ts)|\($others | length)"
+# ── Sidecar file: tracks last-injected timestamp ──
+SIDECAR="/tmp/ammo-msg-injected-${AGENT_NAME}.ts"
+
+# ── Get newest non-self inbox timestamp ──
+LAST_INBOX_TS=$(jq -r --arg me "$AGENT_NAME" '
+    [.[] | select(.from != $me) | .timestamp // empty]
+    | map(select(. != null and . != ""))
+    | if length == 0 then "" else max end
 ' "$MY_INBOX" 2>/dev/null) || exit 0
 
-# No non-self messages → nothing to gate
+# No non-self messages → nothing to inject
 [ -z "$LAST_INBOX_TS" ] && exit 0
-dbg "last_inbox_ts=$LAST_INBOX_TS non_self=$NON_SELF_COUNT"
+dbg "last_inbox_ts=$LAST_INBOX_TS"
 
 # ── Get last delivery timestamp from transcript ──
 LAST_DELIVERY_TS=$(jq -R -r 'try fromjson
@@ -97,42 +134,71 @@ LAST_DELIVERY_TS=$(jq -R -r 'try fromjson
 
 dbg "last_delivery_ts=${LAST_DELIVERY_TS:-(none)}"
 
-# ── Compare timestamps ──
-if [ -n "$LAST_DELIVERY_TS" ] && [ "$LAST_INBOX_TS" \< "$LAST_DELIVERY_TS" ] || [ "$LAST_INBOX_TS" = "$LAST_DELIVERY_TS" ]; then
-    dbg "all delivered: inbox_ts=$LAST_INBOX_TS <= delivery_ts=$LAST_DELIVERY_TS"
-    exit 0
-fi
-
-# ── P1 FIX: 5s cooldown after deny ──
-MARKER="/tmp/ammo-msg-gate-${AGENT_NAME}.ts"
-if [ -f "$MARKER" ]; then
-    LAST_TS=$(cat "$MARKER" 2>/dev/null) || LAST_TS=0
-    NOW=$(date +%s)
-    if [ $((NOW - LAST_TS)) -lt 5 ]; then
-        dbg "cooldown: $((NOW - LAST_TS))s since last deny, skipping"
+# ── If all messages delivered, clean up sidecar and exit ──
+if [ -n "$LAST_DELIVERY_TS" ]; then
+    if [ "$LAST_INBOX_TS" \< "$LAST_DELIVERY_TS" ] || [ "$LAST_INBOX_TS" = "$LAST_DELIVERY_TS" ]; then
+        dbg "all delivered: inbox_ts=$LAST_INBOX_TS <= delivery_ts=$LAST_DELIVERY_TS — cleaning sidecar"
+        rm -f "$SIDECAR" 2>/dev/null || true
         exit 0
     fi
 fi
 
-# ── Build undelivered list + deny output (merged: filter + count + format in 1 jq) ──
-jq -c --arg me "$AGENT_NAME" --arg cutoff "${LAST_DELIVERY_TS:-}" '
+# ── Check sidecar: skip if we already injected up to this point ──
+LAST_INJECTED_TS=""
+if [ -f "$SIDECAR" ]; then
+    LAST_INJECTED_TS=$(cat "$SIDECAR" 2>/dev/null) || LAST_INJECTED_TS=""
+fi
+
+if [ -n "$LAST_INJECTED_TS" ] && [ "$LAST_INBOX_TS" = "$LAST_INJECTED_TS" ]; then
+    dbg "already injected up to $LAST_INJECTED_TS — skipping"
+    exit 0
+fi
+if [ -n "$LAST_INJECTED_TS" ] && [ "$LAST_INBOX_TS" \< "$LAST_INJECTED_TS" ]; then
+    dbg "inbox_ts=$LAST_INBOX_TS < injected_ts=$LAST_INJECTED_TS — skipping"
+    exit 0
+fi
+
+# ── Determine cutoff: inject messages newer than max(delivery_ts, injected_ts) ──
+CUTOFF=""
+if [ -n "$LAST_DELIVERY_TS" ] && [ -n "$LAST_INJECTED_TS" ]; then
+    if [ "$LAST_DELIVERY_TS" \> "$LAST_INJECTED_TS" ]; then
+        CUTOFF="$LAST_DELIVERY_TS"
+    else
+        CUTOFF="$LAST_INJECTED_TS"
+    fi
+elif [ -n "$LAST_DELIVERY_TS" ]; then
+    CUTOFF="$LAST_DELIVERY_TS"
+elif [ -n "$LAST_INJECTED_TS" ]; then
+    CUTOFF="$LAST_INJECTED_TS"
+fi
+
+dbg "cutoff=${CUTOFF:-(none)} (max of delivery=$LAST_DELIVERY_TS, injected=$LAST_INJECTED_TS)"
+
+# ── Build injection output ──
+INJECT_OUTPUT=$(jq -c --arg me "$AGENT_NAME" --arg cutoff "${CUTOFF:-}" '
     [.[] | select(.from != $me)
          | if $cutoff == "" then . else select((.timestamp // "") > $cutoff) end
     ] as $undelivered |
-    ($undelivered | length) as $count |
-    if $count == 0 then empty else
-        [$undelivered[] | "  - \(.from): \(.summary // (.text[0:80] + "..."))"] | join("\n") as $summaries |
-        "\($count) unread teammate message(s). End your turn NOW to receive them." as $reason |
-        "AMMO MESSAGE GATE: \($count) unread teammate message(s) detected.\n\n\($summaries)\n\nYou MUST end your turn NOW. Messages are queued and will be delivered when your current turn ends. Do NOT continue executing tools." as $context |
+    if ($undelivered | length) == 0 then empty else
+        ($undelivered | length) as $count |
+        ([$undelivered[] |
+            "<injected-teammate-message from=\"\(.from)\" ts=\"\(.timestamp // "unknown")\">\n\(.text)\n</injected-teammate-message>"
+        ] | join("\n\n")) as $messages |
+        "\($count) mid-turn teammate message(s) injected below. These are being delivered early so you have full context while working. When these same messages arrive again at your turn boundary, IGNORE the duplicates — you already have the content.\n\n\($messages)" as $context |
         {hookSpecificOutput: {
             hookEventName: "PreToolUse",
-            permissionDecision: "deny",
-            permissionDecisionReason: $reason,
             additionalContext: $context
         }}
     end
-' "$MY_INBOX" 2>/dev/null || exit 0
+' "$MY_INBOX" 2>/dev/null) || exit 0
 
-# Record deny timestamp for cooldown
-date +%s > "$MARKER" 2>/dev/null || true
+# ── If nothing to inject (all filtered by cutoff), exit ──
+[ -z "$INJECT_OUTPUT" ] && { dbg "no new messages after cutoff"; exit 0; }
+
+# ── Update sidecar with newest injected timestamp ──
+echo "$LAST_INBOX_TS" > "$SIDECAR" 2>/dev/null || true
+dbg "injected: sidecar updated to $LAST_INBOX_TS"
+
+# ── Emit injection (non-blocking — no permissionDecision) ──
+echo "$INJECT_OUTPUT"
 exit 0
