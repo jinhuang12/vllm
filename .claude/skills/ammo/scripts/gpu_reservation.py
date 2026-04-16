@@ -234,7 +234,7 @@ def write_reservation(
     gpu_ids: list[int],
     session_id: str,
     command_snippet: str = "",
-    lease_hours: float = 2.0,
+    lease_hours: float = 0.25,
 ) -> None:
     """Standalone low-level reservation function that manages its own locking.
 
@@ -297,7 +297,7 @@ def reserve(
     num_gpus: int,
     session_id: str,
     command_snippet: str = "",
-    lease_hours: float = 2.0,
+    lease_hours: float = 0.25,
     auto_release: bool = True,
 ) -> list[int]:
     """Dynamically reserve *num_gpus* GPUs from the pool.
@@ -551,7 +551,10 @@ if __name__ == "__main__":
         help="Session identifier (default: $CLAUDE_SESSION_ID or 'cli')",
     )
     p_reserve.add_argument(
-        "--lease-hours", type=float, default=2.0, help="Lease duration in hours"
+        "--lease-hours",
+        type=float,
+        default=0.25,
+        help="Lease duration in hours (default: 0.25 = 15 min; pass 2.0 for long sweeps/nsys)",
     )
     p_reserve.add_argument(
         "--command-snippet", type=str, default="", help="Command description"

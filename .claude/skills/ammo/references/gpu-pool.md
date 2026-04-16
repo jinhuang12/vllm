@@ -13,7 +13,15 @@ CVD=$(python .claude/skills/ammo/scripts/gpu_reservation.py reserve \
 - `--session-id {op_id}`: Use your agent's op_id (e.g., `op001`). Prevents cross-agent eviction.
 - `--no-auto-release`: Prevents your reservation from silently clearing another agent's GPUs that share a session_id.
 
-GPUs auto-release when the command completes. The PostToolUse hook detects the reservation pattern and releases by session ID. Lease expiry (2h default, 4h for nsys) handles crashes.
+GPUs auto-release when the command completes. The PostToolUse hook detects the reservation pattern and releases by session ID. A SubagentStop hook also releases any GPUs still held by `$CLAUDE_SESSION_ID` (or `$CLAUDE_SESSION_ID:$AGENT_ID`) when you return to the parent. Lease expiry (**15 min default**) handles crashes.
+
+Pass `--lease-hours 2` for long sweeps or nsys captures that run >10 min. The script does NOT auto-extend leases for nsys.
+
+**Session-id form rules (important — the PostToolUse hook regex is strict):**
+- Use `--session-id foo` (space form) OR `--session-id=foo` (equals form). Both work.
+- Valid id chars: `[A-Za-z0-9_.\-]`. Anything else (spaces, `)`, `&`, `;`, quotes) terminates the id.
+- Always release explicitly before returning if you minted an ad-hoc id:
+  `python .claude/skills/ammo/scripts/gpu_reservation.py release-session --session-id {op_id} || true`
 
 ## Contention Handling
 
@@ -56,6 +64,8 @@ For CPU-only commands (file reads, roofline math, ISA inspection), no reservatio
 | E2E sweeps | `{tp}` | Match tensor parallelism from target.json |
 
 For TP > 1, the pool allocates contiguous GPU blocks. If no contiguous block is available, the command fails — retry after other agents release.
+
+For sweep or nsys runs that legitimately exceed 15 min, add `--lease-hours 2` (or higher) to the reserve call so the lease doesn't expire mid-run.
 
 ## Diagnostics (Orchestrator Only)
 

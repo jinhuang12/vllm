@@ -96,6 +96,17 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-subagent-release.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
     "WorktreeCreate": [
       {
         "hooks": [
@@ -115,6 +126,12 @@
           }
         ]
       }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cp /home/jinhun/vllm/.claude/agents/ammo-researcher.md /home/jinhun/AIRE-TFL-KernelBench/KernelBench/scripts/cuda_eval_server_v2/ai_cli_session/.claude/agents/ammo-researcher.md)",
+      "Read(//home/jinhun/AIRE-TFL-KernelBench/KernelBench/scripts/cuda_eval_server_v2/ai_cli_session/.claude/agents/**)"
     ]
   }
 }

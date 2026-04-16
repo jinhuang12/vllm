@@ -1,6 +1,16 @@
-version: 1.3.0
+version: 1.3.1
 
 ## Changelog
+
+### 1.3.1 (2026-04-16)
+- Fix: PostToolUse GPU release hook (ammo-gpu-release.sh) was silently dropping releases — two regex bugs reproduced and fixed:
+  - Pre-filter `(?<!\S)gpu_reservation\.py` rejected path-prefixed invocations (`python .claude/.../gpu_reservation.py reserve …`), so the hook never even attempted release for the canonical pattern. Pre-filter now matches regardless of path prefix.
+  - Session-id extractor `\S+` captured trailing `)` from `$(reserve … --session-id foo)` and returned empty for `--session-id=foo`, both causing release to target the wrong id. Replaced with bounded char class `[A-Za-z0-9_.\-]+` and `--session-id[=\s]` boundary.
+  - Adds `/tmp/ammo_gpu_res/release.log` audit trail for every release attempt so future leak investigations can distinguish "hook never fired" from "hook fired but extraction missed the id".
+- Fix: lease_hours default lowered from 2h → 15min (0.25h) in gpu_reservation.py at all three sites (write_reservation, reserve, argparse). Long sweeps/nsys must now pass `--lease-hours 2` explicitly. Self-heals a dropped release within 15 minutes instead of 2 hours.
+- Feat: SubagentStop hook (ammo-subagent-release.sh) — wired in settings.local.json as a safety net that releases `$CLAUDE_SESSION_ID` and `$CLAUDE_SESSION_ID:$AGENT_ID` when a subagent returns. Does not touch sibling subagents' reservations.
+- Docs: gpu-pool.md now documents (a) 15-min default lease, (b) `--lease-hours 2` for long sweeps/nsys, (c) session-id character rules (`[A-Za-z0-9_.\-]`), (d) explicit `release-session` pattern. Removed incorrect "4-hour lease automatic" claim from ammo-researcher.md.
+- Tests: new `test-ammo-gpu-release.sh` harness validates 5 real-world command forms (canonical $()-wrapped space-form, trailing-paren, equals-form, retry-loop, non-reserve).
 
 ### 1.3.0 (2026-04-15)
 - Feat: SKILL.md invocation template parses --batch-sizes, --max-model-len, --max-num-seqs, --input-len, --output-len, --isl-osl; multi ISL/OSL pairs expand to workload_matrix cross-product; default batch size [1,8,32] → [8]

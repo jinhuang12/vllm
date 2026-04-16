@@ -152,7 +152,7 @@ See `references/torch-profiler-guide.md` §5 for methodology.
 
 ## GPU Pool
 
-GPU commands require pool reservation — see `references/gpu-pool.md`. E2E sweeps and profiling: `--num-gpus {tp}` (match TP from target.json). Profiling gets 4-hour lease automatically.
+GPU commands require pool reservation — see `references/gpu-pool.md`. E2E sweeps and profiling: `--num-gpus {tp}` (match TP from target.json). Default lease is 15 min — for sweeps and nsys captures that exceed that, pass `--lease-hours 2` to the reserve call explicitly.
 
 ## Steady-State vs Transient Classification (CRITICAL)
 
