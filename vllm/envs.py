@@ -96,9 +96,6 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
-    VLLM_TRITON_SKINNY_GEMM: bool = False
-    VLLM_FP8_WEIGHT_GEMM: bool = False
-    VLLM_FP8_OCC_GEMM: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []

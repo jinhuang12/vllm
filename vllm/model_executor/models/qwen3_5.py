@@ -441,14 +441,6 @@ class Qwen3_5Model(Qwen3NextModel):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        # Post-load: create combined in-proj weights for GDN layers
-        if envs.VLLM_TRITON_SKINNY_GEMM:
-            for layer in self.layers:
-                if hasattr(layer, 'linear_attn') and hasattr(
-                    layer.linear_attn, '_init_combined_inproj'
-                ):
-                    layer.linear_attn._init_combined_inproj()
-
         return loaded_params
 
 

@@ -101,10 +101,6 @@ source .venv/bin/activate
 # Option 2 (any branch, slower ~5-10 min): Create fresh venv
 uv venv --python 3.12 .venv
 source .venv/bin/activate
-uv pip install --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match -r requirements/build.txt
-uv pip install --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match -r requirements/common.txt
-uv pip install --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match -r requirements/cuda.txt
-uv pip install --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match torchvision torchaudio xformers hf_transfer
 VLLM_USE_PRECOMPILED=1 uv pip install -e . --no-build-isolation
 ```
 
