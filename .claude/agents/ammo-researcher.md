@@ -194,11 +194,33 @@ If the probe itself times out at OL=2, the model is too heavy for `--cuda-graph-
 
 After bottleneck mining, the orchestrator may instruct you to run ncu on the **top-3 kernels by f_decode**. This catches pathological baselines (dispatch bugs, near-zero SM utilization) before champions begin debate.
 
-**Per kernel**:
+**Capture all top-K kernels in ONE ncu invocation.** vLLM cold start (model load + torch.compile + CUDA-graph capture) is 3-5 min per run — orders of magnitude more than the ncu capture window itself. Running ncu once per kernel serializes that cold start N times and is the single biggest time sink in Stage 2b. Don't do that.
+
+**"But my first regex escape broke, so I re-ran"** is not an acceptable reason to pay the cold-start twice. It means you picked the wrong primary pattern — use the substring form below, which needs zero escaping. A retry still serializes cold starts; test the filter on a dry-run (see "Filter validation" below) before paying for the real capture.
+
+**Preferred pattern — repeated `--kernel-name` with plain substrings**:
 ```bash
 ncu --metrics sm__warps_active.avg.pct_of_peak_sustained_active,dram__bytes.sum.per_second,smsp__inst_executed.sum \
-    --kernel-name <baseline_kernel> python baseline_invocation.py
+    --kernel-name <k1_substring> --kernel-name <k2_substring> --kernel-name <k3_substring> \
+    --launch-skip <N> --launch-count <K> \
+    --csv --log-file ncu/sanity.csv --target-processes all \
+    python baseline_invocation.py
 ```
+
+- `--kernel-name` takes a plain substring and may be passed multiple times (filters are OR'd). No regex metacharacter escaping — CUTLASS mangled names with `::`, `<>`, `()`, template params just work. Pick a unique substring per kernel (e.g., `s161616gemm` instead of the full mangled symbol).
+- Use the `regex:<pattern>` form ONLY when you genuinely need regex features (character classes, alternation inside a single filter) and have validated the escape. For the top-3 sanity check, the repeated-flag form is always sufficient and safer.
+- `--launch-skip N`: skip past warmup + graph-capture launches. For a vLLM decode target with ~20 warmup iters and L decoder layers, `--launch-skip ≈ warmup_iters × L` (e.g., 200 for a 10-layer stack) lands you in steady-state decode. Skip too little → noisy capture-phase kernels; skip too much → nothing captured.
+- `--launch-count K`: cap total captured launches across the run. Without it, a broad filter over steady-state decode can profile thousands of replays. 5-10 launches per kernel is plenty for a sanity check — K≈30 for top-3.
+
+**Filter validation (dry-run before paying cold start)**: Before launching the full ncu capture, confirm your kernel-name substrings actually match something in the target trace. Grep the nsys kernel list you already have from Stage 1:
+```bash
+nsys stats --report cuda_gpu_kern_sum <baseline>.nsys-rep | grep -E '<k1_substring>|<k2_substring>|<k3_substring>'
+```
+If any substring returns zero hits, fix it before running ncu — a missed match is silent (ncu just captures nothing for that kernel) and will force a re-run.
+
+**Replay mode under CUDA graphs**: default kernel replay can hang or error on graph-captured launches. If you see that, pass `--replay-mode application` — ncu re-runs the full app per metric pass instead of re-launching individual kernels. Slower per pass, but still vastly cheaper than N separate cold starts.
+
+**Target invocation**: use a single long-running target that exercises all top-K kernels in steady-state decode (e.g., a `run_bench.py` loop around the decode step). Do NOT spawn a fresh `vllm bench latency` per kernel — amortizing the warmup is the whole point of batching into one ncu run.
 
 **Red flag thresholds** (any one triggers investigation before debate begins):
 - SM utilization < 10% for non-trivial kernels (indicates dispatch bug)

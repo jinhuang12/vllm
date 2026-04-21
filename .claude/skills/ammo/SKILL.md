@@ -240,11 +240,15 @@ When `--nsys-profile` is used, the sweep script automatically restricts `cudagra
 
 After bottleneck mining completes, the lead instructs the ammo-researcher to run a baseline ncu sanity check on the **top-3 bottleneck kernels** (by f_decode). This catches pathological baselines (dispatch bugs, near-zero SM utilization) before champions begin debate.
 
-**Command per kernel**:
+**Single-invocation pattern** (required — one cold start covers all top-3 kernels; a regex-escape retry still pays the cold start twice, so use the substring form below):
 ```bash
 ncu --metrics sm__warps_active.avg.pct_of_peak_sustained_active,dram__bytes.sum.per_second,smsp__inst_executed.sum \
-    --kernel-name <baseline_kernel> python baseline_invocation.py
+    --kernel-name <k1_substring> --kernel-name <k2_substring> --kernel-name <k3_substring> \
+    --launch-skip <N> --launch-count <K> \
+    --csv --log-file ncu/sanity.csv --target-processes all \
+    <baseline_invocation>
 ```
+Repeated `--kernel-name` with plain substrings (no `regex:` prefix) is the default — CUTLASS mangled names have `::`, `<>`, `()`, template params, and escaping them into `regex:a|b|c` on the first try is the common trap that forces a re-run. Dry-run-validate each substring against the Stage 1 nsys kernel list (`nsys stats --report cuda_gpu_kern_sum ... | grep`) before launching the capture. See `ammo-researcher.md` § Stage 2b for the full efficiency guidance (why one invocation matters, how to pick `--launch-skip`/`--launch-count`, and the `--replay-mode application` fallback for CUDA-graph hangs).
 
 **Red flag thresholds** (any one triggers investigation before debate begins):
 - SM utilization < 10% for non-trivial kernels (indicates dispatch bug — e.g., B200 n_groups=8 case showed 0.6%)
@@ -253,7 +257,7 @@ ncu --metrics sm__warps_active.avg.pct_of_peak_sustained_active,dram__bytes.sum.
 
 If a red flag fires, the researcher must investigate before the lead proceeds to Stage 3. Findings are appended to `bottleneck_analysis.md` and shared with all champions.
 
-**Cost**: ~60 seconds per kernel, ~3-5 minutes total. GPU is already dedicated to profiling at this stage.
+**Cost**: ~4-7 minutes total (single ncu invocation, one cold start; the capture window itself is ~30-60s). GPU is already dedicated to profiling at this stage.
 
 ### Stage 3: Candidate Proposal + Adversarial Debate
 
