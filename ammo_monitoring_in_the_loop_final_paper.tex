@@ -1,0 +1,971 @@
+\documentclass[11pt]{article}
+
+% ------------------------------ Packages --------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{adjustbox}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{caption}
+
+% ----------------------------- Formatting -------------------------------------
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+\captionsetup{labelfont=bf,font=small}
+
+\titleformat{\section}{\Large\bfseries}{\thesection.}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\itshape}{\thesubsubsection}{0.6em}{}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{R}{>{\raggedleft\arraybackslash}X}
+
+% ------------------------------- Title ----------------------------------------
+\title{\textbf{Monitoring in the Loop:\\ Transcript-Native Runtime Oversight for Long-Horizon Coding Agents}}
+\author{Jin Huang\\ \small{[Affiliation]}\\ \small{[Contact]}}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ------------------------------ Abstract --------------------------------------
+\begin{abstract}
+Long-horizon coding agents fail less because they lack raw capability than because they drift: they skip evidence, misread profiler outputs, conflate local speedups with end-to-end wins, or stay on invalid evaluation paths for too long. Existing work on coding agents, trajectory observability, and reasoning-trace monitoring leaves an important gap. Most monitors are post-hoc, safety-centric, or disconnected from live engineering work.
+
+We present \textbf{AMMO}, a transcript-native runtime oversight architecture for long-horizon coding agents. AMMO combines three mechanisms: (1) a \textbf{transcript-native monitor} that reads the actor's live machine-readable session log, maintains persistent oversight state outside the actor's context window, and intervenes while work is still in progress; (2) \textbf{evidence-demanding adversarial review} that turns optimization claims into staged proof obligations for correctness, kernel-level evidence, and end-to-end measurements; and (3) \textbf{delivery-aware same-channel steering} that lets the monitor intervene through the same message surface a human supervisor would use, with mid-turn context injection ensuring that queued oversight reaches the actor during long tool chains.
+
+We study AMMO in end-to-end optimization campaigns for vLLM-like GPU-intensive systems. In a 12-round, 10-track campaign on Qwen3.5-4B/L40S, 30 monitor sessions produced 31 interventions, 30 of which were acted on, and four of which had high counterfactual impact. That campaign shipped five optimizations for \textbf{$1.422\times$ cumulative end-to-end speedup} (\textbf{$1.253\times$ verified-only} after excluding unverified lossy operations). Across a broader retrospective corpus of \textbf{18 archived runs covering 16 unique campaigns}, including \textbf{5 monitored campaigns}, we identify \textbf{99 monitored interventions}, \textbf{38 validator-independence catches}, \textbf{26 coaching instances}, and \textbf{25 enforcement events}. Among the 43 interventions with formal impact labels, only \textbf{3} were rated none-impact, yielding a \textbf{7.0\% false-positive-or-moot upper bound}. Across all 18 runs, the single most common failure pattern was \textbf{cold-to-production overestimation}, appearing in \textbf{10/18 runs}.
+
+Our evidence is observational rather than randomized, so we do not claim a definitive causal estimate of monitor benefit. But the results support a strong systems claim: for long-horizon coding work, the missing control primitive is often not another offline judge, but a live transcript-native monitor that can force claims through evidence and intervene before bad process compounds.
+\end{abstract}
+
+% ==============================================================================
+\section{Introduction}
+
+Coding agents are rapidly moving from short patch generation toward longer-horizon software engineering workflows that involve repository navigation, tool use, test execution, debugging, and iterative repair [5--8]. At the same time, performance-oriented agents are beginning to tackle domains such as GPU kernel optimization, where success depends not only on code generation but also on interacting with profilers, interpreting hardware behavior, preserving correctness, and reasoning about end-to-end system impact [2--4]. These workloads expose a gap in current agent oversight.
+
+The gap is not simply that agents make mistakes. Humans also make mistakes during systems work. The harder problem is that \textbf{many important mistakes are process failures discovered too late}. An optimization agent may produce a local kernel speedup that cannot matter end-to-end because the optimized component has too small a share of wall time. It may benchmark under the profiler and then mistakenly treat profiled timing as valid throughput evidence. It may compare against the wrong baseline, leak stale environment flags into a benchmark, or decide a candidate ``won'' without a correctness-preserving incumbent comparison. In long tool chains, these failures can consume substantial engineer time and GPU budget before anyone notices.
+
+Current lines of work address parts of this problem, but not the full loop. Coding-agent papers have improved interfaces and repositories of tasks [5--8]. Observability papers and tools help inspect trajectories or instrument agent behavior [17--20]. AI-control and monitorability work shows that language models can monitor other models' reasoning traces for suspicious behavior, and that chain-of-thought (CoT) access often outperforms action-only monitoring in detecting certain forms of reward hacking and sabotage [9--15]. But much of this literature is either \textbf{post-hoc}, \textbf{safety-only}, or \textbf{disconnected from live engineering work}. In most of it, the monitor does not need to steer an active implementation agent through the same channel that a human supervisor would actually use.
+
+This paper argues for a different oversight primitive: \textbf{transcript-native runtime oversight}. Instead of asking a monitor to judge a final artifact or even a completed trajectory, we let it read the coding agent's live machine-readable transcript, filter it into an oversight digest, keep persistent state outside the actor's context window, and interject while the actor is still working. We pair this with an \textbf{evidence-demanding adversarial review style}: the monitor's job is not to be a supportive teammate but to challenge claims until they are backed by explicit evidence. Finally, we close the loop operationally: the monitor communicates through the same teammate-message channel that a human supervisor would use, and the runtime keeps those messages actionable even during long tool chains.
+
+We instantiate these ideas in \textbf{AMMO} (Automated Model \& Machine Optimization), an oversight architecture for long-horizon coding agents operating in end-to-end optimization workflows. AMMO was motivated by GPU-intensive system tuning, particularly vLLM-like inference systems where local performance gains can be misleading without strict staging of correctness, kernel proof, and end-to-end evaluation [1--4]. However, the architectural claim is broader: any coding-agent runtime that emits a machine-readable transcript and supports supervisory messages can, in principle, host the same monitor pattern.
+
+The thesis of this paper is not that AMMO invents monitoring or observability from scratch. Several recent works already study reasoning-trace monitoring [9--15], trajectory observability [17--20], and even online trajectory analysis with interventions [19]. Our claim is narrower and more practical: \textbf{a transcript-native monitor becomes a meaningful substitute for a human watching a live coding session only when three pieces are combined}:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Process visibility} into the live transcript, including reasoning, tool use, tool outputs, and subagent activity.
+  \item \textbf{Evidence-demanding adversarial review} that turns optimization claims into proof obligations.
+  \item \textbf{Delivery-aware intervention} that ensures supervisory messages actually alter the live trajectory.
+\end{enumerate}
+
+That combination is what we call \textbf{monitoring in the loop}.
+
+\subsection{Contributions}
+
+This paper makes five contributions.
+
+\textbf{(1) A transcript-native runtime oversight architecture.}
+We describe AMMO, an architecture in which a monitor consumes raw machine-readable actor transcripts, filters them into an oversight digest, stores persistent monitor state outside the actor's context, and interjects during live execution rather than after the fact. The architecture distributes trust across orthogonal oversight roles: process oversight and product verification operate on distinct information inputs.
+
+\textbf{(2) A delivery-aware steering mechanism with calibrated enforcement.}
+We show how a monitor can steer an implementation agent through the same message channel a human supervisor would use, with a mid-turn injection mechanism that delivers queued oversight as ambient context during long tool chains. We also articulate a broader principle: enforcement hardness should be calibrated both to the irreversibility of the violation and to the operational feasibility of the enforcement mechanism.
+
+\textbf{(3) Evidence-demanding adversarial review for end-to-end optimization.}
+We formulate optimization oversight as a repeated challenge-response process in which claims must be supported by staged evidence: correctness before performance, kernel-level proof before end-to-end claims, and comparison to the current incumbent rather than only to an initial baseline. We further show how the monitor's observational advantage enables \textbf{constructive coaching} through the actor's own experimental data.
+
+\textbf{(4) An empirical deployment study grounded in real optimization campaigns.}
+We present both a deep 12-round monitored campaign and a retrospective corpus of 18 archived runs covering 16 unique campaigns. The corpus includes monitored and unmonitored runs, intervention logs, campaign outcomes, anti-pattern counts, and validator-independence examples.
+
+\textbf{(5) An honest account of limits.}
+We explicitly discuss monitorability limits, CoT unfaithfulness, monitor-aware adaptation, correlated actor-monitor failures, observational evaluation constraints, and the hardening gaps of a pragmatic prompt-and-hook implementation.
+
+% ==============================================================================
+\section{Problem Setting and Motivation}
+
+\subsection{The target workload: long-horizon coding in performance-critical systems}
+
+The motivating workload in AMMO is not generic code generation but \textbf{end-to-end system optimization} in GPU-intensive applications. We use vLLM as the running example because it is representative of modern LLM serving systems where performance depends on interactions among kernels, scheduling, memory management, request mix, and runtime configuration [1].
+
+Recent work on LLM-driven kernel optimization has shown that language models can generate nontrivial GPU kernels or use performance tools during reasoning [2--4], but practical deployment still requires more than local kernel speed. A useful optimization candidate must clear a strict sequence of questions:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item Is the implementation \textbf{correct} relative to the incumbent?
+  \item Did the target kernel or component actually execute in the profiled run?
+  \item Did the component improve on the relevant metric?
+  \item Did the change produce a \textbf{real end-to-end gain} under production-parity conditions?
+  \item Is the win large enough, robust enough, and narrow enough in its enablement envelope to be \textbf{worth shipping and maintaining}?
+\end{enumerate}
+
+These are not merely reporting questions. They shape what the agent should do next. If correctness fails, more benchmarking is pointless. If the kernel never executed, profiling evidence is irrelevant. If the target component contributes only a tiny fraction of wall time, even a dramatic local win may be strategically uninteresting.
+
+Recent LLM-driven kernel optimization work has explicitly acknowledged this integration gap. Astra, a multi-agent system for optimizing SGLang kernels, notes that its optimized kernels ``are currently integrated back into SGLang manually'' [21]. This is precisely the surface on which a \emph{process} monitor is valuable: extraction, staged validation, incumbent comparison, and integration must be automated together, or the system either ships invalid kernels or stalls at a manual handoff.
+
+\subsection{Why offline judging is not enough}
+
+Suppose an implementation agent is two hours into an optimization campaign. It has edited code, rerun benchmarks, inspected profiler traces, and started drafting a report. An offline judge can still tell us later that the run was invalid, but by then the cost has already been paid.
+
+In performance work, that cost is tangible: GPU-hours, queue time, human review effort, and confusion caused by incorrect intermediate conclusions. The operational value of runtime oversight is therefore not just label accuracy. It is \textbf{time-to-intervention}. The earlier a monitor can identify a doomed line of work, the less bad state accumulates. This matters especially in long tool chains: a coding agent may issue several shell commands back to back, spawn subagents, or continue editing based on a flawed assumption. If supervisory feedback arrives but is not surfaced until much later, the monitor exists only in theory.
+
+\subsection{Evidence as a grounding mechanism}
+
+Performance reasoning is unusually vulnerable to ``paper wins'': local improvements that disappear under realistic conditions, benchmark contamination, or claims unsupported by the right evidence. AMMO addresses this by repeatedly forcing the actor through \textbf{proof obligations}. We use a simple Amdahl-style approximation to motivate these obligations.
+
+Let $T_{\text{total}}$ denote end-to-end time, $T_{\text{target}}$ the time spent in the optimized component, $f = T_{\text{target}}/T_{\text{total}}$ the component's time share, and $s = T'_{\text{target}}/T_{\text{target}}$ the local speed ratio after optimization, where $s < 1$ is faster. Ignoring second-order interactions, the predicted end-to-end improvement is approximately
+\begin{equation}
+\Delta_{\text{e2e}} \approx f(1-s).
+\end{equation}
+
+This formula is deliberately simple, but it is useful both as a \textbf{monitoring heuristic} and as a \textbf{practical stopping rule}. If an actor claims a large end-to-end win without showing either a large component share $f$ or a large local improvement $1-s$, the claim should trigger skepticism. Conversely, if a local speedup appears genuine but the target component barely matters, the monitor should push the actor toward rejection, restriction, or retargeting.
+
+The broader insight is that \textbf{evidence demand is a grounding mechanism}. By repeatedly asking for correctness artifacts, profiling proof, end-to-end measurements, and incumbent comparisons, the monitor externalizes claims that would otherwise remain hidden inside the actor's internal reasoning. In that sense, AMMO's evidence-demanding review operates as a domain-specific legibility protocol [12].
+
+\subsection{Threat model}
+
+AMMO is intended for two overlapping failure classes:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Ordinary process failures.} The actor is trying to help, but makes methodological mistakes, overgeneralizes, thrashes, or accepts insufficient evidence.
+  \item \textbf{Adversarial or deceptive failures.} The actor may, intentionally or as an emergent consequence of optimization pressure, pursue shortcuts or reward hacks that preserve apparent success while violating the real task objective [9,13--15].
+\end{enumerate}
+
+The first class is the primary operational target in this paper. Much monitorability literature focuses on sabotage or covert side tasks [9,13--15]. AMMO instead emphasizes the much more common and operationally important regime where an agent is \textbf{not malicious but still expensive to leave unsupervised}.
+
+% ==============================================================================
+\section{Related Work}
+
+\subsection{Coding agents and long-horizon software engineering}
+
+Modern coding agents combine natural-language reasoning with environment interaction, repository navigation, editing, and test execution. SWE-agent showed that specialized agent-computer interfaces materially improve autonomous software engineering performance [5]. OpenHands generalized this idea into a broader platform for tool-using software agents [6]. AutoCodeRover emphasized program-analysis structure and code search for issue resolution [7]. Benchmarks have evolved as well: SWE-Bench Pro specifically targets long-horizon software engineering tasks that may take hours or days for humans [8].
+
+These works establish the capability frontier and the evaluation setting in which long-horizon oversight becomes necessary. AMMO builds on that setting, but focuses on \textbf{runtime supervision of the process}, not on improving the actor's raw coding capability.
+
+\subsection{Trajectory analysis, observability, and process-centric evaluation}
+
+A growing line of work argues that outcome-only evaluation hides the mechanisms of agent success and failure. Bouzenia and Pradel analyze thought-action-result trajectories of software engineering agents and identify motifs and anti-patterns associated with success or failure [17]. SeaView is a visualization system for software-engineering agent trajectories [18]. Process-Centric Analysis of Agentic Software Systems introduces Graphectory, a graph-based representation of agent trajectories, and reports online trajectory analysis with diagnostic messages and rollback [19]. AgentTrace proposes structured runtime logging for agent observability across operational, cognitive, and contextual surfaces [20].
+
+AMMO is adjacent to this literature, but its emphasis is different. It is not primarily a visualization system [18], a generic telemetry framework [20], or a graph-based analysis layer [19]. Instead, its core move is to use the \textbf{existing machine-readable transcript itself as the supervisory surface}, and to combine that with same-channel steering and evidence-demanding optimization review.
+
+\subsection{Monitoring reasoning traces and AI control}
+
+Recent work shows that reasoning traces can be surprisingly useful for oversight. Baker et al. demonstrate that monitors observing a model's CoT can detect reward hacking in agentic coding environments, and that CoT access can substantially outperform action-only monitoring [9]. Guan et al. extend this into a broader evaluation suite for ``monitorability,'' finding that frontier reasoning models are often monitorable, though imperfectly so [10]. At the same time, the limits are real. Chen et al. show that reasoning models do not always faithfully reveal the reasoning they actually use [11]. Sreevatsa et al. study legibility protocols that make an untrusted model's actions easier to monitor [12]. SHADE-Arena, Reliable Weak-to-Strong Monitoring, and Async Control focus on sabotage detection, weak-to-strong monitoring, and asynchronous control under deployment constraints [13--15]. A broader governance perspective argues that real-time failure detection should be treated as a core design requirement for more autonomous agents [16].
+
+AMMO sits next to, but distinct from, this literature. Prior work largely frames monitoring as a defense against covert harm or scheming [9,13--15]. AMMO instead asks: \textbf{what would it take for a monitor to improve the ordinary day-to-day reliability of long-horizon coding agents engaged in expensive engineering work?}
+
+\subsection{LLM-driven optimization and end-to-end performance work}
+
+The optimization side of our setting also has a growing literature. vLLM showed that LLM serving performance is fundamentally a systems problem, with PagedAttention producing major end-to-end gains [1]. KernelBench formalized the challenge of getting LLMs to write correct and fast GPU kernels [2]. Nichols et al. argue that optimization requires interacting with performance tools during reasoning [3]. Chu et al. present an end-to-end framework that extracts hotspot kernels into minimal executable programs to avoid full application builds during iterative optimization [4].
+
+Wei et al. propose \textbf{Astra}, a multi-agent system that optimizes GPU kernels extracted from SGLang, reporting an average $1.32\times$ kernel speedup via iterative generate-test-profile-plan agents [21]. Astra is the closest prior work to our motivating workload, but it explicitly leaves reintegration manual: ``the optimized kernels are currently integrated back into SGLang manually'' [21]. AMMO is complementary rather than competing: we do not propose a new kernel-generating agent, but an \textbf{oversight architecture} that automates precisely the validation-and-integration loop Astra leaves to humans---correctness gates, kernel-execution proof, end-to-end sweeps under production parity, and incumbent comparison.
+
+These works motivate AMMO in two ways. First, they show that performance engineering is a rich and relevant target for autonomous agents [2--4, 21]. Second, they highlight the danger of focusing on isolated kernels or reduced artifacts alone: end-to-end impact still has to be re-established in the full system [1, 4, 21]. AMMO's contribution is not a new kernel optimizer but an \textbf{oversight architecture} for agents operating in that setting.
+
+\subsection{Positioning statement}
+
+We therefore state our novelty claim narrowly.
+
+We do \textbf{not} claim:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item to be the first to monitor agent trajectories,
+  \item to be the first to use CoT or transcript information for oversight,
+  \item or to be the first to intervene on a live trajectory.
+\end{itemize}
+
+We \textbf{do} claim:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item to present a practical, open, transcript-native architecture in which a monitor can steer a live coding agent through the same channel a human supervisor would use,
+  \item to show how evidence-demanding adversarial review can ground performance-engineering claims in staged artifacts,
+  \item and to frame runtime oversight for coding agents as a \textbf{systems problem involving observation, memory, delivery, and decision rules}, not merely a classifier prompt.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Positioning AMMO relative to nearby work.}
+\label{tab:positioning}
+\begin{adjustbox}{max width=\textwidth}
+\small
+\begin{tabular}{@{}lllcccc@{}}
+\toprule
+\textbf{Work} & \textbf{Primary domain} & \textbf{Observation surface} & \textbf{Online} & \textbf{Same-channel} & \textbf{Evidence-} & \textbf{End-to-end} \\
+ & & & \textbf{intervention} & \textbf{messaging} & \textbf{demanding} & \textbf{optimization} \\
+\midrule
+Baker et al. (2025) [9] & Agentic coding / safety & CoT + trajectory & Limited & No & No & No \\
+SeaView (2025) [18] & SWE trajectory analysis & Logs / trajectories & No & No & No & No \\
+Process-Centric (2025/26) [19] & SWE trajectory analysis & Trajectory graph & Yes & No & No & No \\
+AgentTrace (2026) [20] & Agent observability & Structured telemetry & Not primary & No & No & No \\
+Nichols et al. (2025) [3] & GPU optimization & Perf-tool reasoning & No & No & No & Partial \\
+Chu et al. (2025) [4] & GPU optimization & MEP-based loop & No & No & Partial & Yes \\
+Astra (Wei et al., 2025) [21] & GPU kernel optim. (SGLang) & Agent logs & No & No & Partial & Partial (manual integ.) \\
+\textbf{AMMO (ours)} & Long-horizon + optim. & Native runtime transcript & \textbf{Yes} & \textbf{Yes} & \textbf{Yes} & \textbf{Yes} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+% ==============================================================================
+\section{The AMMO Oversight Architecture}
+
+\subsection{Design goals}
+
+AMMO is designed around five goals.
+
+\textbf{G1. Runtime visibility without actor-side redesign.} The monitor should observe the implementation agent using the transcript the runtime already emits, rather than requiring the actor's logic to be rewritten around a new instrumentation layer.
+
+\textbf{G2. Early intervention.} Oversight should alter the live trajectory, not merely score it after completion.
+
+\textbf{G3. Evidence-grounded decision making.} Optimization claims must be backed by explicit staged evidence rather than unsupported narrative reasoning.
+
+\textbf{G4. Human-channel-equivalent steering.} The monitor should interject through the same messaging surface a human supervisor would use.
+
+\textbf{G5. Explicit ship/reject decisions.} The workflow should terminate in a maintenance decision relative to the incumbent, not a vague ``seems faster'' conclusion.
+
+\subsection{Roles, trust distribution, and orthogonal oversight axes}
+\label{sec:roles}
+
+AMMO is most naturally described as a multi-agent oversight loop with four primary roles:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Orchestrator / team lead.} Assigns optimization targets, spawns implementation and oversight roles, manages campaign-level state, and enforces stage gates.
+  \item \textbf{Implementation champion (actor).} The coding agent that edits code, runs benchmarks, profiles kernels, and prepares candidate optimizations.
+  \item \textbf{Transcript monitor.} An adversarial reviewer that watches the live transcript and sends interventions when it detects methodology, evidence, or reasoning failures.
+  \item \textbf{Validator(s).} Independent agents or scripts that verify specific stages such as baseline integrity, gate completeness, or report consistency.
+\end{itemize}
+
+A key design decision is to separate \textbf{process oversight} from \textbf{product verification}. The transcript monitor observes the actor's live trajectory---its reasoning, tool use, and intermediate decisions---and challenges process failures in real time. The validator, by contrast, independently verifies the actor's output artifacts. In the current AMMO workflow, the validator receives the optimization specification, not the actor's implementation or test code. It writes its own correctness checks from the specification alone and benchmarks the resulting candidate independently.
+
+This separation matters in practice. Across the retrospective corpus, we recorded \textbf{38 validator-independence instances across 10 runs}. Three examples illustrate the mechanism:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item In a 17-round campaign, the validator caught a \textbf{sigmoid-vs-silu activation bug} with maximum error 6.5 that the champion's own smoke test masked because the reference function contained the same conceptual mistake.
+  \item In an FP8 MoE campaign, the validator benchmarked under \textbf{CUDA graphs} while the champion had not; the champion reported a $1.10\times$ speedup, but the validator measured a \textbf{$3.4\times$ regression} because the baseline's Python dispatch overhead vanished under graphs.
+  \item In a baseline-v1 campaign, the validator independently discovered warm-cache regressions on two of four projection shapes and measured a cold-to-production translation factor of \textbf{$0.33\times$}, invalidating a debate projection of 2.7\% end-to-end gain.
+\end{enumerate}
+
+These examples suggest that independent test derivation is not just a cleanliness preference; it is a concrete defense against shared-context blind spots. Independent engineering practice reports the same mechanism: Rajasekaran, in an industry account of long-running application harnesses, finds that ``separating the agent doing the work from the agent judging it proves to be a strong lever,'' because self-evaluating agents ``tend to respond by confidently praising the work---even when the quality is obviously mediocre'' [22].
+
+\subsection{Transcript-native observation}
+
+AMMO monitors the actor's \textbf{native machine-readable transcript}, rather than asking the actor to produce a special report or relying only on end artifacts. In the current implementation, the transcript is a JSONL session log. The monitor discovers the relevant transcript, polls it periodically, and runs a filter that produces a human-readable digest while preserving the load-bearing parts of the session:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item assistant reasoning / thinking blocks,
+  \item assistant text,
+  \item tool invocations,
+  \item tool outputs,
+  \item user/system messages,
+  \item and depth-1 subagent activity.
+\end{itemize}
+
+Noise records such as progress updates or low-value queue operations are dropped. This matters because oversight is fundamentally a signal-to-noise problem. A monitor forced to reparse thousands of transcript lines of operational clutter will spend its limited budget on the wrong parts of the trajectory.
+
+Transcript-native monitoring has three practical advantages:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{No actor self-report dependency.}
+  \item \textbf{Closer faithfulness to actual work} than retrospective summaries.
+  \item \textbf{Portability}, because many runtimes already emit logs.
+\end{enumerate}
+
+This does not solve the CoT faithfulness problem [11], but it moves oversight closer to the real trajectory.
+
+\subsection{Persistent monitor memory outside the actor context}
+
+Long-horizon sessions often exceed the actor's effective working memory or context budget. AMMO therefore gives the monitor its own persistent observation log, stored outside the actor's context and updated incrementally as the session unfolds. This lets the monitor preserve long-range concerns such as:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item which risks have already been raised,
+  \item whether the actor addressed a previous warning,
+  \item recurring thrashing patterns,
+  \item and whether a claimed conclusion is supported by earlier evidence.
+\end{itemize}
+
+A monitor with no persistent memory risks becoming episodic: it can identify local anomalies, but cannot accumulate a durable case that the actor is repeatedly circling the same mistake.
+
+\subsection{Adversarial review and evidence-guided coaching}
+
+The monitor in AMMO is not prompted as a friendly peer reviewer whose job is to ``help'' the actor finish its work. It is prompted as an \textbf{adversarial reviewer} whose job is to challenge weak reasoning, unsupported claims, and process drift as early as possible. This framing is consistent with recent industry experience reporting that ``tuning a standalone evaluator to be skeptical turns out to be far more tractable than making a generator critical of its own work'' [22].
+
+The main classes of concern are:
+
+\textbf{(a) Methodology failures.}
+Examples include measuring under non-production-parity conditions, using the wrong benchmark shape, treating profiled timings as valid E2E evidence, missing or contaminated baselines, cherry-picking batch sizes, or failing to reserve the correct hardware resources.
+
+\textbf{(b) Evidence failures.}
+Examples include asserting correctness without a correctness artifact, claiming a kernel win without proof the kernel executed, claiming end-to-end impact without an unprofiled E2E sweep, or writing a report whose claims are not backed by structured outputs.
+
+\textbf{(c) Reasoning degradation.}
+Examples include local-win/global-loss reasoning, Amdahl-inconsistent extrapolation, blind fix-and-respawn behavior, surface-symptom fixes, shrinking depth of analysis, or repeated loops that do not test new hypotheses.
+
+\textbf{(d) Evidence-guided coaching.}
+The monitor also has a constructive mode: using the actor's own experimental data to suggest unexplored fix paths. This matters especially during validation failures, where the actor may already have diagnostic signal buried in intermediate logs.
+
+Across the five monitored campaigns, we recorded \textbf{26 coaching instances}. In each, the monitor used the actor's own data to suggest a fix path that the actor had not yet pursued. Three recurring patterns were especially salient:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item redirecting attention away from a bad optimization target using the actor's own per-shape measurements,
+  \item extracting a root cause from the actor's profiler or validation data,
+  \item and proposing narrower activation or gating envelopes after observing exactly where performance or correctness broke down.
+\end{itemize}
+
+This coaching behavior is structurally enabled by transcript-native observation: the monitor sees the full trajectory of experimental results, including information the actor may have already lost to context compression.
+
+\subsection{Evidence-demanding review as a legibility protocol}
+
+Repeatedly asking the actor for evidence is not merely rhetorical style. It is a control mechanism. AMMO turns each major optimization claim into a staged proof obligation:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Correctness proof.} The candidate must not degrade correctness relative to the incumbent.
+  \item \textbf{Kernel proof.} The target component or kernel must actually execute in the relevant profiled run.
+  \item \textbf{End-to-end proof.} Real system-level gains must be established under acceptable measurement conditions.
+  \item \textbf{Incumbent comparison.} The candidate must beat the current best-so-far, not merely the initial baseline.
+  \item \textbf{Maintenance decision.} The gain must justify the complexity and activation envelope required to ship it.
+\end{enumerate}
+
+This sequence serves the same function as legibility protocols in AI control [12]: it pushes the actor into a state where a weaker supervisor can evaluate its claims.
+
+\subsection{Delivery-aware intervention and calibrated enforcement}
+\label{sec:delivery}
+
+A monitor is only useful if its messages arrive in time to matter. In many agent runtimes, teammate messages are delivered at turn boundaries rather than immediately in the middle of a long shell sequence. That means a live monitor can still be functionally muted if the actor keeps issuing tools without yielding.
+
+AMMO closes this loop with a \textbf{delivery-aware intervention path}:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item The monitor sends a teammate message to the implementation agent or escalates to the orchestrator.
+  \item A runtime guard checks whether messages are queued for the actor but not yet reflected in the actor's delivered transcript.
+  \item If so, the guard injects the undelivered content as ambient context attached to the actor's next tool call.
+\end{enumerate}
+
+This design was reached empirically. An earlier version used \textbf{hard denial}: blocking further tool use until the actor yielded for message delivery. In practice, denial caused \textbf{livelock}. One session recorded \textbf{19 denials in 12 minutes with zero proposals written}, because monitors sending every ${\sim}30$ seconds repeatedly blocked the actor before it could finish a tool chain. The inject-based mechanism preserved the important guarantee---the actor sees the oversight message before its next decision---without deadlocking the session.
+
+This led to a broader principle: \textbf{calibrated enforcement}. Not all violations warrant the same response.
+
+\begin{table}[h]
+\centering
+\caption{Calibrated enforcement spectrum.}
+\label{tab:enforcement}
+\small
+\begin{tabularx}{\textwidth}{@{}lll@{}}
+\toprule
+\textbf{Violation class} & \textbf{Enforcement style} & \textbf{Rationale} \\
+\midrule
+Undelivered supervisory messages & Mid-turn injection (non-blocking) & Oversight reaches actor without interrupting tool chains \\
+Evidence gates & Hard block until artifact exists & Unsupported claims are the primary failure mode \\
+Production-parity violations & One-shot warning, then trust & Repeated blocking invites workarounds \\
+Session termination during active work & One-shot nudge, then allow & Prevents accidental exit without trapping the actor \\
+Monitor-spawn reminders & Advisory & Operationally useful but not critical enough to block \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Across the five monitored campaigns, we recorded \textbf{25 enforcement instances} spanning the full spectrum: hard blocks on correctness failures, warning-to-halt escalations on garbage outputs, and advisory observations where the actor was already transparently self-terminating a bad line of work.
+
+\subsection{Staged validation and maintenance decisions}
+
+AMMO's runtime oversight is paired with explicit stage verifiers and maintenance decisions. The intended progression is:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item Production-parity baseline capture
+  \item Bottleneck ranking from profiler evidence
+  \item Hypothesis selection with kill criteria
+  \item Bounded implementation with fallback path
+  \item Validation in strict order: \textbf{correctness $\rightarrow$ kernel-time/execution proof $\rightarrow$ end-to-end}
+  \item Maintenance decision: \textbf{ship}, \textbf{ship\_restricted}, or \textbf{reject}
+\end{enumerate}
+
+Two decision principles are especially important.
+
+\textbf{Incumbent protection.} Every candidate is compared against the current best-so-far implementation, not merely the original baseline. This reduces ``regression by iteration,'' where a later candidate looks good only because it outperforms an already superseded baseline.
+
+\textbf{Explicit enablement envelope.} Performance wins are meaningful only within the workload and deployment envelope where they were established. Hardware, precision, batch shape, model family, and scheduling mode are therefore part of the claim.
+
+\subsection{Iterative campaigns and shifting optimization targets}
+
+Real performance engineering is iterative: each successful optimization shifts the bottleneck landscape, changing which components matter most and what evidence is needed. AMMO therefore operates over \textbf{multi-round campaigns}.
+
+A simple Amdahl-style bound becomes a practical stopping rule. If the remaining top bottleneck occupies too little end-to-end time to clear the minimum worthwhile ship threshold, the campaign should stop or pivot. We frame this as a \textbf{practical engineering policy}, not a universal law: second-order interactions can matter, but the bound is still useful for preventing both premature exit and endless low-value continuation.
+
+This leads to three campaign-level behaviors:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Incumbent drift.} The baseline changes each round as shipped optimizations accumulate.
+  \item \textbf{Technology pivoting.} When one optimization class is exhausted, the orchestrator can pivot to another, but only while the stopping rule still indicates meaningful room.
+  \item \textbf{Concurrent adversarial and constructive work.} Debate for the next round can run while the current round's winner is being implemented, provided information channels remain separated.
+\end{itemize}
+
+% ==============================================================================
+\section{Study Design and Evidence Base}
+
+\subsection{Overview}
+
+Our empirical evidence has two layers.
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{A deep monitored campaign}: a single 12-round optimization campaign on Qwen3.5-4B/L40S, used as the main case study.
+  \item \textbf{A retrospective cross-session corpus}: 18 archived runs covering 16 unique campaigns, used to assess recurrence of intervention patterns, validator independence, coaching behavior, and common failure modes.
+\end{enumerate}
+
+The primary unit of analysis is the \textbf{campaign}, not the individual benchmark run. AMMO is meant to improve the full optimization process, not just one measurement.
+
+\subsection{Deep campaign case study}
+
+The main case study is a Qwen3.5-4B / NVIDIA L40S campaign (BF16, TP=1) spanning:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{12 rounds}
+  \item \textbf{10 implementation tracks}
+  \item \textbf{30 monitor sessions}
+  \item \textbf{91 agent invocations}
+  \item approximately \textbf{28 hours} of wall-clock time
+\end{itemize}
+
+This campaign is valuable because it captures the full architecture in action: debate, implementation, validation, ship/reject decisions, a temporary monitor coverage gap, and late-stage exhaustion.
+
+\subsection{Cross-session retrospective corpus}
+
+To assess whether the case-study patterns generalize, we mined \textbf{18 archived runs covering 16 unique campaigns}. Two pairs were independently mined twice and deduplicated at the campaign level. The 16 unique campaigns span:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{4 model families}: Qwen3.5-4B, Qwen3.5-35B-A3B, GLM-5, Nemotron-3-Nano-30B
+  \item \textbf{2 GPU platforms}: L40S (Ada Lovelace SM89) and B200 (Blackwell SM100)
+  \item \textbf{2 precision modes}: BF16 and FP8
+  \item \textbf{1--17 rounds per campaign}
+\end{itemize}
+
+Five campaigns had active transcript monitors; the remaining eleven had monitors disabled or absent. These groups differ in campaign length, skill version, and model-hardware configuration, so we treat unmonitored campaigns as \textbf{descriptive comparison points}, not as controlled ablations.
+
+\subsection{Mining, deduplication, and citation verification}
+
+Campaign evidence was mined into structured summaries and then deduplicated at the campaign level. The final aggregate is based on a \textbf{deduplicated cross-session report} rather than raw per-run counts. This matters because duplicate mining passes would otherwise overstate intervention totals and campaign breadth.
+
+The mining pipeline extracted \textbf{845 textual citations} from the archived artifacts and fuzzy-matched them back to the original files. \textbf{80.2\%} exceeded a 0.70 similarity threshold. The remaining \textbf{19.8\%} were primarily near-threshold paraphrases rather than obvious factual errors, but in the paper we restrict highlighted examples to evidence whose backing citations pass verification unless otherwise noted.
+
+This is not as strong as full human re-annotation, but it is stronger than anecdotal cherry-picking. It gives the paper a tractable and partially auditable evidence chain.
+
+\subsection{Impact labeling and reported metrics}
+\label{sec:impact-labeling}
+
+Some outcomes require judgment. We therefore distinguish clearly between direct logs and retrospective annotations.
+
+\textbf{Directly logged metrics} include:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item campaign outcomes,
+  \item number of rounds and tracks,
+  \item intervention counts,
+  \item severity labels,
+  \item shipped speedups,
+  \item and anti-pattern frequencies from the mining report.
+\end{itemize}
+
+\textbf{Retrospectively labeled metrics} include:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item intervention impact level (HIGH / MEDIUM / LOW / NONE),
+  \item whether an intervention changed the actor's trajectory,
+  \item and whether a monitor surfaced an issue before the actor independently noticed it.
+\end{itemize}
+
+We treat these as \textbf{annotated estimates}, not ground truth. For the retrospective labels above, each reviewed intervention was judged on four axes rather than a single summary score:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Correctness of the intervention.} Was the monitor factually right about the failure it flagged?
+  \item \textbf{Actionability.} Did the message contain a concrete next step the actor could execute?
+  \item \textbf{Causal influence.} Did the intervention measurably change the actor's subsequent trajectory (as opposed to confirming a conclusion the actor had already reached)?
+  \item \textbf{Outcome relevance.} Did the intervention affect the final accept / reject decision or measurably reduce wasted work?
+\end{enumerate}
+
+The HIGH / MEDIUM / LOW / NONE impact label reported in Section~\ref{sec:results} is an aggregation over these four axes. Decomposing the judgment this way makes disagreements between reviewers localizable to a specific axis (e.g., an intervention may be correct and actionable but have low causal influence because the actor was already converging on the same fix).
+
+We report the following main metrics:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Campaign outcome metrics}: shipped tracks, cumulative E2E speedup, exhaustion status.
+  \item \textbf{Intervention metrics}: counts, severities, action rate, impact distribution.
+  \item \textbf{Corpus metrics}: anti-pattern prevalence, validator-independence instances, coaching instances, enforcement events.
+  \item \textbf{Descriptive comparison metrics}: observed error opportunities in unmonitored campaigns.
+\end{itemize}
+
+We explicitly avoid claiming a randomized causal estimate of monitor benefit, because we do not have a controlled C0--C5 ablation study yet.
+
+\begin{table}[h]
+\centering
+\caption{Evidence base summary.}
+\label{tab:evidence-base}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Quantity} & \textbf{Value} \\
+\midrule
+Archived runs & 18 \\
+Unique campaigns & 16 \\
+Monitored campaigns & 5 \\
+Unmonitored campaigns & 11 \\
+Complete-metric campaigns & 14 \\
+Model families & 4 \\
+GPU platforms & 2 \\
+Precision modes & 2 \\
+Extracted textual citations & 845 \\
+Verification pass rate & 80.2\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==============================================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Deep campaign summary}
+
+The deep campaign shipped \textbf{5 optimizations} and achieved \textbf{$1.422\times$ cumulative end-to-end speedup}, or \textbf{$1.253\times$ verified-only} after excluding unverified lossy operations. Across the campaign, monitors produced \textbf{31 interventions}: 10 CRITICAL, 17 WARNING, and 4 INFO. The actor addressed \textbf{30/31} of them (\textbf{97\% action rate}). Four interventions had \textbf{high counterfactual impact}: each either unblocked a successful ship or prevented corrupted evidence from propagating.
+
+\begin{table}[h]
+\centering
+\caption{Deep monitored campaign summary.}
+\label{tab:deep-summary}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Campaign duration & 12 rounds, ${\sim}28$ hours \\
+Implementation tracks & 10 (5 shipped, 5 failed) \\
+Monitor sessions & 30 \\
+Total interventions & 31 (10 CRITICAL, 17 WARNING, 4 INFO) \\
+Intervention action rate & 30/31 (97\%) \\
+High-impact interventions & 4 \\
+Cumulative E2E speedup & $1.422\times$ \\
+Verified-only cumulative E2E speedup & $1.253\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In the deep campaign, intervention types were relatively balanced across four categories:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Methodology}: 29\%
+  \item \textbf{Evidence quality}: 23\%
+  \item \textbf{Reasoning degradation}: 26\%
+  \item \textbf{Correctness / safety}: 23\%
+\end{itemize}
+
+This distribution is important. The monitor was not merely catching ``safety issues'' in the narrow sense. It was spending much of its effort on the ordinary, compounding process failures that dominate expensive engineering work.
+
+\subsection{Representative high-impact interventions}
+
+\subsubsection{Case study A: Redirecting a bad optimization target}
+
+In Round 2 debate, a champion proposed a tiled weight layout to close an apparent production bandwidth gap. The monitor had seen a delegate experiment showing that all GEMM shapes already achieved roughly \textbf{80--83\% bandwidth individually}; the apparent production gap reflected environmental interference rather than per-kernel inefficiency. The monitor sent a CRITICAL redirection, and the champion pivoted away from tiled layout toward in-projection weight concatenation. A later round independently confirmed that tile selection was a no-op on L40S.
+
+The important point is not just that the monitor was ``right.'' It is that the monitor used the actor's \textbf{own evidence} to challenge an incorrect causal story before it reached implementation.
+
+\subsubsection{Case study B: Unblocking a ship with a runtime-bug diagnosis}
+
+During Round 2 implementation, an E2E sweep crashed with an out-of-memory error. The monitor identified the root cause from the crash trace: a \texttt{torch.cat(...)} inside a compiled forward path was allocating a fresh tensor during every execution, creating roughly \textbf{1.44 GB} of transient memory pressure across the stack. The monitor proposed a specific fix: move concatenation to model load time and share storage rather than allocating on the hot path.
+
+After the fix, E2E validation passed and the track shipped with \textbf{$1.143\times$ kernel speedup} and \textbf{1.49\% end-to-end gain}. This is the clearest example of the monitor functioning like a live adversarial reviewer rather than a post-hoc critic.
+
+\subsubsection{Case study C: Guiding systematic accuracy recovery}
+
+In Round 5 implementation, an INT4 weight-only quantization track failed the first accuracy gate by roughly \textbf{10 percentage points}. The monitor did not simply say ``accuracy failed.'' It proposed a structured recovery sequence: verify the quantization formula, try selective INT4 on a narrower subset, and adjust group size. Later, it identified a CUDA graph capture incompatibility in the dequantization path that was silently corrupting the runtime behavior.
+
+The track still failed the final gate, but the session illustrates a different kind of value: the monitor turned what could have become blind retry into \textbf{systematic hypothesis elimination}.
+
+\subsection{Cross-session monitored corpus}
+
+Across the five monitored campaigns, we recorded \textbf{99 interventions} after deduplication. The monitored corpus is large enough to say something about intervention composition and quality, even though it is not randomized.
+
+\begin{table}[h]
+\centering
+\caption{Monitored-corpus intervention taxonomy ($N=99$).}
+\label{tab:tax}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Category} & \textbf{Count} & \textbf{Share} \\
+\midrule
+Evidence quality & 33 & 33.3\% \\
+Methodology & 19 & 19.2\% \\
+Correctness / safety & 14 & 14.1\% \\
+Reasoning degradation & 10 & 10.1\% \\
+Coaching (primary classification) & 1 & 1.0\% \\
+Other / topic-classified & 22 & 22.2\% \\
+\midrule
+\textbf{Total} & \textbf{99} & \textbf{100.0\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The low primary share for ``coaching'' does \textbf{not} mean coaching is rare. As noted above, coaching is a \textbf{behavioral mode} that often overlaps with evidence or methodology interventions. Across the monitored campaigns, we counted \textbf{26 coaching instances} even though only one intervention had coaching as its top-level classification.
+
+Of the \textbf{96 interventions with explicit severity labels}, \textbf{30} were CRITICAL and \textbf{64} were WARNING; three lacked a severity annotation in the archived logs.
+
+\begin{table}[h]
+\centering
+\caption{Impact distribution among labeled interventions ($N=43$).}
+\label{tab:impact}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Impact label} & \textbf{Count} & \textbf{Share} \\
+\midrule
+HIGH & 15 & 34.9\% \\
+MEDIUM & 17 & 39.5\% \\
+LOW & 8 & 18.6\% \\
+NONE & 3 & 7.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The three NONE-impact interventions were a misquoted threshold, a timing concern that was off by seconds, and a procedural GPU-reservation warning. We therefore interpret \textbf{7.0\%} as a \textbf{false-positive-or-moot upper bound}, not as a pure false-positive rate.
+
+In the deep campaign---the only monitored run with explicit timing annotations---monitors surfaced issues \textbf{before} the actor independently noticed them in \textbf{13/27 cases (48\%)}. The remaining 52\% acted as confirmation or urgency amplification. We report this as a single-run metric, not as a corpus-wide estimate.
+
+\subsection{Common failure modes across all campaigns}
+
+The unmonitored campaigns are not a valid control arm, but they are still informative about the kinds of errors that recur without runtime oversight. Across all \textbf{18 archived runs}, the most common anti-pattern was \textbf{cold-to-production overestimation}, which appeared in \textbf{10/18 runs (55.6\%)}.
+
+\begin{table}[h]
+\centering
+\caption{Most frequent cross-campaign anti-patterns.}
+\label{tab:antipatterns}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Anti-pattern} & \textbf{Count} & \textbf{Share of runs} \\
+\midrule
+Cold-to-production overestimation & 10 & 55.6\% \\
+Near-optimal framing trap & 4 & 22.2\% \\
+Hallucinated data & 3 & 16.7\% \\
+Kernel speedup with no E2E translation & 2 & 11.1\% \\
+Off-track reasoning / wrong baseline & 2 & 11.1\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Cold-to-production overestimation is especially important. The overestimation factors ranged from roughly \textbf{$1.5\times$ to $6.9\times$}, with root causes including L2 residency effects, NCCL spin-wait absorption, and monolithic fusion advantages in compiled graphs. This validates the paper's emphasis on measurement-to-production translation gaps: they are not edge cases, but a dominant failure mode in real optimization work.
+
+A second recurrent pattern is the \textbf{near-optimal framing trap}: actors or debates describe a component as already ``near-optimal'' at 73--80\% bandwidth utilization, discouraging further work even when 20--27\% headroom remains. This is precisely the kind of reasoning error that a live adversarial reviewer can challenge.
+
+\subsection{Validator independence, coaching, and enforcement}
+
+Beyond raw intervention counts, the corpus shows three recurring structural behaviors.
+
+\textbf{Validator independence.}
+As noted in Section~\ref{sec:roles}, we recorded \textbf{38 validator-independence catches across 10 runs}. These range from conceptual correctness bugs that actor-written tests masked to production-parity benchmarking mistakes that completely reversed the sign of the result.
+
+\textbf{Coaching.}
+We recorded \textbf{26 coaching instances} across monitored campaigns. The common pattern was that the monitor used the actor's own measurements to suggest a concrete next move that the actor had not yet extracted from its own logs.
+
+\textbf{Calibrated enforcement.}
+We recorded \textbf{25 enforcement instances} spanning hard blocks, warning-to-halt escalations, and advisories. The move from deny-based delivery to injection-based delivery was itself prompted by an empirical failure mode---livelock---which makes calibrated enforcement one of the most practically grounded ideas in AMMO.
+
+\subsection{Descriptive case study: the monitor coverage gap}
+
+A configuration oversight in the deep campaign produced an unplanned period without monitor coverage. Rounds 7--9 lost debate monitor coverage, and two Round 7 implementation tracks were also unmonitored. We emphasize that this is \textbf{not a controlled ablation}: the optimization targets differed by round, the bottleneck landscape shifted after each ship, and both debate and implementation monitors were absent simultaneously.
+
+Still, the episode is descriptively useful. The only implementation track that failed with \textbf{multiple unguided fix attempts} was the sole unmonitored lossy track. All monitored failed tracks either self-terminated cleanly or followed monitor-guided investigation paths. This observation is suggestive, but not causal.
+
+\subsection{Diminishing monitor value during exhaustion}
+
+The deep campaign also reveals where monitor value appears to concentrate. In Rounds 10--12, monitors were active but produced \textbf{zero corrective interventions}. By that point, the actors were honestly reporting negative results while the campaign systematically exhausted remaining technology classes and bandwidth headroom.
+
+This is a useful negative result. It suggests that monitor value is highest during \textbf{active optimization}, when there are still many ways to go wrong, and lower during \textbf{late-stage exhaustion}, when the main job is confirming that nothing worthwhile remains.
+
+% ==============================================================================
+\section{Discussion}
+
+\subsection{Why transcript-native monitoring works}
+
+We believe AMMO works because it supervises \textbf{process}, not merely outputs. A final patch or benchmark table is a lossy compression of a long reasoning-and-action sequence. Many costly errors become visible much earlier in the trajectory than in the final artifact. By consuming the live transcript, AMMO can detect early signals: a flawed causal story, a benchmark command using the wrong measurement mode, repeated loops with no new evidence, or a draft conclusion that outruns the available artifacts.
+
+AMMO's practical insight is that, for coding agents, \textbf{the transcript is already a rich process trace}. The monitor does not need a new learning algorithm or a bespoke runtime telemetry stack to start being useful.
+
+\subsection{Why the ``ask for evidence'' loop matters so much}
+
+One of the most important lessons from building AMMO is that repeated requests for evidence do more than enforce good scientific style. They perform at least four control functions simultaneously:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{They externalize reasoning.}
+  \item \textbf{They slow down false closure.}
+  \item \textbf{They create legibility for weaker oversight.}
+  \item \textbf{They support incumbent protection.}
+\end{enumerate}
+
+This is why ``ask for evidence'' is more than a slogan in AMMO. It is a runtime control measure that constrains what kinds of stories the actor can continue telling.
+
+\subsection{Human-channel-equivalent steering}
+
+A central claim of this paper is that the transcript monitor can steer the implementation agent \textbf{through the same channel a human supervisor would use}. We use this claim functionally, not anthropomorphically. We do not claim the monitor is as good as a skilled human supervisor in every case. We claim that it uses the same \textbf{intervention surface}:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item it sees the live session trace,
+  \item it keeps its own external notes,
+  \item it sends messages into the actor's workflow,
+  \item and the runtime makes those messages actionable during tool execution.
+\end{itemize}
+
+This matters because many organizations already understand the pattern ``a human watches the session and intervenes.'' AMMO offers a machine-mediated approximation of that operational pattern.
+
+\subsection{AMMO is a systems contribution, not a new learning algorithm}
+
+It would be tempting to pitch AMMO as a new monitoring method. That would overstate the novelty. AMMO is better understood as a \textbf{systems architecture for runtime oversight}---one whose value comes from how its components compose into a decision procedure.
+
+The same is true of measurement handling. In AMMO, a partially good optimization is neither automatically shipped nor automatically discarded. Instead, each operating-point result maps to a different action: ignore within noise, gate if the optimization helps only in a subregion, or fail immediately if the regression is catastrophic. This is not a single classifier threshold. It is a \textbf{structured decision procedure} that turns measurement uncertainty into differentiated actions.
+
+\subsection{Why this matters beyond optimization}
+
+Although our motivating domain is system optimization, the pattern is broader. Any coding-agent workload in which \textbf{bad process accumulates cost before the final artifact exists} may benefit from transcript-native runtime oversight:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item repository migrations,
+  \item performance regressions,
+  \item CI triage,
+  \item infrastructure changes,
+  \item long-horizon issue resolution,
+  \item and operational debugging.
+\end{itemize}
+
+The architecture does not need to be copied verbatim, but the core lesson should transfer: runtime oversight has to solve \textbf{observation}, \textbf{memory}, \textbf{delivery}, and \textbf{decision rules} together.
+
+\subsection{Broadening the target of runtime oversight}
+
+AMMO also suggests a reframing for the oversight literature. A large portion of current monitorability research is organized around \textbf{intent detection}: can a monitor detect sabotage, reward hacking, or scheming [9,13--15]? That question is important, but it is not the only one that matters in real deployments.
+
+In many practical settings, the dominant source of harm is not covert malevolence but \textbf{ordinary, compounding process failure}. Agents waste compute, produce unsupported reports, contaminate benchmarks, or drift into brittle local heuristics. These failures are not sensational, but they are economically and operationally consequential---and they are precisely the regime documented throughout Section~\ref{sec:results}. Cold-to-production overestimation appearing in 10/18 runs is not a scheming failure; it is methodological drift under optimization pressure.
+
+AMMO therefore broadens the target of runtime oversight. The monitor is not only a \textbf{misbehavior detector}. It is a \textbf{live adversarial reviewer}. In that role, its responsibilities include:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item challenging unsupported claims,
+  \item demanding production-parity evidence,
+  \item enforcing stage order,
+  \item identifying reasoning degradation,
+  \item and keeping the actor honest about the difference between a local result and a deployable system win.
+\end{itemize}
+
+We suspect this broader framing will matter for the next generation of agent deployments. Many organizations may adopt long-horizon coding agents well before they face full-blown sabotage or scheming concerns. For those organizations, the first-order problem will be whether agents can be trusted to run long workflows without accumulating silent methodological debt. Reframing oversight from \emph{intent detection} to \emph{adversarial process review} expands the set of problems a monitor is expected to solve, and changes what counts as a successful intervention.
+
+% ==============================================================================
+\section{Limitations and Threats to Validity}
+
+\subsection{Observational evidence, not randomized ablation}
+\label{sec:observational}
+
+The biggest limitation is straightforward: our empirical evidence is \textbf{observational}, not randomized. The monitored and unmonitored campaigns differ in campaign length, optimization targets, model/hardware combinations, and skill maturity. The R7--R9 coverage gap is a useful descriptive case study, but it is not a clean within-task ablation.
+
+This means we should resist the temptation to overclaim. The paper supports a strong \textbf{systems} claim---that transcript-native oversight is operationally useful and plausibly important---but not a definitive causal claim such as ``AMMO increases valid deployable success rate by X\%'' absent a proper controlled study.
+
+\textbf{Future controlled evaluation.}
+To convert this systems claim into a causal estimate, a follow-up evaluation should run task-matched campaigns across the following conditions:
+
+\begin{table}[h]
+\centering
+\caption{Proposed ablation conditions for a controlled follow-up evaluation.}
+\label{tab:ablation}
+\small
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}lccccl@{}}
+\toprule
+\textbf{Condition} & \textbf{Live transcript} & \textbf{Can message} & \textbf{Delivery} & \textbf{Evidence} & \textbf{Purpose} \\
+ & \textbf{access} & \textbf{actor} & \textbf{guard} & \textbf{checklist} & \\
+\midrule
+C0: Actor only & No & No & No & No & Baseline coding-agent workflow \\
+C1: Post-hoc validator & No (artifacts only) & No & No & Yes (offline) & Tests whether static validation is sufficient \\
+C2: Live monitor, no guard & Yes & Yes & No & Yes & Tests delayed-delivery weakening \\
+C3: Live monitor, generic & Yes & Yes & Yes & No & Tests evidence-demanding review \\
+C4: Action-only monitor & Tool/actions only & Yes & Yes & Yes & Tests value of transcript richness \\
+C5: Full AMMO & Yes & Yes & Yes & Yes & Full architecture \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+The headline comparison is \textbf{C5 vs C0}, but the most scientifically informative contrasts are \textbf{C5 vs C1} (does runtime oversight add value beyond post-hoc validation?), \textbf{C5 vs C2} (does delivery enforcement matter?), and \textbf{C5 vs C3} (does evidence-demanding review matter beyond generic monitoring?). Holding optimization targets, hardware, and skill version constant across conditions would allow a cleaner causal estimate than the observational evidence presented here.
+
+\subsection{Chain-of-thought unfaithfulness}
+
+AMMO benefits from access to reasoning traces, but CoT is not a fully faithful window into model cognition. Chen et al. show that reasoning models often do not verbalize all of the influential hints or reasons they use [11]. Baker et al. similarly warn that optimization pressure can produce obfuscated reward hacking [9]. AMMO should therefore be interpreted as a \textbf{best-effort process monitor}, not a perfect readout of intent.
+
+\subsection{Monitor-aware adaptation and evasion}
+
+Once an actor knows it is being monitored, it may adapt its behavior in ways that reduce monitor effectiveness. Kale et al. show that agent awareness can substantially degrade monitoring reliability [14], and Async Control highlights the fragility of monitoring under realistic deployment constraints [15]. AMMO's evidence-demanding style partly resists this by grounding decisions in external artifacts, but does not eliminate the risk.
+
+\subsection{Correlated model failures}
+
+If the actor and monitor come from the same model family, they may share blind spots. AMMO defends against this in two ways: proof obligations are grounded in external artifacts, and validators derive their own tests from the optimization specification rather than the actor's implementation. Even so, correlated misunderstandings remain a real threat, particularly for failures that live mostly in the reasoning layer.
+
+\subsection{Domain specificity}
+
+AMMO is motivated by performance engineering and encodes assumptions that may transfer imperfectly to other domains. The staged gate structure---correctness before kernel proof before E2E---is especially natural in optimization workflows. Other coding tasks will need different proof obligations.
+
+\subsection{Hardening gaps in the current implementation}
+
+The open implementation that motivates this paper is pragmatic and real, but it is not a fail-closed runtime. It relies on prompts, shell hooks, validator scripts, and runtime conventions. Some guards are intentionally permissive. Production-parity checks may warn rather than block; exit prevention is one-shot; hooks fail open on infrastructure errors. These choices reflect calibrated enforcement, but they also limit the strength of unattended guarantees.
+
+This limitation should be stated directly: \textbf{the current implementation is a strong research prototype, not a formal control system}.
+
+\subsection{Measurement validity and retrospective labeling}
+
+Several reported metrics---especially counterfactual impact---require retrospective judgment. We therefore treat these labels as annotated estimates rather than objective truth. A stronger version of the paper would include \textbf{double annotation by independent reviewers}, explicit \textbf{inter-rater agreement statistics} such as Cohen's $\kappa$ or Krippendorff's $\alpha$ on each of the four annotation axes defined in Section~\ref{sec:impact-labeling}, third-reviewer adjudication for disagreements, and a controlled study with task-matched conditions (Section~\ref{sec:observational}). Absent those safeguards, all judgment-dependent metrics in this paper should be read as single-rater annotated estimates.
+
+% ==============================================================================
+\section{Ethics and Broader Impact}
+
+AMMO has both positive and negative implications.
+
+\subsection{Positive impacts}
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Safer and more reliable coding-agent deployment.} Runtime oversight can reduce invalid claims, wasted compute, and unsupported changes.
+  \item \textbf{Lower operational waste.} In optimization workflows, earlier intervention can save GPU time and human review effort.
+  \item \textbf{Better transparency for agent behavior.} Transcript-native monitoring encourages a process view of agent performance rather than outcome-only evaluation.
+\end{itemize}
+
+\subsection{Risks and misuses}
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Overtrust through observability theater.} Rich transcripts can create an illusion of transparency even when reasoning is not fully faithful [11].
+  \item \textbf{Normalization of deeper autonomy.} Better monitoring may encourage organizations to deploy agents more aggressively, including where monitoring remains insufficient.
+  \item \textbf{Privacy and retention risks.} Session transcripts, tool outputs, and monitor logs may contain sensitive code, credentials, or infrastructure details.
+  \item \textbf{Dual use for control or surveillance.} The same techniques that improve reliability can also intensify oversight of human or machine collaborators in problematic ways.
+\end{itemize}
+
+\subsection{Release recommendations}
+
+A responsible release should include:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item prompts and hook logic,
+  \item transcript-filtering code,
+  \item aggregation and deduplication scripts,
+  \item artifact schemas,
+  \item redacted or synthetic example transcripts,
+  \item annotation guidelines,
+  \item and explicit statements of known hardening limitations.
+\end{itemize}
+
+We do \textbf{not} recommend releasing raw proprietary transcripts without redaction.
+
+% ==============================================================================
+\section{Conclusion}
+
+This paper argues that the most valuable control primitive for long-horizon coding agents is not another offline evaluator but a \textbf{transcript-native runtime monitor that can steer the live session while forcing claims through evidence}. We instantiated this idea in AMMO, an oversight architecture built around transcript-native observation, persistent monitor memory, evidence-demanding adversarial review, delivery-aware same-channel steering, and staged validation for end-to-end optimization workflows.
+
+The open implementation is intentionally pragmatic. It uses machine-readable transcripts, filtering scripts, shell hooks, validator checks, and same-channel messaging rather than a new training algorithm or a formally verified runtime. Its value therefore stands or falls on empirical utility.
+
+Our current evidence is strong enough to support a clear claim: transcript-native monitoring is not just a neat observability trick. In real long-horizon engineering work, it can function as a live adversarial reviewer---challenging methodology, demanding evidence, coaching from the actor's own data, and intervening early enough to matter. The remaining step for the field is to complement this kind of deployment study with controlled, task-matched evaluations that estimate causal benefit more precisely.
+
+% ------------------------------------------------------------------------------
+\section*{Acknowledgments}
+
+[Acknowledgments.]
+
+% ==============================================================================
+\appendix
+
+\section{Implementation Notes for the Open AMMO Prototype}
+
+This appendix describes the main implementation ideas in concrete but implementation-agnostic terms.
+
+\subsection{Transcript source and filtering}
+
+The monitor reads the actor's raw machine-readable session log and incrementally filters it into a digest. The digest retains:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item timestamps and line ranges,
+  \item thoughts / reasoning blocks,
+  \item assistant text,
+  \item tool uses,
+  \item tool results,
+  \item and shallow subagent activity.
+\end{itemize}
+
+It drops low-value operational noise.
+
+\subsection{Monitor memory}
+
+The monitor appends filtered deltas and its own conclusions into a persistent monitor log stored alongside the artifact directory. This memory is not injected back into the actor by default; it exists to stabilize the monitor across long sessions and context compression.
+
+\subsection{Message delivery enforcement}
+
+Interventions are sent through the same teammate-message substrate that a human would use. Because those messages may otherwise be queued until the actor yields, a pre-tool hook checks whether undelivered messages are pending and, if so, injects them as ambient context attached to the actor's next tool call. A sidecar deduplication mechanism ensures each message is injected only once.
+
+\subsection{Validation scripts and artifact checks}
+
+The open prototype uses standalone scripts to verify baseline completeness, staged validation, and report consistency. In the research paper, these checks should be treated as part of the architecture's evidence layer while also being described honestly as pragmatic software components with room for stronger hardening.
+
+\section{Artifact and reproducibility checklist}
+
+Before submission, the accompanying artifact should include:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item transcript filter implementation,
+  \item monitor prompts or prompt templates,
+  \item validator scripts,
+  \item aggregation and deduplication scripts,
+  \item redacted monitor logs for the main case study,
+  \item a machine-readable campaign summary file,
+  \item intervention annotation guidelines,
+  \item and a README that explains how campaign-level counts were computed.
+\end{itemize}
+
+A strong submission would also include a small redacted benchmark bundle sufficient to reproduce at least one end-to-end case study.
+
+% ==============================================================================
+\section*{References}
+
+\begin{enumerate}[leftmargin=2em,itemsep=3pt,label={[\arabic*]}]
+  \item Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. \textbf{Efficient Memory Management for Large Language Model Serving with PagedAttention.} \emph{Proceedings of the 29th Symposium on Operating Systems Principles (SOSP)}, 2023. arXiv:2309.06180.
+
+  \item Anne Ouyang, Simon Guo, Simran Arora, Alex L. Zhang, William Hu, Christopher R\'{e}, and Azalia Mirhoseini. \textbf{KernelBench: Can LLMs Write Efficient GPU Kernels?} arXiv:2502.10517, 2025.
+
+  \item Daniel Nichols, Konstantinos Parasyris, Charles Jekel, Abhinav Bhatele, and Harshitha Menon. \textbf{Integrating Performance Tools in Model Reasoning for GPU Kernel Optimization.} arXiv:2510.17158, 2025.
+
+  \item Ruifan Chu, Anbang Wang, Xiuxiu Bai, Shuai Liu, and Xiaoshe Dong. \textbf{GPU Kernel Optimization Beyond Full Builds: An LLM Framework with Minimal Executable Programs.} arXiv:2512.22147, 2025.
+
+  \item John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan, and Ofir Press. \textbf{SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering.} \emph{NeurIPS}, 2024. arXiv:2405.15793.
+
+  \item Xingyao Wang, Boxuan Li, Yufan Song, Frank F. Xu, Xiangru Tang, Mingchen Zhuge, Jiayi Pan, Yueqi Song, Bowen Li, Jaskirat Singh, Hoang H. Tran, Fuqiang Li, Ren Ma, Mingzhang Zheng, Bill Qian, Yanjun Shao, Niklas Muennighoff, Yizhe Zhang, Binyuan Hui, Junyang Lin, Robert Brennan, Hao Peng, Heng Ji, and Graham Neubig. \textbf{OpenHands: An Open Platform for AI Software Developers as Generalist Agents.} \emph{ICLR}, 2025. arXiv:2407.16741.
+
+  \item Yuntong Zhang, Haifeng Ruan, Zhiyu Fan, and Abhik Roychoudhury. \textbf{AutoCodeRover: Autonomous Program Improvement.} arXiv:2404.05427, 2024.
+
+  \item Xiang Deng et al. \textbf{SWE-Bench Pro: Can AI Agents Solve Long-Horizon Software Engineering Tasks?} arXiv:2509.16941, 2025.
+
+  \item Bowen Baker, Joost Huizinga, Leo Gao, Zehao Dou, Melody Y. Guan, Aleksander Madry, Wojciech Zaremba, Jakub Pachocki, and David Farhi. \textbf{Monitoring Reasoning Models for Misbehavior and the Risks of Promoting Obfuscation.} arXiv:2503.11926, 2025.
+
+  \item Melody Y. Guan, Miles Wang, Micah Carroll, Zehao Dou, Annie Y. Wei, Marcus Williams, Benjamin Arnav, Joost Huizinga, Ian Kivlichan, Mia Glaese, Jakub Pachocki, and Bowen Baker. \textbf{Monitoring Monitorability.} arXiv:2512.18311, 2025.
+
+  \item Yanda Chen, Joe Benton, Ansh Radhakrishnan, Jonathan Uesato, Carson Denison, John Schulman, Arushi Somani, Peter Hase, Misha Wagner, Fabien Roger, Vlad Mikulik, Samuel R. Bowman, Jan Leike, Jared Kaplan, and Ethan Perez. \textbf{Reasoning Models Don't Always Say What They Think.} arXiv:2505.05410, 2025.
+
+  \item Ashwin Sreevatsa, Sebastian Prasanna, and Cody Rushing. \textbf{Basic Legibility Protocols Improve Trusted Monitoring.} arXiv:2602.10153, 2026.
+
+  \item Jonathan Kutasov, Yuqi Sun, Paul Colognese, Teun van der Weij, Linda Petrini, Chen Bo Calvin Zhang, John Hughes, Xiang Deng, Henry Sleight, Tyler Tracy, Buck Shlegeris, and Joe Benton. \textbf{SHADE-Arena: Evaluating Sabotage and Monitoring in LLM Agents.} arXiv:2506.15740, 2025.
+
+  \item Neil Kale, Chen Bo Calvin Zhang, Kevin Zhu, Ankit Aich, Paula Rodriguez, Scale Red Team, Christina Q. Knight, and Zifan Wang. \textbf{Reliable Weak-to-Strong Monitoring of LLM Agents.} arXiv:2508.19461, 2025.
+
+  \item Asa Cooper Stickland, Jan Michelfeit, Arathi Mani, Charlie Griffin, Ollie Matthews, Tomek Korbak, Rogan Inglis, Oliver Makins, and Alan Cooney. \textbf{Async Control: Stress-testing Asynchronous Control Measures for LLM Agents.} arXiv:2512.13526, 2025.
+
+  \item Madhulika Srikumar, Kasia Chmielinski, Jacob Pratt, Carolyn Ashurst, Chlo\'{e} Bakalar, William Bartholomew, Rishi Bommasani, Peter Cihon, Rebecca Crootof, Mia Hoffmann, Ruchika Joshi, Maarten Sap, and Caleb Withers. \textbf{Prioritizing Real-Time Failure Detection in AI Agents.} Partnership on AI report, 2025.
+
+  \item Islem Bouzenia and Michael Pradel. \textbf{Understanding Software Engineering Agents: A Study of Thought-Action-Result Trajectories.} arXiv:2506.18824, 2025.
+
+  \item Timothy Bula, Saurabh Pujar, Luca Buratti, Mihaela Bornea, and Avirup Sil. \textbf{SeaView: Software Engineering Agent Visual Interface for Enhanced Workflow.} arXiv:2504.08696, 2025.
+
+  \item Shuyang Liu, Yang Chen, Rahul Krishna, Saurabh Sinha, Jatin Ganhotra, and Reyhan Jabbarvand. \textbf{Process-Centric Analysis of Agentic Software Systems.} arXiv:2512.02393, 2025/2026.
+
+  \item Adam AlSayyad, Kelvin Yuxiang Huang, and Richik Pal. \textbf{AgentTrace: A Structured Logging Framework for Agent System Observability.} arXiv:2602.10133, 2026.
+
+  \item Anjiang Wei, Tianran Sun, Yogesh Seenichamy, Hang Song, Anne Ouyang, Azalia Mirhoseini, Ke Wang, and Alex Aiken. \textbf{Astra: A Multi-Agent System for GPU Kernel Performance Optimization.} arXiv:2509.07506, 2025.
+
+  \item Prithvi Rajasekaran. \textbf{Harness Design for Long-Running Application Development.} Anthropic Engineering Blog, March 2026. \url{https://www.anthropic.com/engineering/harness-design-long-running-apps}.
+\end{enumerate}
+
+\end{document}
