@@ -177,6 +177,9 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_OP003_PREAMBLE_FUSION: bool = False
+    VLLM_OP010_MLA_TWO_STREAM: bool = False
+    VLLM_OP014_MOE_TWO_STREAM: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
@@ -220,6 +223,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
+    VLLM_OP013_LAMPORT_AR: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
@@ -1310,6 +1314,46 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
     ),
+    # AMMO OP-003: enable MoE FP4 preamble fusion. Eliminates two
+    # redundant per-MoE-layer kernel launches when the FlashInfer
+    # TRTLLM MoE backend is selected:
+    #   1. The FillFunctor (torch.zeros) preceding cvt_fp16_to_fp4_sf_major
+    #      — cvt overwrites every scale-factor address in the sf_major
+    #        (non-swizzled) layout, so torch.empty is safe.
+    #   2. The per-layer e_score_correction_bias.to(bfloat16) cast — the
+    #      bias is a constant nn.Parameter and can be pre-cast at module
+    #        init time (mirrors the existing ROCm pattern).
+    "VLLM_OP003_PREAMBLE_FUSION": lambda: bool(
+        int(os.getenv("VLLM_OP003_PREAMBLE_FUSION", "0"))
+    ),
+    # AMMO OP-010: enable two-stream MLA decode pipelining for the standard
+    # MLA path (vllm/model_executor/layers/mla.py). When set, the MLA wrapper
+    # creates an auxiliary CUDA stream and dispatches the q-path
+    # (q_a_layernorm → q_b_proj → q-side RoPE) and the kv-path
+    # (kv_lora.split → kv_a_layernorm → k-side RoPE) onto two streams,
+    # synchronized via CUDA events. The two paths are structurally
+    # independent between fused_qkv_a_proj and the attention kernel call,
+    # which lets the GPU overlap their execution. This mirrors the
+    # production-proven pattern in deepseek_v4_attention.py:368-386 and
+    # uses vllm.utils.multi_stream_utils.maybe_execute_in_parallel under
+    # the hood.
+    "VLLM_OP010_MLA_TWO_STREAM": lambda: bool(
+        int(os.getenv("VLLM_OP010_MLA_TWO_STREAM", "0"))
+    ),
+    # AMMO OP-014: Replace the framework's `Stream.wait_stream`-based
+    # MoE shared/routed expert overlap (`SharedExperts._run_in_aux_stream`)
+    # with the OP-010-style `torch.cuda.Event` record/wait pattern so that
+    # the shared-expert NVJet GEMMs and routed-expert FP4 BMMs actually
+    # run concurrently under CUDA graph capture. The framework's
+    # MULTI_STREAM_OVERLAPPED path silently degenerates to sequential
+    # under CUDA-graph capture (proven by R5 nsys: ALL MoE kernels on the
+    # same streamId), while the event-based pattern parks shared-expert
+    # work on a side-stream just like OP-010 parks `concat_and_cache_mla`.
+    # When unset (default), behaviour is bit-identical to the existing
+    # framework path.
+    "VLLM_OP014_MOE_TWO_STREAM": lambda: bool(
+        int(os.getenv("VLLM_OP014_MOE_TWO_STREAM", "0"))
+    ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8": lambda: bool(
@@ -1552,6 +1596,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+    ),
+    # OP-013: enable the AllReduceLamportReplacementPass that rewrites
+    # standalone AllReduce sites in the compiled decode graph to dispatch
+    # through FlashInfer Lamport oneshot (instead of NCCL ring_LL).
+    # Default off; enable for evaluation only.
+    "VLLM_OP013_LAMPORT_AR": lambda: bool(
+        int(os.getenv("VLLM_OP013_LAMPORT_AR", "0"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
