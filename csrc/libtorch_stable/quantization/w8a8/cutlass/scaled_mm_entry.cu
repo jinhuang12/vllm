@@ -80,6 +80,37 @@ void cutlass_scaled_mm_sm100(torch::stable::Tensor& c,
                              torch::stable::Tensor const& a_scales,
                              torch::stable::Tensor const& b_scales,
                              std::optional<torch::stable::Tensor> const& bias);
+
+// AMMO track dense_fp8_decode_gemm_sm100: custom skinny-M decode-shape kernel
+// launcher (defined in c3x/cutlass_fp8_decode_gemm_sm100.cu).
+namespace vllm {
+void cutlass_fp8_decode_gemm_sm100(torch::stable::Tensor& out,
+                                   torch::stable::Tensor const& a,
+                                   torch::stable::Tensor const& b,
+                                   torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales);
+
+// AMMO track dense_fp8_prefill_gemm_sm100: custom prefill-shape large-M kernel
+// launcher (defined in c3x/cutlass_fp8_prefill_gemm_sm100.cu).
+void cutlass_fp8_prefill_gemm_sm100(torch::stable::Tensor& out,
+                                    torch::stable::Tensor const& a,
+                                    torch::stable::Tensor const& b,
+                                    torch::stable::Tensor const& a_scales,
+                                    torch::stable::Tensor const& b_scales);
+
+// AMMO track fp8_relu2_requant_epilogue_sm100: fused ReLUSquared+requant-to-fp8
+// epilogue launchers (defined in c3x/cutlass_scaled_mm_relu2_fp8out_sm100.cu).
+void cutlass_scaled_mm_relu2_fp8out_sm100(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    torch::stable::Tensor const& out_scale);
+void cutlass_scaled_mm_cast_fp8out_sm100(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    torch::stable::Tensor const& out_scale);
+}  // namespace vllm
 #endif
 
 #if (defined(ENABLE_CUTLASS_MOE_SM90) && ENABLE_CUTLASS_MOE_SM90) ||   \
@@ -260,6 +291,181 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
       false,
       "No compiled cutlass_scaled_mm for a compute capability less than "
       "CUDA device capability: ",
+      version_num);
+}
+
+// AMMO track dense_fp8_decode_gemm_sm100.
+// Custom skinny-M (decode-shape) FP8 dense GEMM. Same operand contract as
+// cutlass_scaled_mm (A=[M,K] fp8 row-major, B=[K,N] fp8 col-major, scalar f32
+// scales, bf16/fp16 out), but specialized to the cuBLAS-Lt-equivalent tileN=128
+// ~1-wave schedule and pinned to decode shapes. SM100-only; per-tensor scales;
+// no bias. Caller (Python) gates this behind VLLM_NEMOTRON3_FP8_DECODE_GEMM_SM100
+// and only routes the decode M-buckets here.
+void cutlass_fp8_decode_gemm_sm100(torch::stable::Tensor& c,
+                                   torch::stable::Tensor const& a,
+                                   torch::stable::Tensor const& b,
+                                   torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales) {
+  // Checks for conformality (mirror cutlass_scaled_mm).
+  STD_TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
+  STD_TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
+                  b.size(1) == c.size(1));
+  STD_TORCH_CHECK(a_scales.numel() == 1 && b_scales.numel() == 1,
+                  "decode_gemm requires per-tensor scalar scales");
+
+  // Check for strides and alignment.
+  STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
+  STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
+  STD_TORCH_CHECK(c.stride(0) % 16 == 0 &&
+                  b.stride(1) % 16 == 0);  // 16 Byte Alignment
+  STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
+  int32_t version_num = get_sm_version_num();
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+  if (version_num >= 100 && version_num < 120) {
+    vllm::cutlass_fp8_decode_gemm_sm100(c, a, b, a_scales, b_scales);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "cutlass_fp8_decode_gemm_sm100 is only compiled for SM100 (Blackwell). "
+      "CUDA device capability: ",
+      version_num);
+}
+
+// AMMO track dense_fp8_prefill_gemm_sm100.
+// Custom prefill-shape (large-M) FP8 dense GEMM. Same operand contract as
+// cutlass_scaled_mm (A=[M,K] fp8 row-major, B=[K,N] fp8 col-major, scalar f32
+// scales, bf16/fp16 out), specialized to per-output-N tuned TileN=256
+// schedules and pinned to prefill large-M. SM100-only; per-tensor scales; no
+// bias. Caller (Python) gates this behind VLLM_NEMOTRON3_FP8_PREFILL_GEMM_SM100
+// and only routes the prefill large-M GEMMs (M>256) here.
+void cutlass_fp8_prefill_gemm_sm100(torch::stable::Tensor& c,
+                                    torch::stable::Tensor const& a,
+                                    torch::stable::Tensor const& b,
+                                    torch::stable::Tensor const& a_scales,
+                                    torch::stable::Tensor const& b_scales) {
+  // Checks for conformality (mirror cutlass_scaled_mm).
+  STD_TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
+  STD_TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
+                  b.size(1) == c.size(1));
+  STD_TORCH_CHECK(a_scales.numel() == 1 && b_scales.numel() == 1,
+                  "prefill_gemm requires per-tensor scalar scales");
+
+  // Check for strides and alignment.
+  STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
+  STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
+  STD_TORCH_CHECK(c.stride(0) % 16 == 0 &&
+                  b.stride(1) % 16 == 0);  // 16 Byte Alignment
+  STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
+  int32_t version_num = get_sm_version_num();
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+  if (version_num >= 100 && version_num < 120) {
+    vllm::cutlass_fp8_prefill_gemm_sm100(c, a, b, a_scales, b_scales);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "cutlass_fp8_prefill_gemm_sm100 is only compiled for SM100 (Blackwell). "
+      "CUDA device capability: ",
+      version_num);
+}
+
+// AMMO track fp8_relu2_requant_epilogue_sm100.
+// Dense FP8 GEMM with a fused ReLUSquared + static per-tensor requant-to-fp8
+// epilogue. Operand contract mirrors cutlass_scaled_mm (A=[M,K] fp8 row-major,
+// B=[K,N] fp8 col-major, scalar f32 a/b scales) but the OUTPUT is fp8 (e4m3),
+// pre-scaled by the per-tensor scalar out_scale (= 1 / down_proj.input_scale).
+// SM100-only; per-tensor scales; no bias. Caller (Python) gates this behind
+// VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100 and only routes the fused
+// shared-expert up_proj here.
+void cutlass_scaled_mm_relu2_fp8out_sm100(
+    torch::stable::Tensor& c, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    torch::stable::Tensor const& out_scale) {
+  // Conformality (mirror cutlass_scaled_mm).
+  STD_TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
+  STD_TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
+                  b.size(1) == c.size(1));
+  STD_TORCH_CHECK(a_scales.numel() == 1 && b_scales.numel() == 1 &&
+                      out_scale.numel() == 1,
+                  "relu2_fp8out requires per-tensor scalar scales");
+
+  // Strides and alignment.
+  STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
+  STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
+  STD_TORCH_CHECK(b.stride(1) % 16 == 0);                 // 16 Byte Alignment
+  STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous() &&
+                  out_scale.is_contiguous());
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
+  int32_t version_num = get_sm_version_num();
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+  if (version_num >= 100 && version_num < 120) {
+    vllm::cutlass_scaled_mm_relu2_fp8out_sm100(c, a, b, a_scales, b_scales,
+                                               out_scale);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "cutlass_scaled_mm_relu2_fp8out_sm100 is only compiled for SM100 "
+      "(Blackwell). CUDA device capability: ",
+      version_num);
+}
+
+// AMMO track fp8_relu2_requant_epilogue_sm100 (attribution-by-ablation only):
+// the same fused op MINUS the ReLUSquared node (dequant -> requant -> fp8).
+// Gate-5.2 harness use only; NOT a production path.
+void cutlass_scaled_mm_cast_fp8out_sm100(
+    torch::stable::Tensor& c, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    torch::stable::Tensor const& out_scale) {
+  STD_TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
+  STD_TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
+                  b.size(1) == c.size(1));
+  STD_TORCH_CHECK(a_scales.numel() == 1 && b_scales.numel() == 1 &&
+                      out_scale.numel() == 1,
+                  "cast_fp8out requires per-tensor scalar scales");
+
+  STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
+  STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
+  STD_TORCH_CHECK(b.stride(1) % 16 == 0);                 // 16 Byte Alignment
+  STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous() &&
+                  out_scale.is_contiguous());
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
+  int32_t version_num = get_sm_version_num();
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+  if (version_num >= 100 && version_num < 120) {
+    vllm::cutlass_scaled_mm_cast_fp8out_sm100(c, a, b, a_scales, b_scales,
+                                              out_scale);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "cutlass_scaled_mm_cast_fp8out_sm100 is only compiled for SM100 "
+      "(Blackwell). CUDA device capability: ",
       version_num);
 }
 

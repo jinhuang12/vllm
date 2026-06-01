@@ -118,10 +118,95 @@ class NemotronHMLP(nn.Module):
         )
         self.act_fn = ReLUSquaredActivation()
 
+        # AMMO track fp8_relu2_requant_epilogue_sm100 (Round 6).
+        # Decide route eligibility ONCE at construction so forward() branches on
+        # a Python constant (Dynamo bakes it as a compile-time guard, NOT a
+        # per-shape tensor branch -> no trace-time accuracy hazard). The actual
+        # decode/prefill M-split lives INSIDE the opaque custom op (capture-time).
+        # Eligible only when: (a) the fused-epilogue flag is set, (b) SM100+, and
+        # (c) BOTH projections are static per-tensor FP8 ModelOpt layers carrying
+        # the scales the fused op needs. Anything else -> stock forward (no risk).
+        self._ammo_relu2_route = self._ammo_relu2_eligible()
+
+    def _ammo_relu2_eligible(self) -> bool:
+        import vllm.envs as envs
+        from vllm.platforms import current_platform
+
+        if not (
+            envs.VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100
+            or envs.VLLM_NEMOTRON3_FP8_PREFILL_C3X_REROUTE_SM100
+        ):
+            return False
+        if not current_platform.is_cuda():
+            return False
+        if not current_platform.has_device_capability(100):
+            return False
+        # Require static per-tensor FP8 scales on BOTH projections.
+        for proj in (self.up_proj, self.down_proj):
+            if getattr(proj, "bias", None) is not None:
+                return False
+            if not (
+                hasattr(proj, "weight")
+                and proj.weight.dtype == torch.float8_e4m3fn
+                and hasattr(proj, "weight_scale")
+                and hasattr(proj, "input_scale")
+                and getattr(proj, "input_scale", None) is not None
+            ):
+                return False
+        return True
+
     def forward(self, x: torch.Tensor):
+        # Branch on the Python constant only (no tensor-shape branch here).
+        if self._ammo_relu2_route:
+            return self._ammo_forward(x)
         x, _ = self.up_proj(x)
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
+        return x
+
+    def _ammo_forward(self, x: torch.Tensor):
+        """AMMO fp8_relu2_requant_epilogue_sm100 route.
+
+        config B (reroute only): up_proj GEMM through the stock c3x prefill
+            reroute op (bf16 out), then the standard ReLUSquared + down_proj.
+        config C (fused, default when the RELU2 flag is set): up_proj GEMM +
+            ReLUSquared + requant-to-fp8 folded into one c3x EVT epilogue; the
+            fp8 result feeds down_proj, which SKIPS its own input quant (its
+            static input_scale is folded into the epilogue out_scale).
+
+        Both configs preserve the R1 decode kernel and production numerics at
+        decode M-buckets via the opaque ops' internal capture-time M-split.
+        """
+        import vllm.envs as envs
+
+        if envs.VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100:
+            # config C -- fused epilogue, fp8 -> down_proj (input-quant skipped).
+            h_q = torch.ops.vllm.nemotron3_fp8_relu2_fused_up(
+                x,
+                self.up_proj.weight,
+                self.up_proj.weight_scale,
+                self.up_proj.input_scale,
+                self.down_proj.input_scale,
+            )
+            x, _ = self.down_proj(h_q)
+            return x
+
+        # config B -- bare reroute (ineligible/free delta), full glue retained.
+        # The reroute op consumes the QUANTIZED activation (production-identical
+        # static per-tensor quant), returns bf16 up; then the standard
+        # ReLUSquared glue + down_proj run unchanged.
+        from vllm import _custom_ops as ops
+
+        x_2d = x.view(-1, x.shape[-1])
+        a_fp8, _ = ops.scaled_fp8_quant(x_2d, self.up_proj.input_scale)
+        up = torch.ops.vllm.nemotron3_fp8_prefill_reroute_gemm(
+            a_fp8,
+            self.up_proj.weight,
+            self.up_proj.input_scale,
+            self.up_proj.weight_scale,
+        ).view(*x.shape[:-1], self.up_proj.weight.shape[1])
+        up = self.act_fn(up)
+        x, _ = self.down_proj(up)
         return x
 
 
