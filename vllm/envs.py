@@ -87,6 +87,12 @@ if TYPE_CHECKING:
     VLLM_NEMOTRON3_FP8_PREFILL_C3X_REROUTE_SM100: bool = False
     VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100: bool = False
     VLLM_NEMOTRON3_FP8_RELU2_DECODE_FUSION_SM100: bool = False
+    # Imported session-726516b2 additive tracks (Mamba2 / RMSNorm fusions),
+    # all opt-in default-OFF so PR #2's "all flags unset => base" invariant holds.
+    VLLM_MAMBA2_GATED_RMS_NORM_FUSION: bool = False
+    VLLM_MAMBA_SSM_TILE_RETUNE: bool = False
+    VLLM_MAMBA2_SSD_FUSED_STATE: bool = False
+    VLLM_NEMOTRON3_NORM_QUANT_FUSION_SM100: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -588,6 +594,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default 0 (off) => production-faithful 3-eager path. SM100/Blackwell.
     "VLLM_NEMOTRON3_FP8_RELU2_DECODE_FUSION_SM100": lambda: bool(
         int(os.getenv("VLLM_NEMOTRON3_FP8_RELU2_DECODE_FUSION_SM100", "0"))
+    ),
+    # Imported session-726516b2 additive tracks (Mamba2 / RMSNorm fusions). All
+    # are opt-in and RE-GATED DEFAULT-OFF (getenv default "0", not session-726's
+    # "1") so PR #2's invariant holds: with every flag unset the build is
+    # byte-for-byte identical to base.
+    # OP-006 Mamba2 gated-RMSNorm fusion (mamba_mixer2 / gated_rms_norm_fused).
+    "VLLM_MAMBA2_GATED_RMS_NORM_FUSION": lambda: bool(
+        int(os.getenv("VLLM_MAMBA2_GATED_RMS_NORM_FUSION", "0"))
+    ),
+    # OP-011 Mamba SSM tile retune (mamba_ssm).
+    "VLLM_MAMBA_SSM_TILE_RETUNE": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_SSM_TILE_RETUNE", "0"))
+    ),
+    # OP-012 Mamba2 SSD fused-state passing (ssd_combined /
+    # ssd_chunk_state_passing_fused).
+    "VLLM_MAMBA2_SSD_FUSED_STATE": lambda: bool(
+        int(os.getenv("VLLM_MAMBA2_SSD_FUSED_STATE", "0"))
+    ),
+    # OP-009 RMSNorm + FP8-quant fusion (config/vllm.py enable_norm_fusion). When
+    # set to 1, re-enables the SM90/SM100 FusedAddRMSNormStaticQuantPattern C++
+    # fusion clause; default 0 (off) => enable_norm_fusion returns its base value.
+    "VLLM_NEMOTRON3_NORM_QUANT_FUSION_SM100": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON3_NORM_QUANT_FUSION_SM100", "0"))
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
