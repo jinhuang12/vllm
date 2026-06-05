@@ -924,6 +924,117 @@ def cutlass_scaled_mm(
     return out.view(*target_shape)
 
 
+def cutlass_fp8_decode_gemm_sm100(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Custom skinny-M (decode-shape) SM100 FP8 dense GEMM.
+
+    AMMO track ``dense_fp8_decode_gemm_sm100``. Computes
+    ``out = (scale_a * a) @ (scale_b * b)`` for per-tensor scalar
+    ``scale_a``/``scale_b``, with fp8_e4m3 operands and bf16/fp16 output, using a
+    custom CUTLASS GemmUniversal collective instantiating the cuBLAS-Lt-
+    equivalent tileN=128 ~1-wave schedule. Same operand contract as
+    ``cutlass_scaled_mm`` (``a``=[M,K] row-major fp8, ``b``=[K,N] col-major fp8).
+    No bias path. SM100 only.
+    """
+    assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
+    out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_fp8_decode_gemm_sm100(out, a, b, scale_a, scale_b)
+    return out.view(*target_shape)
+
+
+def cutlass_fp8_prefill_gemm_sm100(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Custom prefill-shape (large-M) SM100 FP8 dense GEMM.
+
+    AMMO track ``dense_fp8_prefill_gemm_sm100``. Computes
+    ``out = (scale_a * a) @ (scale_b * b)`` for per-tensor scalar
+    ``scale_a``/``scale_b``, with fp8_e4m3 operands and bf16/fp16 output, using a
+    custom CUTLASS GemmUniversal collective with per-output-N tuned TileN=256
+    schedules (in_proj N=18560 uses Tile<256,256,128>; the other prefill FP8
+    shapes use Tile<128,256,128>; both Cluster<2,1,1>). Same operand contract as
+    ``cutlass_scaled_mm`` (``a``=[M,K] row-major fp8, ``b``=[K,N] col-major fp8).
+    No bias path. SM100 only. Numerically bit-identical to ``cutlass_scaled_mm``
+    (same lossless ScaledEpilogue).
+    """
+    assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
+    out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_fp8_prefill_gemm_sm100(out, a, b, scale_a, scale_b)
+    return out.view(*target_shape)
+
+
+def cutlass_scaled_mm_relu2_fp8out_sm100(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Dense FP8 GEMM with a fused ReLUSquared + requant-to-fp8 epilogue.
+
+    AMMO track ``fp8_relu2_requant_epilogue_sm100``. Computes::
+
+        y   = (scale_a * a) @ (scale_b * b)            # f32 accumulate, dequant
+        out = saturate_fp8( out_scale * relu(y) ** 2 ) # in-register, fp8 e4m3
+
+    for per-tensor scalar ``scale_a``/``scale_b``/``out_scale``, with fp8_e4m3
+    operands AND fp8_e4m3 output. ``out_scale`` is ``1 / down_proj.input_scale``
+    so the fp8 output is pre-scaled for the consuming down_proj GEMM (which must
+    therefore skip its own input quant on this fused route). Same operand
+    contract as ``cutlass_scaled_mm`` (``a``=[M,K] row-major fp8, ``b``=[K,N]
+    col-major fp8). No bias path. SM100 only.
+    """
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
+    out = torch.empty(
+        (a.shape[0], b.shape[1]), dtype=torch.float8_e4m3fn, device=a.device
+    )
+    torch.ops._C.cutlass_scaled_mm_relu2_fp8out_sm100(
+        out, a, b, scale_a, scale_b, out_scale
+    )
+    return out.view(*target_shape)
+
+
+def cutlass_scaled_mm_cast_fp8out_sm100(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Attribution-by-ablation sibling of ``cutlass_scaled_mm_relu2_fp8out_sm100``.
+
+    Identical epilogue MINUS the ReLUSquared node::
+
+        out = saturate_fp8( out_scale * (scale_a * a) @ (scale_b * b) )
+
+    Used by the Gate-5.2 harness to isolate the cost of the ReLUSquared node
+    (``t_full_relu2 - t_cast_only``). NOT a production path.
+    """
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
+    out = torch.empty(
+        (a.shape[0], b.shape[1]), dtype=torch.float8_e4m3fn, device=a.device
+    )
+    torch.ops._C.cutlass_scaled_mm_cast_fp8out_sm100(
+        out, a, b, scale_a, scale_b, out_scale
+    )
+    return out.view(*target_shape)
+
+
 def cutlass_scaled_mm_azp(
     a: torch.Tensor,
     b: torch.Tensor,

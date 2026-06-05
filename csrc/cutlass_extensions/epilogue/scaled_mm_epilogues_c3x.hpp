@@ -3,6 +3,12 @@
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_array_c3x.hpp"
 
+// For the ReLUSquared activation functor used by ScaledEpilogueReLUSquared
+// (AMMO track fp8_relu2_requant_epilogue_sm100). Pure CUTLASS device code, no
+// torch dependency, so it is safe under both the _C and _C_stable_libtorch
+// targets.
+#include "cutlass/epilogue/thread/activation.h"
+
 // This header is shared by both _C (unstable ABI) and _C_stable_libtorch
 // (stable ABI) targets. When compiled under the stable ABI target,
 // TORCH_TARGET_VERSION is defined and Tensor is unavailable, so we
@@ -35,6 +41,46 @@ template <typename T>
 struct identity {
   CUTLASS_HOST_DEVICE
   T operator()(T lhs) const { return lhs; }
+};
+
+/*
+ * ReLUSquared unary activation functor: y -> relu(y)^2 = (max(y,0))^2.
+ *
+ * AMMO track fp8_relu2_requant_epilogue_sm100. This exactly mirrors the
+ * production ReLUSquaredActivation
+ * (vllm/model_executor/layers/activation.py: torch.square(F.relu(x))):
+ * apply ReLU first (NaN-propagating, matching CUTLASS's relu), then square.
+ *
+ * Provided in both a scalar and an Array<T, N> specialization because
+ * Sm90Compute instantiates ComputeFn<Array<ElementCompute, FragmentSize>> on
+ * the converted accumulator fragment. The Array path reuses CUTLASS's
+ * NaN-propagating maximum and elementwise multiply so it stays a pure
+ * in-register ALU op that overlaps the MMA.
+ */
+template <typename T>
+struct ReLUSquared {
+  static const bool kIsHeavy = false;
+
+  CUTLASS_HOST_DEVICE
+  T operator()(T value) const {
+    cutlass::epilogue::thread::ReLu<T> relu;
+    T r = relu(value);
+    cutlass::multiplies<T> mul;
+    return mul(r, r);
+  }
+};
+
+template <typename T, int N>
+struct ReLUSquared<cutlass::Array<T, N>> {
+  static const bool kIsHeavy = false;
+
+  CUTLASS_HOST_DEVICE
+  cutlass::Array<T, N> operator()(cutlass::Array<T, N> const& frag) const {
+    cutlass::epilogue::thread::ReLu<cutlass::Array<T, N>> relu;
+    cutlass::Array<T, N> r = relu(frag);
+    cutlass::multiplies<cutlass::Array<T, N>> mul;
+    return mul(r, r);
+  }
 };
 
 template <typename ElementAcc, typename ElementD, typename TileShape>
@@ -179,6 +225,172 @@ struct ScaledEpilogue
 
     typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
     return ArgumentType{a_args, evt0_args, {}};
+  }
+};
+
+/*
+ * AMMO track fp8_relu2_requant_epilogue_sm100.
+ *
+ * This epilogue extends ScaledEpilogue by folding the ReLUSquared activation
+ * and a static per-tensor requantization-to-fp8 into the GEMM epilogue. It is
+ * the fused form of the production shared-expert chain:
+ *
+ *   up_proj FP8 GEMM (bf16 out)
+ *     -> ReLUSquared activation         (torch.square(F.relu(x)))
+ *     -> requant to fp8 (x * 1/input_scale_down, saturating cast)
+ *     -> down_proj FP8 GEMM (consumes fp8 directly)
+ *
+ * Today the activation+requant runs as a separate Inductor-fused
+ * vectorized_elementwise_kernel between the two GEMMs (one full HBM
+ * round-trip). This epilogue eliminates that kernel: it applies the per-tensor
+ * dequant (scaleA*scaleB*acc), ReLUSquared, and the static requant scalar
+ * in-register on the accumulator tile, and writes fp8 directly (ElementD =
+ * float_e4m3fn), halving the output write vs a bf16-out GEMM.
+ *
+ * The requant scale is a STATIC per-tensor scalar (modelopt static input quant
+ * for the down_proj), so NO grid-wide amax reduction is needed -- the whole
+ * activation+requant is a pure per-element op, cleanly foldable into a CUTLASS
+ * EVT epilogue.
+ *
+ * EVT tree (extends the ScaledEpilogue D = scaleA*(scaleB*Accum) pattern):
+ *   EVTCompute0 = scaleB * Accum                         (f32)
+ *   Dequant     = scaleA * EVTCompute0                   (f32, = y)
+ *   ReLU2       = ReLUSquared(Dequant) = relu(y)^2       (f32)
+ *   Requant     = out_scale * ReLU2 -> ElementD (fp8)    (round-to-nearest,
+ *                                                         saturating cast)
+ * where out_scale is the precomputed 1/input_scale_down scalar.
+ *
+ * Notes:
+ *  - ElementD MUST be a float8 type (float_e4m3fn) for this epilogue; the final
+ *    NumericArrayConverter saturates to the fp8 max-finite (+-448) natively, so
+ *    no explicit clamp node is required.
+ *  - The down_proj call-site MUST skip its own input quant on this fused route
+ *    (the input_scale_down is already applied here) -- enforced Python-side.
+ */
+template <typename ElementAcc, typename ElementD, typename TileShape>
+struct ScaledEpilogueReLUSquared
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  // The static requant scalar (1 / input_scale_down). Per-tensor scalar load,
+  // wired exactly like ScaleA/ScaleB.
+  using ScaleReq = typename SUPER::template RowOrScalarLoad<float>;
+
+  // scaleB * Accum -> f32
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
+
+  // scaleA * (scaleB * Accum) -> f32   (the dequantized GEMM result y)
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTDequant =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0>;
+
+  // relu(y)^2 -> f32   (unary node)
+  using ComputeReLU2 = cutlass::epilogue::fusion::Sm90Compute<
+      vllm::c3x::ReLUSquared, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTReLU2 =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeReLU2, EVTDequant>;
+
+  // out_scale * relu(y)^2 -> ElementD (fp8, saturating round-to-nearest)
+  using ComputeRequant = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeRequant, ScaleReq, EVTReLU2>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(TensorType const& a_scales,
+                                   TensorType const& b_scales,
+                                   TensorType const& out_scale) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto req_args =
+        SUPER::template args_from_tensor<ScaleReq, float>(out_scale);
+
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    typename EVTDequant::Arguments dequant_args{a_args, evt0_args, {}};
+    typename EVTReLU2::Arguments relu2_args{dequant_args, {}};
+    return ArgumentType{req_args, relu2_args, {}};
+  }
+};
+
+/*
+ * AMMO track fp8_relu2_requant_epilogue_sm100 -- ATTRIBUTION-BY-ABLATION
+ * variant.
+ *
+ * Identical to ScaledEpilogueReLUSquared EXCEPT the ReLUSquared node is
+ * removed: out = saturate_fp8( out_scale * (scaleA * scaleB * Accum) ). This is
+ * the "identity-cast-to-fp8" epilogue used as the fused-side ablation arm in
+ * Gate 5.2: (t_full_relu2 - t_cast_only) isolates the cost of the ReLUSquared
+ * unary node ALONE (everything else -- dequant, requant scalar, fp8 write -- is
+ * byte-identical between the two), proving the eliminated glue mass IS
+ * relu^2+requant and not a co-located cast/scale op. Memory traffic is
+ * identical to the full variant (same fp8 [M,N] write), so the delta is purely
+ * the in-register relu^2 ALU.
+ *
+ * EVT tree:
+ *   EVTCompute0 = scaleB * Accum                  (f32)
+ *   Dequant     = scaleA * EVTCompute0            (f32)
+ *   Requant     = out_scale * Dequant -> fp8      (round-to-nearest, saturating)
+ */
+template <typename ElementAcc, typename ElementD, typename TileShape>
+struct ScaledEpilogueCastFp8
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using ScaleReq = typename SUPER::template RowOrScalarLoad<float>;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTDequant =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0>;
+
+  using ComputeRequant = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeRequant, ScaleReq, EVTDequant>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(TensorType const& a_scales,
+                                   TensorType const& b_scales,
+                                   TensorType const& out_scale) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto req_args =
+        SUPER::template args_from_tensor<ScaleReq, float>(out_scale);
+
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    typename EVTDequant::Arguments dequant_args{a_args, evt0_args, {}};
+    return ArgumentType{req_args, dequant_args, {}};
   }
 };
 

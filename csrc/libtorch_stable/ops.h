@@ -39,6 +39,41 @@ void cutlass_scaled_mm(torch::stable::Tensor& out,
                        torch::stable::Tensor const& b_scales,
                        std::optional<torch::stable::Tensor> const& bias);
 
+// AMMO track dense_fp8_decode_gemm_sm100: custom skinny-M (decode-shape) SM100
+// FP8 dense GEMM. Per-tensor scalar scales, no bias, bf16/fp16 out.
+void cutlass_fp8_decode_gemm_sm100(torch::stable::Tensor& out,
+                                   torch::stable::Tensor const& a,
+                                   torch::stable::Tensor const& b,
+                                   torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales);
+
+// AMMO track dense_fp8_prefill_gemm_sm100: custom prefill-shape (large-M) SM100
+// FP8 dense GEMM with per-output-N tuned TileN=256 schedules. Per-tensor scalar
+// scales, no bias, bf16/fp16 out.
+void cutlass_fp8_prefill_gemm_sm100(torch::stable::Tensor& out,
+                                    torch::stable::Tensor const& a,
+                                    torch::stable::Tensor const& b,
+                                    torch::stable::Tensor const& a_scales,
+                                    torch::stable::Tensor const& b_scales);
+
+// AMMO track fp8_relu2_requant_epilogue_sm100: dense FP8 GEMM with a fused
+// ReLUSquared + static per-tensor requant-to-fp8 epilogue. fp8 (e4m3) output
+// pre-scaled by out_scale (= 1 / down_proj.input_scale). Per-tensor scalar
+// scales, no bias, SM100-only.
+void cutlass_scaled_mm_relu2_fp8out_sm100(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    torch::stable::Tensor const& out_scale);
+
+// AMMO track fp8_relu2_requant_epilogue_sm100 (attribution-by-ablation only):
+// the same epilogue MINUS the ReLUSquared node. Gate-5.2 harness use only.
+void cutlass_scaled_mm_cast_fp8out_sm100(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    torch::stable::Tensor const& out_scale);
+
 void cutlass_moe_mm(torch::stable::Tensor& out_tensors,
                     torch::stable::Tensor const& a_tensors,
                     torch::stable::Tensor const& b_tensors,

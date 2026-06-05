@@ -4,15 +4,25 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
+import functools
+
 import torch
 from packaging import version
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
+
+
+@functools.lru_cache(maxsize=8)
+def _sm_count_for_device(device_index: int) -> int:
+    """Cached SM count for a CUDA device (used by selective_state_update tile
+    heuristic at OP-011)."""
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
 
 if TRITON3:
 
@@ -454,8 +464,25 @@ def selective_state_update(
     else:
         # dstate > 64
         if is_blackwell:
-            # Optimized for B200 with dstate>64
-            BLOCK_SIZE_M, num_warps = 32, 8
+            # Optimized for B200 with dstate>64.
+            #
+            # OP-011 (Round 8): On B200 (148 SMs), the default
+            # (BLOCK_SIZE_M=32, num_warps=8) yields a (cdiv(dim,32), N, nheads)
+            # grid that is occupancy-starved at small batch (~1.6 blocks/SM at
+            # N*nheads=128, N=1). NCU on the production decode path measures
+            # 21.27% achieved occupancy and only 6.17% peak DRAM BW with a
+            # 47.4% long_scoreboard stall — latency-bound, not BW-bound.
+            #
+            # Switching to (BLOCK_SIZE_M=8, num_warps=4) when the grid is
+            # under-subscribed (N*nheads < 4*SM_count) raises blocks/SM ~4×
+            # via cdiv(dim,M) and recovers ~1.15× kernel speedup. Same kernel
+            # body, only meta-parameters change at JIT time, so output is
+            # numerically identical to the default tile.
+            sm_count = _sm_count_for_device(state.device.index)
+            if envs.VLLM_MAMBA_SSM_TILE_RETUNE and N * nheads < 4 * sm_count:
+                BLOCK_SIZE_M, num_warps = 8, 4
+            else:
+                BLOCK_SIZE_M, num_warps = 32, 8
         elif dstate <= 128:
             BLOCK_SIZE_M, num_warps = 4, 4
 

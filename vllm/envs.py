@@ -82,6 +82,17 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_NEMOTRON3_FP8_DECODE_GEMM_SM100: bool = False
+    VLLM_NEMOTRON3_FP8_PREFILL_GEMM_SM100: bool = False
+    VLLM_NEMOTRON3_FP8_PREFILL_C3X_REROUTE_SM100: bool = False
+    VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100: bool = False
+    VLLM_NEMOTRON3_FP8_RELU2_DECODE_FUSION_SM100: bool = False
+    # Imported session-726516b2 additive tracks (Mamba2 / RMSNorm fusions),
+    # all opt-in default-OFF so PR #2's "all flags unset => base" invariant holds.
+    VLLM_MAMBA2_GATED_RMS_NORM_FUSION: bool = False
+    VLLM_MAMBA_SSM_TILE_RETUNE: bool = False
+    VLLM_MAMBA2_SSD_FUSED_STATE: bool = False
+    VLLM_NEMOTRON3_NORM_QUANT_FUSION_SM100: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -526,6 +537,87 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # AMMO track dense_fp8_decode_gemm_sm100. When set to 1, route the dense
+    # per-tensor FP8 (e4m3) GEMM at decode M-buckets (M <= 8) through a custom
+    # skinny-M CUTLASS SM100 kernel (cuBLAS-Lt-equivalent tileN=128 ~1-wave
+    # schedule) instead of the production FlashInfer bmm_fp8 "auto" path; larger
+    # M (prefill / BS=32) keeps the production path. Default 0 (off) =>
+    # byte-for-byte identical to the production dense FP8 path. SM100/Blackwell.
+    "VLLM_NEMOTRON3_FP8_DECODE_GEMM_SM100": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON3_FP8_DECODE_GEMM_SM100", "0"))
+    ),
+    # AMMO track dense_fp8_prefill_gemm_sm100. When set to 1, route the dense
+    # per-tensor FP8 (e4m3) GEMM at prefill large-M (M > 256) through a custom
+    # CUTLASS SM100 kernel with per-output-N tuned TileN=256 schedules (in_proj
+    # N=18560 -> Tile<256,256,128>; other FP8 shapes -> Tile<128,256,128>; both
+    # Cluster<2,1,1>) instead of the production FlashInfer bmm_fp8 "auto" path.
+    # Decode (M <= 8) and the M in (8, 256] regime keep their existing paths.
+    # Default 0 (off) => byte-for-byte identical to the production dense FP8
+    # path. Independent of VLLM_NEMOTRON3_FP8_DECODE_GEMM_SM100. SM100/Blackwell.
+    "VLLM_NEMOTRON3_FP8_PREFILL_GEMM_SM100": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON3_FP8_PREFILL_GEMM_SM100", "0"))
+    ),
+    # AMMO SHARED reroute toggle, used by BOTH dense_fp8_prefill_gemm_sm100
+    # (mainloop track) and fp8_relu2_requant_epilogue_sm100 (epilogue track).
+    # When set to 1, route the dense per-tensor FP8 (e4m3) GEMM at the prefill
+    # large-M bucket (M > 256) through the STOCK in-tree c3x cutlass_scaled_mm
+    # (sm100_fp8_config_default Tile<256,128,128>/Cluster<2,2,1>) instead of the
+    # production FlashInfer bmm_fp8 "auto" path, with NO custom kernel and NO
+    # epilogue fusion (stock ScaledEpilogue + standalone Inductor relu^2+requant
+    # glue). This is the FREE, mandate-INELIGIBLE dispatch reroute slice that
+    # both tracks sit on top of; it is exposed standalone so the bare-reroute
+    # config (eligibility reference, "config B") is reachable for honest E2E
+    # attribution -- the eligible custom-over-c3x credit can then be measured as
+    # (config B - config C). Ignored if VLLM_NEMOTRON3_FP8_PREFILL_GEMM_SM100 is
+    # also set (the custom mainloop kernel takes precedence). Validation-only
+    # knob; default 0 (off) => production FlashInfer path. SM100/Blackwell.
+    "VLLM_NEMOTRON3_FP8_PREFILL_C3X_REROUTE_SM100": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON3_FP8_PREFILL_C3X_REROUTE_SM100", "0"))
+    ),
+    # AMMO track fp8_relu2_requant_epilogue_sm100 (EVT fusion feature). When set
+    # to 1, the prefill large-M (M > 256) shared-expert up_proj is computed by a
+    # custom CUTLASS SM100 GEMM whose epilogue folds the ReLUSquared activation
+    # and static per-tensor requant-to-fp8 in-register (ScaledEpilogueReLUSquared
+    # EVT), emitting fp8 directly; the consuming down_proj then skips its own
+    # input quant. This implies the c3x reroute as a precondition (it is the
+    # epilogue substrate). Default 0 (off) => no fusion. SM100/Blackwell.
+    "VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100", "0"))
+    ),
+    # AMMO track shared_expert_relu2_quant_fusion_decode (R13 kernel_fusion).
+    # When set to 1, the shared-expert FP8 DECODE path (M <= 8) fuses the 3
+    # eager kernels {torch.relu, torch.square, scaled_fp8_quant} into ONE Triton
+    # kernel ({relu^2 + static per-tensor fp8 requant}). The producer up_proj
+    # GEMM is untouched. Bit-identical to the eager path (lossless). Fires only
+    # at decode M <= 8; M > 8 (prefill/BS32) takes the fused CUTLASS EVT epilogue
+    # (VLLM_NEMOTRON3_FP8_RELU2_EPILOGUE_SM100) and never reaches this kernel.
+    # Default 0 (off) => production-faithful 3-eager path. SM100/Blackwell.
+    "VLLM_NEMOTRON3_FP8_RELU2_DECODE_FUSION_SM100": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON3_FP8_RELU2_DECODE_FUSION_SM100", "0"))
+    ),
+    # Imported session-726516b2 additive tracks (Mamba2 / RMSNorm fusions). All
+    # are opt-in and RE-GATED DEFAULT-OFF (getenv default "0", not session-726's
+    # "1") so PR #2's invariant holds: with every flag unset the build is
+    # byte-for-byte identical to base.
+    # OP-006 Mamba2 gated-RMSNorm fusion (mamba_mixer2 / gated_rms_norm_fused).
+    "VLLM_MAMBA2_GATED_RMS_NORM_FUSION": lambda: bool(
+        int(os.getenv("VLLM_MAMBA2_GATED_RMS_NORM_FUSION", "0"))
+    ),
+    # OP-011 Mamba SSM tile retune (mamba_ssm).
+    "VLLM_MAMBA_SSM_TILE_RETUNE": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_SSM_TILE_RETUNE", "0"))
+    ),
+    # OP-012 Mamba2 SSD fused-state passing (ssd_combined /
+    # ssd_chunk_state_passing_fused).
+    "VLLM_MAMBA2_SSD_FUSED_STATE": lambda: bool(
+        int(os.getenv("VLLM_MAMBA2_SSD_FUSED_STATE", "0"))
+    ),
+    # OP-009 RMSNorm + FP8-quant fusion (config/vllm.py enable_norm_fusion). When
+    # set to 1, re-enables the SM90/SM100 FusedAddRMSNormStaticQuantPattern C++
+    # fusion clause; default 0 (off) => enable_norm_fusion returns its base value.
+    "VLLM_NEMOTRON3_NORM_QUANT_FUSION_SM100": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON3_NORM_QUANT_FUSION_SM100", "0"))
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),

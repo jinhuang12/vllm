@@ -39,6 +39,40 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
 
+  // AMMO track dense_fp8_decode_gemm_sm100: custom skinny-M (decode-shape) SM100
+  // FP8 dense GEMM (cuBLAS-Lt-equivalent tileN=128 ~1-wave schedule). Per-tensor
+  // scalar scales, no bias.
+  ops.def(
+      "cutlass_fp8_decode_gemm_sm100(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales) -> ()");
+
+  // AMMO track dense_fp8_prefill_gemm_sm100: custom prefill-shape (large-M)
+  // SM100 FP8 dense GEMM (per-output-N tuned TileN=256 schedules). Per-tensor
+  // scalar scales, no bias.
+  ops.def(
+      "cutlass_fp8_prefill_gemm_sm100(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales) -> ()");
+
+  // AMMO track fp8_relu2_requant_epilogue_sm100: dense FP8 GEMM with a fused
+  // ReLUSquared activation + static per-tensor requant-to-fp8 epilogue. out is
+  // fp8 (e4m3), pre-scaled by out_scale (= 1 / down_proj.input_scale) so the
+  // consuming down_proj GEMM skips its own input quant. Per-tensor scalar
+  // scales, no bias. SM100-only.
+  ops.def(
+      "cutlass_scaled_mm_relu2_fp8out_sm100(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor out_scale) -> ()");
+
+  // AMMO track fp8_relu2_requant_epilogue_sm100 (attribution-by-ablation only):
+  // same as above MINUS the ReLUSquared node (dequant -> requant -> fp8). Used
+  // by the Gate-5.2 harness to isolate the relu^2 cost. NOT a production path.
+  ops.def(
+      "cutlass_scaled_mm_cast_fp8out_sm100(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor out_scale) -> ()");
+
   // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
   ops.def(
@@ -236,6 +270,14 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
+  ops.impl("cutlass_fp8_decode_gemm_sm100",
+           TORCH_BOX(&cutlass_fp8_decode_gemm_sm100));
+  ops.impl("cutlass_fp8_prefill_gemm_sm100",
+           TORCH_BOX(&cutlass_fp8_prefill_gemm_sm100));
+  ops.impl("cutlass_scaled_mm_relu2_fp8out_sm100",
+           TORCH_BOX(&cutlass_scaled_mm_relu2_fp8out_sm100));
+  ops.impl("cutlass_scaled_mm_cast_fp8out_sm100",
+           TORCH_BOX(&cutlass_scaled_mm_cast_fp8out_sm100));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
   ops.impl("cutlass_moe_mm", TORCH_BOX(&cutlass_moe_mm));
   ops.impl("get_cutlass_moe_mm_data", TORCH_BOX(&get_cutlass_moe_mm_data));

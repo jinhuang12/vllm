@@ -10,11 +10,13 @@ import torch
 from einops import rearrange
 from packaging import version
 
+import vllm.envs as envs
 from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
 from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
+from .ssd_chunk_state_passing_fused import _chunk_state_state_passing_fused_fwd
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
@@ -99,26 +101,41 @@ def _mamba_chunk_scan_combined_fwd(
         dt_limit=dt_limit,
     )
 
-    # 2. Compute the state for each intra-chunk
-    # (right term of low-rank factorization of off-diagonal blocks; B terms)
-    states = _chunk_state_fwd(
-        B, x, dt, dA_cumsum, cu_chunk_seqlens, states_in_fp32=True
-    )
-
-    # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
-    # (middle term of factorization of off-diag blocks; A terms)
-    # - parallelized across sequences using last_chunk_indices to derive
-    #   per-sequence chunk ranges. Each sequence's state passing runs independently.
-    states = _state_passing_fwd(
-        rearrange(states, "... p n -> ... (p n)"),
-        dA_cumsum,  # (nheads, nchunks, chunk_size)
-        last_chunk_indices,
-        initial_states=rearrange(initial_states, "... p n -> ... (p n)")
-        if initial_states is not None
-        else None,  # (batch, nheads, headdim*dstate)
-        out_dtype=state_dtype if state_dtype is not None else C.dtype,
-    )
-    states = rearrange(states, "... (p n) -> ... p n", n=dstate)
+    # 2. + 3. Compute per-chunk state and inter-chunk SSM recurrence.
+    #
+    # OP-012: When ``VLLM_MAMBA2_SSD_FUSED_STATE`` is set (default), run a
+    # single fused kernel that keeps the per-program state tile resident in
+    # registers across the chunk-walk recurrence, eliminating the ~424 MiB
+    # fp32 ``states`` HBM round-trip the baseline chain produces. The fused
+    # kernel directly emits the post-recurrence ``(nchunks, nheads, hdim,
+    # dstate)`` tensor in ``out_dtype`` that ``_chunk_scan_fwd`` consumes.
+    # Set ``VLLM_MAMBA2_SSD_FUSED_STATE=0`` to fall back to the baseline.
+    state_passing_dtype = state_dtype if state_dtype is not None else C.dtype
+    if envs.VLLM_MAMBA2_SSD_FUSED_STATE:
+        states = _chunk_state_state_passing_fused_fwd(
+            B,
+            x,
+            dt,
+            dA_cumsum,
+            cu_chunk_seqlens,
+            last_chunk_indices,
+            initial_states=initial_states,
+            out_dtype=state_passing_dtype,
+        )
+    else:
+        states = _chunk_state_fwd(
+            B, x, dt, dA_cumsum, cu_chunk_seqlens, states_in_fp32=True
+        )
+        states = _state_passing_fwd(
+            rearrange(states, "... p n -> ... (p n)"),
+            dA_cumsum,  # (nheads, nchunks, chunk_size)
+            last_chunk_indices,
+            initial_states=rearrange(initial_states, "... p n -> ... (p n)")
+            if initial_states is not None
+            else None,  # (batch, nheads, headdim*dstate)
+            out_dtype=state_passing_dtype,
+        )
+        states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C, B, chunk_size, cu_chunk_seqlens, output_dtype=torch.float32)

@@ -788,6 +788,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c3x_sm100.cu"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm100_fp8.cu"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_blockwise_sm100_fp8.cu"
+      # AMMO track dense_fp8_decode_gemm_sm100: custom skinny-M decode-shape FP8 GEMM
+      "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/cutlass_fp8_decode_gemm_sm100.cu"
+      # AMMO track dense_fp8_prefill_gemm_sm100: custom prefill-shape large-M FP8 GEMM
+      "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/cutlass_fp8_prefill_gemm_sm100.cu"
+      # AMMO track fp8_relu2_requant_epilogue_sm100: fused ReLUSquared+requant-to-fp8 epilogue
+      "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/cutlass_scaled_mm_relu2_fp8out_sm100.cu"
     )
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
