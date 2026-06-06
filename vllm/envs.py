@@ -164,6 +164,90 @@ if TYPE_CHECKING:
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
+    # AMMO OP-004: route bf16 self-attention QKV/O projections through the
+    # FP8 (W8A8) cutlass_scaled_mm path. Defaults off for cross-track
+    # isolation; the E2E sweep enables it explicitly via opt_env.
+    VLLM_OP004_FP8_ATTN: bool = False
+    # AMMO OP-017: widen the prefill 2D global-attention BLOCK_M selection
+    # in unified-attention from 16 to 32, jointly with num_warps=8, for
+    # head_size==512 / num_queries_per_kv==8 (gemma-4 global). Defaults off
+    # for cross-track isolation; the E2E sweep enables it explicitly via
+    # opt_env. The (num_warps=8, BLOCK_M=16) cell measured 0.735x (a
+    # regression), so num_warps=8 MUST be conditioned on BLOCK_M==32 — the
+    # launcher in vllm/v1/attention/ops/triton_unified_attention.py enforces
+    # this jointly. Sliding-window layers (head_size==256) are NOT rerouted.
+    VLLM_OP017: bool = False
+    # AMMO OP-019: widen the prefill 2D sliding-window-attention BLOCK_M
+    # selection in unified-attention from 16 to 64, jointly with num_warps=8,
+    # for head_size==256 / num_queries_per_kv==2 / sliding_window>=0
+    # (gemma-4 sliding layers). Structural clone of OP-017 on a head_size-
+    # disjoint predicate (256 vs 512) — the two cannot both fire on the same
+    # launch. Defaults off for cross-track isolation; the E2E sweep enables
+    # it explicitly via opt_env. The (num_warps=8, BLOCK_M=16) cell measured
+    # 0.608x (a regression — same MMA-fragmentation pathology OP-017 §6.7
+    # documented), so num_warps=8 MUST be conditioned on BLOCK_M==64 — the
+    # launcher in vllm/v1/attention/ops/triton_unified_attention.py enforces
+    # this jointly. Global hd512 layers (head_size==512) are NOT rerouted by
+    # OP-019; that path is owned by OP-017.
+    VLLM_OP019: bool = False
+    # AMMO OP-033: TILE_SIZE 32->64 widening on the post-OP-019 sliding-
+    # window-attention 2D-prefill kernel_unified_attention. Stacks on top of
+    # OP-019's BLOCK_M=64 / num_warps=8 reroute on the SAME predicate
+    # (head_size==256 / num_queries_per_kv==2 / sliding_window>=0 /
+    # 2D-prefill), gated additionally by BLOCK_M==64 (i.e. only fires when
+    # VLLM_OP019 is also enabled).  TILE_SIZE is the K-loop tile width;
+    # doubling it from 32 to 64 halves the K-loop iteration count (and
+    # therefore halves the alpha-rescale recurrence hops on the binding
+    # latency path).  LOSSLESS: TILE_SIZE does not change tl.dot operand
+    # types or softmax precision.  Defaults off for cross-track isolation;
+    # the E2E sweep enables it explicitly via opt_env.  Eligibility framing
+    # (cubin-changing constexpr widening, NOT a config-only flip) mirrors
+    # OP-017/OP-019 — both shipped on this exact precedent.
+    VLLM_OP033: bool = False
+    # AMMO OP-039: authored per-shape NVFP4-linear dispatch predicate.  Routes
+    # the NVFP4 GEMM to flashinfer-cudnn at PREFILL-M (M >= threshold) and
+    # keeps the production flashinfer-cutlass at DECODE-M (M < threshold).
+    # Lossless (both backends are NVFP4 W4A4 with FP32 accumulation).  The
+    # decode regression at M=40 (cudnn 0.969x cutlass) — banked as
+    # exhausted_technology [30] for the bare global flip — is avoided here
+    # because the per-forward dispatch routes decode to cutlass.  Defaults
+    # off for cross-track isolation; the E2E sweep enables it explicitly via
+    # opt_env.  Eligibility framing (authored host-side selection code that
+    # alters which kernel runs) clears the Custom Kernel Mandate via path
+    # (ii); see rounds/22/debate/lead_independent_verification_op039.md and
+    # rounds/22/debate/investigator_op039_eligibility.md for primary-cited
+    # gate-pass reasoning.  The runtime-M branch is wrapped in an opaque
+    # custom op (vllm::op039_routed_fp4_mm) so Dynamo never traces the
+    # Python branch on x.shape[0] — Invariant 1 of
+    # references/torch-compile-contract.md.
+    VLLM_OP039: bool = False
+    # AMMO OP-039: M threshold above which cudnn is selected over cutlass for
+    # the NVFP4 GEMM.  Default 1024 was chosen from the crossover probe at
+    # rounds/22/tracks/OP-039/crossover_probe{,_extra}.json (B200; the
+    # gemma-4-31B-it-NVFP4 in-scope shapes for OP-039 — see below).
+    # IN-SCOPE shapes (the only NVFP4 linears under prod): gate_up_proj
+    # (N=43008,K=5376) and down_proj (N=5376,K=21504).  qkv_proj and o_proj
+    # are FP8 cutlass_scaled_mm under OP-004 (FP8-attn ON in production),
+    # NOT NVFP4 — they never reach this dispatch and are therefore out of
+    # scope.  At p50 (the noise-robust signal, NOT the noisy min) on the
+    # in-scope shapes at M>=1024:
+    #   - gate_up_proj: WIN at every M >= 1024 except M=6144 (p50 0.973x);
+    #   - down_proj:    WIN at every M tested >= 1024.
+    # The single mild in-scope p50 regression is gate_up_proj M=6144
+    # (-2.7% on that one MLP GEMM at one chunk-M).  Whether that cell
+    # carries material traffic on the chunked-prefill+MTP workload is an
+    # empirical question the OP039_COVERAGE_REPORT (M-histogram emitted at
+    # engine shutdown) answers; the MEASURED Gate-5.3b sweep is the
+    # magnitude arbiter (validation-defaults.md:374-380), and a global
+    # threshold=1024 E2E PASS is a conservative lower bound — a per-shape
+    # design that additionally excludes M=6144 could only improve it.
+    # Exposed as a knob so the validator can re-probe without rebuilding.
+    # Only consulted when VLLM_OP039 is on.  Re-gated default-OFF (0) so the
+    # PR "flags-off == base" invariant holds: with VLLM_OP039 off this knob is
+    # never read (init_nvfp4_linear_kernel does not select the routed kernel),
+    # and the E2E sweep sets the published threshold (1024) explicitly via
+    # opt_env.
+    VLLM_OP039_M_THRESHOLD: bool = False
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
@@ -1261,6 +1345,35 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
         "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
     ),
+    # AMMO OP-004: enable FP8 (W8A8) cutlass_scaled_mm for the bf16
+    # self-attention QKV/O projections. Off by default (cross-track isolation).
+    "VLLM_OP004_FP8_ATTN": lambda: bool(
+        int(os.getenv("VLLM_OP004_FP8_ATTN", "0"))
+    ),
+    # AMMO OP-017: enable the BLOCK_M=32 / num_warps=8 reroute for the
+    # 2D-prefill global-attention launch (head_size==512, nqpkv==8) of
+    # kernel_unified_attention. Off by default (cross-track isolation).
+    "VLLM_OP017": lambda: bool(int(os.getenv("VLLM_OP017", "0"))),
+    # AMMO OP-019: enable the BLOCK_M=64 / num_warps=8 reroute for the
+    # 2D-prefill sliding-window-attention launch (head_size==256, nqpkv==2,
+    # sliding_window>=0) of kernel_unified_attention. Off by default
+    # (cross-track isolation).
+    "VLLM_OP019": lambda: bool(int(os.getenv("VLLM_OP019", "0"))),
+    # AMMO OP-033: enable the TILE_SIZE 32->64 widening on the post-OP-019
+    # sliding-window-attention 2D-prefill kernel_unified_attention launch
+    # (head_size==256, nqpkv==2, sliding_window>=0, 2D-prefill, BLOCK_M==64).
+    # Off by default (cross-track isolation).  Only fires when VLLM_OP019 is
+    # also enabled (BLOCK_M==64 binding).
+    "VLLM_OP033": lambda: bool(int(os.getenv("VLLM_OP033", "0"))),
+    # AMMO OP-039: route NVFP4 linear GEMMs to flashinfer-cudnn at
+    # prefill-M (M >= VLLM_OP039_M_THRESHOLD) while keeping flashinfer-cutlass
+    # at decode-M.  Off by default (cross-track isolation).
+    "VLLM_OP039": lambda: bool(int(os.getenv("VLLM_OP039", "0"))),
+    # AMMO OP-039: per-forward M threshold for the cudnn/cutlass dispatch
+    # predicate (only consulted when VLLM_OP039 is on).  Re-gated default-OFF
+    # ("0") so the PR "flags-off == base" invariant holds; the E2E sweep sets
+    # the published threshold (1024) explicitly via opt_env.
+    "VLLM_OP039_M_THRESHOLD": lambda: int(os.getenv("VLLM_OP039_M_THRESHOLD", "0")),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
     # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).
