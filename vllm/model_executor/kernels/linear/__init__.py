@@ -92,6 +92,9 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.op039_shape_routed import (
+    OP039ShapeRoutedNvFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
@@ -623,6 +626,15 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
 
     # Env-var overrides.
     force_kernel: type[NvFp4LinearKernel] | None = None
+    # AMMO OP-039: when on, force the per-shape-routed wrapper that holds
+    # both cutlass and cudnn sub-kernels and dispatches at runtime on the
+    # token count M (cudnn at prefill-M, cutlass at decode-M).  This must
+    # take precedence over the ``VLLM_NVFP4_GEMM_BACKEND=...`` global flip
+    # so that asking for OP-039 unambiguously selects the routed path; it
+    # remains overridden by VLLM_BATCH_INVARIANT and VLLM_USE_FBGEMM /
+    # VLLM_USE_NVFP4_CT_EMULATIONS for the same reason the existing
+    # priority chain places those higher (deterministic / opt-in
+    # emulation modes outrank performance optimizations).
     if envs.VLLM_BATCH_INVARIANT:
         logger.info_once(
             "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
@@ -633,6 +645,8 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
         force_kernel = FbgemmNvFp4LinearKernel
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
         force_kernel = EmulationNvFp4LinearKernel
+    elif envs.VLLM_OP039:
+        force_kernel = OP039ShapeRoutedNvFp4LinearKernel
     elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
         backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
         force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
@@ -787,6 +801,7 @@ __all__ = [
     "FlashInferCutlassNvFp4LinearKernel",
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
+    "OP039ShapeRoutedNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",

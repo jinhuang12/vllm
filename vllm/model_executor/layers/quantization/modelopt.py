@@ -191,6 +191,19 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         # handle exclusion
         if self.is_layer_excluded(prefix):
             if isinstance(layer, LinearBase):
+                # AMMO OP-004: the modelopt NVFP4 checkpoint excludes all
+                # self-attention QKV/O projections from FP4, so they run bf16.
+                # When VLLM_OP004_FP8_ATTN is set, route just those projections
+                # through the FP8 (W8A8) cutlass_scaled_mm path instead. lm_head
+                # and vision-tower layers stay bf16 (out of scope).
+                from vllm.model_executor.layers.quantization.op004_fp8_attn import (
+                    Op004Fp8AttnLinearMethod,
+                    is_op004_attn_projection,
+                    op004_fp8_attn_enabled,
+                )
+
+                if op004_fp8_attn_enabled() and is_op004_attn_projection(prefix):
+                    return Op004Fp8AttnLinearMethod(prefix=prefix)
                 return UnquantizedLinearMethod()
             return None
 
