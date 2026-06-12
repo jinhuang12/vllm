@@ -93,13 +93,22 @@ IS_DENSE = False
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
+    """Enable if either RMS norm or quant FP8 custom op is active,
+    OR on CUDA SM90/SM100 where FusedAddRMSNormStaticQuantPattern's
+    C++ kernel is production-tested; otherwise Inductor handles fusion."""
+    from vllm.platforms import current_platform
 
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
         or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
+        or (
+            current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(100)
+            )
+        )
     )
 
 
