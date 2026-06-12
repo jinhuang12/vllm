@@ -281,6 +281,53 @@ class Qwen3NextAttention(nn.Module):
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
+    def _try_fused_prologue(
+        self,
+        positions: torch.Tensor,
+        qkv: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """AMMO OP-016: fused attention-prologue + FMHA fast path.
+
+        Returns the pre-gate attention output when the fused kernel is eligible,
+        else None (caller runs the baseline 4-kernel chain). Eligibility requires
+        the env flag, gated attention, plain neox RoPE, FP8 KV cache, and the
+        opaque FlashInfer dispatch path — all verified at call time so the
+        optimization is strictly additive and never alters correctness when off.
+        """
+        from vllm.model_executor.layers.attention.fused_attn_prologue import (
+            fused_attn_prologue_forward,
+            is_fused_attn_prologue_supported,
+        )
+
+        if not self.attn_output_gate:
+            return None
+        if not is_fused_attn_prologue_supported(self.attn):
+            return None
+        rotary_emb = self.rotary_emb
+        if not getattr(rotary_emb, "is_neox_style", False):
+            return None
+        if not hasattr(rotary_emb, "cos_sin_cache"):
+            return None
+        # The fused kernel implements the text-only neox reduction of MRoPE;
+        # interleaved-section math only collapses to neox when all 3 mrope
+        # position rows are equal (text-only). Bail on any other position shape.
+        if positions.dim() == 2 and positions.shape[0] != 3:
+            return None
+
+        return fused_attn_prologue_forward(
+            self.attn,
+            qkv,
+            positions,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            rotary_emb.cos_sin_cache,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            rotary_emb.rotary_dim,
+            self.q_norm.variance_epsilon,
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -288,6 +335,22 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor,
     ):
         qkv, _ = self.qkv_proj(hidden_states)
+
+        fused_output = self._try_fused_prologue(positions, qkv)
+        if fused_output is not None:
+            # Fused path produced the pre-gate attention output. Recover the gate
+            # (the second half of each per-head q_gate block) and apply it.
+            q_gate, _k, _v = qkv.split(
+                [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
+            )
+            orig_shape = q_gate.shape[:-1]
+            q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+            _q, gate = torch.chunk(q_gate, 2, dim=-1)
+            gate = gate.reshape(*orig_shape, -1)
+            gate = torch.sigmoid(gate)
+            attn_output = fused_output * gate
+            output[:], _ = self.o_proj(attn_output)
+            return
 
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(

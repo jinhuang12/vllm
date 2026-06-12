@@ -106,6 +106,8 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
+    VLLM_GDN_FUSE_IN_PROJ: bool = True
+    VLLM_FUSE_ATTN_PROLOGUE: bool = False
     VLLM_FUSE_EXPERT_GATE: bool = False
     VLLM_GDN_DIRECT_SCAN_OUTPUT: bool = False
     VLLM_DISABLE_PYNCCL: bool = False
@@ -985,6 +987,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
+    ),
+    # Horizontally fuse the GatedDeltaNet in_proj_qkvz (N=20480) and
+    # in_proj_ba (N=128) projections into a single cuBLAS F.linear on a
+    # concatenated [20608, K] weight (built once post-load), then slice the
+    # output back into qkvz/ba. Eliminates the underfilled N=128 ba GEMM and
+    # its split-K reduction. Default on; set 0 to fall back to two launches.
+    "VLLM_GDN_FUSE_IN_PROJ": lambda: bool(
+        int(os.getenv("VLLM_GDN_FUSE_IN_PROJ", "1"))
+    ),
+    # AMMO OP-016: fuse the full-attention decode prologue (q/k RMSNorm + neox
+    # RoPE + FP8-e4m3 q-quant + FP8-e4m3 paged KV scatter) into one Triton
+    # kernel for Qwen3.5 hybrid models. Collapses 4 occupancy-starved launches
+    # + 3 intermediate q/k DRAM round-trips into one pass downstream of the qkv
+    # GEMM and upstream of the FlashInfer FMHA. Default off; set 1 to enable.
+    "VLLM_FUSE_ATTN_PROLOGUE": lambda: bool(
+        int(os.getenv("VLLM_FUSE_ATTN_PROLOGUE", "0"))
     ),
     # AMMO OP-017: fuse the Qwen MoE shared-expert gate chain
     # (gemv2N N=1 + ATen sigmoid + ATen broadcast-mul) inside the opaque
