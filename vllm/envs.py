@@ -173,6 +173,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
+    VLLM_MAMBA2_GATED_RMS_NORM_FUSION: bool = False
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -1303,6 +1304,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "1"))
+    ),
+    # Use a fused single-launch Triton kernel for Mamba2 ``Mixer2RMSNormGated``
+    # when ``forward_native`` would otherwise lower to a 2-Triton-kernel chain
+    # under torch.compile (the n_groups != 1 branch). Active only when there
+    # is no redundant-TP all-gather (``n_groups % tp_size == 0`` and
+    # ``n_groups != 1``). Set to 1 to enable the fused path.
+    "VLLM_MAMBA2_GATED_RMS_NORM_FUSION": lambda: bool(
+        int(os.getenv("VLLM_MAMBA2_GATED_RMS_NORM_FUSION", "0"))
     ),
     # Allow use of FlashInfer BF16 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(

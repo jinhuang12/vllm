@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -29,6 +30,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
+)
+from vllm.model_executor.layers.mamba.ops.gated_rms_norm_fused import (
+    gated_rms_norm_fused,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
@@ -91,6 +95,24 @@ class Mixer2RMSNormGated(CustomOp):
             "Tensor parallel world size must divide hidden size."
         )
 
+    def _can_use_fused_gated_rms_norm(self) -> bool:
+        """Gating predicate for the fused single-launch Triton kernel.
+
+        Replaces the Inductor-emitted 2-Triton-kernel chain that lowers the
+        ``n_groups != 1`` branch of ``forward_native``. Active only when the
+        no-collective-op TP path is taken (case 2 in ``forward_native``):
+        ``n_groups != 1`` AND ``n_groups % tp_size == 0``. The redundant-TP
+        all-gather path (case 3) is intentionally excluded — it requires a
+        collective the kernel does not handle.
+        """
+        return (
+            envs.VLLM_MAMBA2_GATED_RMS_NORM_FUSION
+            and self.use_rms_norm
+            and self.weight is not None
+            and self.n_groups != 1
+            and (self.n_groups % self.tp_size) == 0
+        )
+
     def forward_native(
         self,
         x: torch.Tensor,
@@ -106,6 +128,20 @@ class Mixer2RMSNormGated(CustomOp):
         #   3. The general case can be pretty complicated so we AllGather
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
+
+        # Fused single-launch Triton kernel for the no-collective
+        # grouped path (case 2). Bit-equivalent dataflow to the eager body
+        # below (BF16 in/out, FP32 silu+variance), so swapping in the fused
+        # op leaves outputs within BF16 reduction noise.
+        if self._can_use_fused_gated_rms_norm():
+            return gated_rms_norm_fused(
+                x,
+                gate,
+                self.weight,
+                self.variance_epsilon,
+                self.n_groups // self.tp_size,
+            )
+
         x = x * nn.functional.silu(gate.to(torch.float32))
         if not self.use_rms_norm:
             return x.to(input_dtype)
