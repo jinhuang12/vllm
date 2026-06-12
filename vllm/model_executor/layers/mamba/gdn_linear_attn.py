@@ -1245,6 +1245,30 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
+        # AMMO OP-033: in the no-spec prefill branch, thread the pre-allocated
+        # core_attn_out buffer (sliced to num_actual_tokens) into the FLA scan so
+        # chunk_fwd_o direct-writes the scan output into the caller buffer
+        # (chunk_o.py:166) instead of allocating a fresh empty_like(v). This makes
+        # the scan-output bridge copy below redundant, so it is skipped. Gated to
+        # the no-spec prefill branch: spec/merged branches build separate output
+        # buffers and still need their copies; decode does not thread this buffer.
+        # The SLICE is mandatory (not the full padded buffer): chunk_o.py does
+        # o = core_attn_out[:v.numel()].view(*v.shape), which requires numel to
+        # match v exactly; core_attn_out[:num_actual_tokens] has numel == v.numel()
+        # in the no-spec branch. Mirrors the decode direct-write idiom at :1508.
+        direct_scan_output = (
+            envs.VLLM_GDN_DIRECT_SCAN_OUTPUT
+            and spec_sequence_masks is None
+            and attn_metadata.num_prefills > 0
+        )
+        if direct_scan_output:
+            # Activation marker (info_once -> logged once when the fast path is
+            # first actually taken; not at init/import). Serves as the
+            # tree-independent fastpath_evidence require_pattern for Stage-6 SHIP.
+            logger.info_once(
+                "AMMO OP-033: GDN direct-scan-output ENABLED bridge copy elided"
+            )
+
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             assert non_spec_state_indices_tensor is not None
@@ -1266,6 +1290,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                core_attn_out=(
+                    core_attn_out[:num_actual_tokens] if direct_scan_output else None
+                ),
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
@@ -1306,7 +1333,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        else:
+        elif not direct_scan_output:
+            # AMMO OP-033: when direct_scan_output is on, the FLA scan above already
+            # wrote core_attn_out_non_spec directly into core_attn_out[:n] (it is a
+            # view of that buffer), so this self-assignment is redundant and skipped.
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
     def _forward_core_decode_fast(
