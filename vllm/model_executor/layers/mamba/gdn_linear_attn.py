@@ -341,6 +341,20 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             prefix=f"{prefix}.in_proj_ba",
         )
 
+        # Horizontal in_proj fusion state (built post-load).
+        # in_proj_qkvz (N=key_dim*2 + value_dim*2) and in_proj_ba (N=2*num_v_heads)
+        # both read the SAME hidden_states with no mutual dependency. When enabled
+        # (CUDA + VLLM_GDN_FUSE_IN_PROJ), their weights are concatenated into a
+        # single [N_qkvz + N_ba, K] tensor so one cuBLAS F.linear (+ output slice)
+        # replaces two separate launches, eliminating the underfilled N_ba GEMM and
+        # its split-K reduction. The fused weight is built once in
+        # fuse_weights_after_loading() (post weight-load, pre cudagraph-capture), so
+        # the forward path is fully CUDA-graph capturable. Layout-agnostic: the slice
+        # boundary is the qkvz output width regardless of gqa_interleaved_layout.
+        self.fuse_in_proj = False
+        self.in_proj_fused_weight: torch.Tensor | None = None
+        self._fused_qkvz_size = 0
+
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
 
@@ -454,6 +468,63 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             quant_config=quant_config,
             prefix=prefix,
         )
+
+    def fuse_weights_after_loading(self) -> None:
+        """Build the concatenated in_proj weight after weights load.
+
+        Called once by the model loader's post-load pass, AFTER all weights are
+        loaded and BEFORE the profiling forward / CUDA-graph capture. Concatenates
+        the loaded in_proj_qkvz and in_proj_ba weights into one [N_qkvz + N_ba, K]
+        tensor and re-points the two original module weights to be views into it,
+        so total weight memory is unchanged (the two separate launches still work
+        in eager / non-CUDA paths, while forward_cuda uses the single fused GEMM).
+
+        Guards (all must hold to enable the fast path):
+          * VLLM_GDN_FUSE_IN_PROJ env (default off) — opt-in enable.
+          * CUDA platform — the win and the cuBLAS launch behavior are
+            CUDA-specific; ROCm/XPU/CPU keep their own forward paths untouched.
+          * Both projections are plain (unquantized) BF16/FP16 2-D weights with
+            matching dtype/device and the same K (input dim). GDN in_proj layers
+            are in the NVFP4 ignore list, so this holds for the target model; if
+            any precondition fails we leave fusion disabled (fail-safe).
+        """
+        if not envs.VLLM_GDN_FUSE_IN_PROJ:
+            return
+        if not current_platform.is_cuda():
+            return
+        # LoRA on Qwen3.5 splits in_proj_qkvz into in_proj_qkv + in_proj_z; if that
+        # path is active these attributes won't both exist as single merged GEMMs.
+        if not (hasattr(self, "in_proj_qkvz") and hasattr(self, "in_proj_ba")):
+            return
+
+        w_qkvz = getattr(self.in_proj_qkvz, "weight", None)
+        w_ba = getattr(self.in_proj_ba, "weight", None)
+        if w_qkvz is None or w_ba is None:
+            return
+        # Only fuse plain unquantized 2-D weights with matching dtype/device/K.
+        if w_qkvz.ndim != 2 or w_ba.ndim != 2:
+            return
+        if w_qkvz.dtype != w_ba.dtype or w_qkvz.device != w_ba.device:
+            return
+        if w_qkvz.shape[1] != w_ba.shape[1]:
+            return
+        # Fail-safe under CPU offloading: the fused F.linear runs on CUDA in
+        # forward_cuda, so both weights must be CUDA-resident here. If they are
+        # offloaded to CPU at load time, skip fusion (the two-launch path works).
+        if not (w_qkvz.is_cuda and w_ba.is_cuda):
+            return
+
+        n_qkvz = w_qkvz.shape[0]
+        # Build the concatenated weight [N_qkvz + N_ba, K] once.
+        fused = torch.cat([w_qkvz.data, w_ba.data], dim=0).contiguous()
+        # Re-point the original parameters at views into the fused buffer so the
+        # eager two-launch path stays bit-exact and no memory is duplicated.
+        self.in_proj_qkvz.weight.data = fused[:n_qkvz]
+        self.in_proj_ba.weight.data = fused[n_qkvz:]
+
+        self.in_proj_fused_weight = fused
+        self._fused_qkvz_size = n_qkvz
+        self.fuse_in_proj = True
 
     def fix_query_key_value_ordering(
         self,
@@ -734,8 +805,28 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        if self.fuse_in_proj:
+            # One cuBLAS GEMM on the concatenated [N_qkvz + N_ba, K]
+            # weight replaces the two separate in_proj launches; slice the
+            # output back into qkvz/ba along the qkvz output width. The fused
+            # weight is a constant tensor built post-load, so this is fully
+            # CUDA-graph capturable.
+            fused_out = torch.nn.functional.linear(
+                hidden_states, self.in_proj_fused_weight
+            )
+            mixed_qkvz = fused_out[..., : self._fused_qkvz_size]
+            ba = fused_out[..., self._fused_qkvz_size :]
+            if self.gqa_interleaved_layout:
+                # fix_query_key_value_ordering() below uses .view(), which
+                # requires contiguous inputs (baseline supplies contiguous
+                # F.linear outputs here). The non-interleaved path consumes the
+                # slices via .split()/.reshape()/explicit .contiguous(), which
+                # tolerate the strided views, so it keeps zero-copy slices.
+                mixed_qkvz = mixed_qkvz.contiguous()
+                ba = ba.contiguous()
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
@@ -1245,6 +1336,29 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
+        # In the no-spec prefill branch, thread the pre-allocated
+        # core_attn_out buffer (sliced to num_actual_tokens) into the FLA scan so
+        # chunk_fwd_o direct-writes the scan output into the caller buffer
+        # (chunk_o.py:166) instead of allocating a fresh empty_like(v). This makes
+        # the scan-output bridge copy below redundant, so it is skipped. Gated to
+        # the no-spec prefill branch: spec/merged branches build separate output
+        # buffers and still need their copies; decode does not thread this buffer.
+        # The SLICE is mandatory (not the full padded buffer): chunk_o.py does
+        # o = core_attn_out[:v.numel()].view(*v.shape), which requires numel to
+        # match v exactly; core_attn_out[:num_actual_tokens] has numel == v.numel()
+        # in the no-spec branch. Mirrors the decode direct-write idiom at :1508.
+        direct_scan_output = (
+            envs.VLLM_GDN_DIRECT_SCAN_OUTPUT
+            and spec_sequence_masks is None
+            and attn_metadata.num_prefills > 0
+        )
+        if direct_scan_output:
+            # Activation marker (info_once -> logged once when the fast path is
+            # first actually taken; not at init/import).
+            logger.info_once(
+                "GDN direct-scan-output enabled: bridge copy elided"
+            )
+
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             assert non_spec_state_indices_tensor is not None
@@ -1266,6 +1380,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                core_attn_out=(
+                    core_attn_out[:num_actual_tokens] if direct_scan_output else None
+                ),
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
@@ -1306,7 +1423,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        else:
+        elif not direct_scan_output:
+            # When direct_scan_output is on, the FLA scan above already
+            # wrote core_attn_out_non_spec directly into core_attn_out[:n] (it is a
+            # view of that buffer), so this self-assignment is redundant and skipped.
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
     def _forward_core_decode_fast(
