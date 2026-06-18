@@ -35,7 +35,7 @@ The skill reads from the campaign's artifact directory:
 | `state.json` | Campaign metadata, round results, shipped optimizations |
 | `constraints.md` | Model architecture, hardware specs, baseline latency |
 | `bottleneck_analysis.md` | Kernel breakdown, BW utilization, per-GEMM timings |
-| `debate/summary.md` | Candidate evaluation and selection rationale |
+| `debate/summary.md` | Human-readable rendered view of `state.json.campaign.rounds[*].debate.selected_candidates` (produced by `scripts/render_debate_summary.py`; not authoritative — defer to state.json if they disagree) |
 | `debate/proposals/*.md` | Optimization proposals with micro-experiment data |
 | `tracks/*/validation_results.md` | Per-candidate correctness, kernel, and E2E results |
 | `e2e_latency/json/*.json` | Raw baseline benchmark JSON files |
@@ -47,12 +47,13 @@ These are the specific fields you need to extract. Don't guess — use these pat
 
 ```
 Target info:       $.target.{model_id, hardware, dtype, tp}
-Shipped ops:       $.campaign.shipped_optimizations        (list of OP-IDs like ["OP-003"])
-Cumulative gain:   $.campaign.cumulative_e2e_speedup       (e.g., 1.06)
-Candidate names:   $.debate.candidates[*].{id, name, score, status}
-Round results:     $.campaign.rounds[*].implementation_results.{OP-ID}.{status, e2e_speedup, reason}
-Worktree paths:    $.parallel_tracks.{OP-ID}.worktree_path (location of shipped code)
-Selection logic:   $.debate.selection_rationale
+Shipped ops:       $.campaign.shipped_optimizations             (list of {op_id, round, classification})
+Cumulative gain:   $.campaign.cumulative_speedup_vs_round1      (e.g., 1.06 — speedup vs round 1 baseline latency)
+Round-1 anchor:    $.campaign.round_1_baseline_latency_s        (seconds; frozen after round 1)
+Candidate names:   $.campaign.rounds[*].debate.candidates[*].{id, name, score, status}
+Round results:     $.campaign.rounds[*].parallel_tracks.tracks.{OP-ID}.{status, verdict, e2e_speedup, fail_reason}
+Worktree branch:   $.campaign.rounds[*].parallel_tracks.tracks.{OP-ID}.worktree_branch  (branch name for shipped code)
+Selection logic:   $.campaign.rounds[*].debate.selected_candidates[*].{score_breakdown, stage_4_validation_obligations, cited_evidence}
 ```
 
 **Important**: Candidate names may evolve between evaluation and implementation (e.g., a secondary
@@ -69,8 +70,8 @@ contribution like weight fusion gets added during implementation). Use the name 
 | `constraints.md` | `## Baseline E2E Latency` | Latency table for all batch sizes |
 | `constraints.md` | `## Baseline Truth Snapshot` | Top-15 kernel breakdown, nsys profile paths |
 | `constraints.md` | `## Per-decode-step kernel sequence` | Layer-by-layer kernel timeline (code block format) |
-| `debate/summary.md` | `## Decisions` | Why each candidate was selected/eliminated |
-| `debate/summary.md` | `## Conceded Weaknesses` | Original projections (for "met expectations" analysis) |
+| `state.json` | `campaign.rounds[*].debate.selected_candidates[]` | Typed per-winner record: `op_id`, `track_assignment`, `score_breakdown.{feasibility,evidence_tier,expected_e2e_pct,weighted_total}`, `stage_4_validation_obligations`, `cited_evidence` — authoritative source for "why selected" and original projections |
+| `debate/summary.md` | (rendered view) | Produced by `scripts/render_debate_summary.py` from `state.json`. Use as a human-readable index; defer to `state.json` if they disagree |
 | `tracks/{OP-ID}/validation_results.md` | `## Gate 5.3` | E2E comparison tables (vs Stage 1 AND in-sweep) |
 
 ### Finding E2E Results
@@ -103,7 +104,7 @@ The report is for engineers who have never heard of AMMO. Translate ALL internal
 | Round | Optimization iteration |
 | f_decode | Component share of decode latency (define on first use) |
 | Ship / shipped | Merged / accepted / deployed |
-| Minimum E2E improvement threshold | Campaign-wide threshold for optimization viability (min_e2e_improvement_pct, default 1%) |
+| Minimum E2E improvement threshold | Campaign-wide threshold for optimization viability (`min_e2e_improvement_pct`, see `references/validation-defaults.md`) |
 | Stage 1 baseline | Original baseline measurement (do not re-run) |
 | Co-located baseline | Same-session baseline comparison |
 | Gate 5.1 / 5.2 / 5.3 | Correctness / kernel performance / E2E validation |
@@ -164,7 +165,7 @@ Every section is required unless marked optional.
 - Kernel-level results table (per-shape speedup, BW utilization)
 - **E2E baseline source**: ALWAYS use the original baseline numbers from `e2e_latency/json/baseline_bs*.json`, captured before any optimization. These are the campaign's official reference point.
 - **Multi-component decomposition**: When an optimization has multiple parts (e.g., new kernel + weight fusion), break down each part's contribution. The in-sweep comparison (same worktree, env var toggle) isolates the kernel contribution alone; the Stage 1 comparison captures the full effect including structural changes. Explain why E2E improvement may exceed or differ from kernel-level speedup.
-- Did results meet projections? Original projections are in `debate/summary.md` under "Conceded Weaknesses" (revised estimates post-debate). Compare projected vs actual, enumerate specific reasons for any gap, and frame honestly.
+- Did results meet projections? Original projections live in `state.json.campaign.rounds[*].debate.selected_candidates[].score_breakdown.expected_e2e_pct` (the debate's authoritative post-arguments estimate for each winner). Compare projected vs actual, enumerate specific reasons for any gap, and frame honestly.
 - For batch sizes outside the optimization's active range, explain why (e.g., "M=1 bypassed because cuBLAS GEMV is already optimal at 70.6% BW utilization")
 - For `GATED_PASS` optimizations, include both pre-gating and post-gating E2E tables. Show which batch sizes benefit and which are gated off. Explain the dispatch mechanism in reader-friendly language (e.g., "This optimization activates only for batch sizes <= 16 via runtime dispatch").
 - Rollback instructions (disable the env var or revert the code)
@@ -186,7 +187,7 @@ Every section is required unless marked optional.
 - Focus on things that would save other engineers time
 
 ### 10. Appendix
-- **Full code listings**: Read from the worktree at `$.parallel_tracks.{OP-ID}.worktree_path` in state.json. Find the file list in `tracks/{OP-ID}/validation_results.md` under "Files modified" or "Scope Adherence". Include complete file contents (not diffs) with inline comments explaining key design decisions.
+- **Full code listings**: Read from the worktree for the branch named in `$.campaign.rounds[*].parallel_tracks.tracks.{OP-ID}.worktree_branch` in state.json. Find the file list in `tracks/{OP-ID}/validation_results.md` under "Files modified" or "Scope Adherence". Include complete file contents (not diffs) with inline comments explaining key design decisions.
 - **Reproduction commands**: Include cd to worktree path + activate venv, environment variable for enabling the optimization, full `vllm bench latency` command with all flags, and how to disable/revert
 - Future work (brief)
 

@@ -2,6 +2,15 @@
 
 Tests use synthetic data (no model or GPU required).
 """
+import sys
+from pathlib import Path
+
+# Ensure this directory is importable regardless of the pytest invocation cwd.
+# Matches the pattern used in tests/test_sweep_dp.py.
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 import pytest
 
 from run_vllm_bench_latency_sweep import _compare_correctness
@@ -225,7 +234,11 @@ def test_accuracy_delta_math():
 # ---- Test 12: Large n (200 questions) with 1-question accuracy drop → FAIL ----
 
 def test_large_n_one_question_drop_fail():
-    """200 questions, optimized loses exactly 1 → FAIL."""
+    """200 questions, optimized loses exactly 1 → FAIL under strict tolerance.
+
+    NOTE: The new default tolerance (1.0pp) would allow a 1/200 drop (0.5pp).
+    This test asserts the strict-mode semantics via ``tolerance_pct=0.0``.
+    """
     n = 200
     golden = [_make_question([i]) for i in range(n)]
     opt = [_make_question([i]) for i in range(n)]
@@ -236,6 +249,7 @@ def test_large_n_one_question_drop_fail():
     result = _compare_correctness(
         golden_refs=golden, opt_outputs=opt,
         labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+        tolerance_pct=0.0,
     )
     assert result["verdict"] == "FAIL"
     assert result["num_questions"] == 200
@@ -244,3 +258,82 @@ def test_large_n_one_question_drop_fail():
     assert result["questions_lost"] == [99]
     assert result["questions_gained"] == []
     assert result["accuracy_delta"] < 0
+
+
+# ---- Tolerance tests (Gate 5.1b configurable tolerance_pct) ----
+
+def _inputs(n, b_correct, o_correct):
+    """Build synthetic inputs with N total, B baseline-correct, O opt-correct."""
+    golden = [_make_question([i + 1]) for i in range(n)]
+    opt = [_make_question([i + 1]) for i in range(n)]
+    labels = list(range(n))
+    baseline_preds = [i if i < b_correct else -1 for i in range(n)]
+    opt_preds = [i if i < o_correct else -1 for i in range(n)]
+    return dict(
+        golden_refs=golden, opt_outputs=opt,
+        labels=labels, baseline_preds=baseline_preds, opt_preds=opt_preds,
+    )
+
+
+def test_tolerance_pass_at_exact_boundary():
+    """n=200, baseline=100%, opt=99%, tol=1.0pp → PASS (boundary inclusive)."""
+    r = _compare_correctness(tolerance_pct=1.0, **_inputs(200, 200, 198))
+    assert r["verdict"] == "PASS"
+    assert r["threshold"] == round(1.0 - 0.01, 4)
+
+
+def test_tolerance_fail_below_boundary():
+    """n=200, baseline=100%, opt=98%, tol=1.0pp → FAIL."""
+    r = _compare_correctness(tolerance_pct=1.0, **_inputs(200, 200, 196))
+    assert r["verdict"] == "FAIL"
+
+
+def test_tolerance_zero_is_strict():
+    """tol=0 → strict comparison (opt >= baseline)."""
+    r = _compare_correctness(tolerance_pct=0.0, **_inputs(200, 200, 199))
+    assert r["verdict"] == "FAIL"
+
+
+def test_tolerance_default_is_one_pp():
+    """Omit tolerance_pct kwarg → default 1.0pp → baseline 89%, opt 88% passes."""
+    r = _compare_correctness(**_inputs(100, 89, 88))
+    assert r["verdict"] == "PASS"
+    assert r["tolerance_pct"] == 1.0
+
+
+def test_tolerance_opt_above_baseline_passes_any_tolerance():
+    """opt >= baseline → PASS regardless of tolerance (upper bound unchanged)."""
+    for tol in (0.0, 1.0, 5.0):
+        r = _compare_correctness(tolerance_pct=tol, **_inputs(10, 8, 9))
+        assert r["verdict"] == "PASS"
+
+
+def test_tolerance_pct_and_threshold_in_return_dict():
+    r = _compare_correctness(tolerance_pct=2.5, **_inputs(100, 80, 80))
+    assert r["tolerance_pct"] == 2.5
+    assert r["threshold"] == round(0.80 - 0.025, 4)
+
+
+def test_message_pass_format():
+    r = _compare_correctness(tolerance_pct=1.0, **_inputs(200, 200, 198))
+    msg = r["message"]
+    assert "PASS:" in msg
+    assert "99.0%" in msg
+    assert "threshold" in msg
+    assert "tolerance" in msg
+
+
+def test_message_fail_format():
+    r = _compare_correctness(tolerance_pct=1.0, **_inputs(200, 200, 196))
+    msg = r["message"]
+    assert "FAIL:" in msg
+    assert "(196/200)" in msg
+    assert "threshold" in msg
+    assert "1.0pp tolerance" in msg
+
+
+def test_infrastructure_error_overrides_tolerance():
+    """baseline=0%, tol=100 → still infra error."""
+    r = _compare_correctness(tolerance_pct=100.0, **_inputs(10, 0, 5))
+    assert r.get("infrastructure_error") is True
+    assert r["verdict"] == "FAIL"

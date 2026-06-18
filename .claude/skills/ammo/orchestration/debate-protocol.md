@@ -4,89 +4,147 @@ Champions independently propose optimization candidates from grounded Stage 2 da
 
 ## Team Structure
 
-- **Team name**: `ammo-round-{round_id}-{model_short}-{hardware}` -- this is the **round team**, created once per round and reused for both debate (Stage 3) and implementation (Stages 4-5). During overlapped debate (round 2+ only), debate champions for round N+1 are spawned into the EXISTING round team from round N, alongside implementation agents. The debate uses a distinct `round_id` in its artifact paths (`debate/campaign_round_{N+1}/`) to avoid collisions.
+- **Team name**: `ammo-round-{round_id}-{model_short}-{hardware}` -- this is the **round team**, created once per round and reused for both debate (Stage 3) and implementation (Stages 4-5).
   - Example: `ammo-round-1-llama70b-h100`
 - **Champions**: 2-4 `ammo-champion` agents. Each reads the grounded bottleneck_analysis.md independently.
 - Each champion is spawned with:
   - `name="champion-{N}"` (e.g., `champion-1`, `champion-2`)
   - `team_name` set to the round team name above
-- **Transcript Monitors**: Spawn 1 `ammo-transcript-monitor` agent per champion agent. See below
+- **No debate-stage monitors**: Debate champions do NOT get transcript monitors. The adversarial debate structure (Phase B critique + Phase C rebuttal) provides quality control. Monitors are spawned only for impl-champions in Stages 4-5.
 
-## Transcript Monitoring
-
-After spawning each champion, the orchestrator spawns a transcript monitor in background:
-
-## Team Composition with Monitors
+## Team Composition
 
 ```
 Round Team: ammo-round-{round_id}-{model_short}-{hardware}
 |
 | ... debate champions for round N (Stage 3) ...
-| +-- champion-1 (Opus)         [Stage 3 debate -- shut down after selection]
-| |   +-- monitor-1 (Sonnet)    [Stage 3 debate -- shut down after selection]
-| +-- champion-2 (Opus)         [Stage 3 debate -- shut down after selection]
-| |   +-- monitor-2 (Sonnet)    [Stage 3 debate -- shut down after selection]
-| +-- champion-3 (Opus)         [Stage 3 debate -- shut down after selection]
-|     +-- monitor-3 (Sonnet)    [Stage 3 debate -- shut down after selection]
+| +-- champion-1      [Stage 3 debate -- shut down after selection]
+| +-- champion-2      [Stage 3 debate -- shut down after selection]
+| +-- champion-3      [Stage 3 debate -- shut down after selection]
 |
 | ... after debate: shutdown round N champions ...
 |
 | ... implementation agents for round N (Stages 4-5) ...
-| +-- impl-champion-{op_id_1} (Opus)     [Stages 4-5]
-| |   +-- impl-monitor-1 (Sonnet)        [Stages 4-5]
-| +-- impl-champion-{op_id_2} (Opus)     [Stages 4-5]
-| |   +-- impl-monitor-2 (Sonnet)        [Stages 4-5]
-|     (kernel validation sub-agents spawned by champions as needed — NOT team members)
-| ... OVERLAPPED: debate champions for round N+1 (if round 2+) ...
-| +-- champion-r{N+1}-1 (Opus)           [next-round debate -- shut down after selection]
-| |   +-- monitor-r{N+1}-1 (Sonnet)      [next-round debate -- shut down after selection]
-| +-- champion-r{N+1}-2 (Opus)           [next-round debate -- shut down after selection]
-| |   +-- monitor-r{N+1}-2 (Sonnet)      [next-round debate -- shut down after selection]
+| +-- impl-champion-{op_id_1}   [Stages 4-5]
+| |   +-- impl-monitor-1        [Stages 4-5]
+| +-- impl-champion-{op_id_2}   [Stages 4-5]
+| |   +-- impl-monitor-2        [Stages 4-5]
 ```
-
-Naming convention: `monitor-{champion_number}` or `impl-monitor-{impl_champion_number}`
-
-### Monitor Spawn Pattern (REQUIRED — one per champion)
-
-After spawning each champion, immediately spawn its monitor as a **team member** (not a subagent):
-
-```python
-# projects_dir = os.path.expanduser("~/.claude/projects/") + os.getcwd().replace("/", "-")
-
-# Team member — NOT a subagent. Uses team_name for SendMessage access.
-Agent(
-    name=f"monitor-{champion_name}",
-    subagent_type="ammo-transcript-monitor",
-    model="sonnet",
-    team_name=round_team_name,       # Same team as champion — enables SendMessage
-    run_in_background=True,
-    prompt=f"""Monitor {champion_name} via session transcript.
-
-    ## Target
-    - Agent name: {champion_name}
-    - Team: {round_team_name}
-    - Stage: debate
-    - Artifact dir: {artifact_dir}
-    - Projects dir: {projects_dir}
-
-    Focus on DEBATE-STAGE concerns: proposal methodology, evidence tiers,
-    Amdahl consistency, baseline provenance, framing biases, micro-experiment methodology.
-    See your agent definition § Stage-Specific Focus for the full list."""
-)
-```
-
-### Communication Flow
-
-Monitors passively read the champion's `.jsonl` session transcript (polling every ~5 seconds) and interject via SendMessage only when they detect methodology errors, framing biases, or procedural violations. Key properties:
-- **Zero champion overhead**: Champions don't need to report status or interact with monitors
-- **Unmediated observation**: Monitors read raw transcripts (tool calls, thinking blocks, results) — champions cannot filter what monitors see
-- **Escalation**: If a CRITICAL finding is ignored for 2+ minutes, the monitor escalates to the orchestrator
 
 ## Debate is Always Mandatory
 
-There is no fast-track exception. Every run must go through at least Phase 0 (proposals) + 1 debate round.
+There is no fast-track exception. Every run must go through at least Phase 0 (proposals) + 1 full debate round (A/B/C).
 
-**No Convergence Shortcut**: Even if all champions converge on the same candidate, the minimum 2 debate rounds are mandatory. Convergence reduces critique diversity, making additional scrutiny MORE important, not less.
+**Conditional 2nd round**: After round 1 Phase C, champions self-declare open items (see § Open Items Declaration below). If ANY champion declares open items → round 2 is mandatory. If all champions declare `NONE` → proceed directly to scoring/selection. This replaces the former mandatory-2-round rule.
+
+## Phase -1: Target Claim (NEW — runs BEFORE Phase 0)
+
+### Why this phase exists
+
+Without coordination, champions independently gravitate to the top bottleneck. Three champions all attacking the same component is *zero diversity*: when that component hits a wall in Stage 5, the entire round produces nothing. The campaign has no contingency.
+
+The claim phase forces champions to coordinate **component** selection *before* developing proposals. Champions waterfall down the ranked-bottleneck list, ensuring at least one secondary target is covered as a hedge. The orchestrator reviews the resulting claim distribution holistically and redirects any champion whose target leaves the round under-diversified.
+
+This is structural diversity insurance — independent of the per-proposal eligibility gates in Phase 0, which remain unchanged.
+
+### The claim is COMPONENT-only — the mechanism comes in Phase 0
+
+A champion claims a **component** (e.g., MoE GEMM, dense GEMM, attention). The optimization category (`kernel_replacement` / `kernel_fusion` / `dispatch_optimization`) is chosen in Phase 0, after the champion analyzes the existing profiling data for that component. The analysis of existing data sits *between* the two decisions:
+
+```
+claim COMPONENT  →  [orchestrator approves]  →  analyze existing profiling data  →  propose candidate + MECHANISM (Phase 0)
+   (pre-data)                                      for THAT component                  (grounded in that data)
+```
+
+The category is a conclusion drawn from data — whether a fusable seam exists, whether a kernel can be replaced by a faster one, or whether host-side dispatch gaps dominate — so it is chosen once the champion has analyzed the component's slice of the existing profiling data. This uses the campaign's already-captured Stage 1-2 traces; it adds no new nsys/ncu capture. The total work is the same diligence champions already do, ordered so the mechanism follows from the existing evidence.
+
+### Sequence
+
+```
+Stage 2 complete (mining done)
+    │
+    ▼
+Orchestrator spawns N champions into round team (with claim-phase prompt)
+    │
+    ▼
+CLAIM PHASE (component axis)
+  1. Each champion reads bottleneck_analysis.md
+  2. Each applies the component waterfall logic in the ammo-champion definition
+  3. Each broadcasts a single COMPONENT claim line ("Claiming {component}") to the team
+  4. Collisions handled by the orchestrator review (sharing a component is allowed;
+     the LATER broadcaster yields ONLY if the review needs more component spread)
+    │
+    ▼
+ORCHESTRATOR REVIEW
+  - Read all claim broadcasts
+  - Evaluate the holistic checks below (component axis)
+  - Either: approve all → "Claims approved. Proceed to analyze + Phase 0."
+  - Or: send per-champion redirects with reasoning
+    │
+    ▼
+PER-COMPONENT ANALYSIS (champion, after approval)
+  - Each champion analyzes the EXISTING profiling data for its assigned component (no new capture)
+  - The mechanism/category follows from that data (fusion seam? replaceable kernel? dispatch gap?)
+  - Scope: analyze only the assigned component — the orchestrator owns assignment
+    │
+    ▼
+Phase 0 eligibility gates (unchanged) → Diversity Check (Lead): f-value source + per-technology exhausted check
+```
+
+### Champion responsibility
+
+The full waterfall logic (steps, component fully-exhausted check, broadcast format, collision rules) lives in `.claude/agents/ammo-champion.md` § Target Claim Phase. The champion is the source of truth for the assignment math; the orchestrator only reviews the resulting claims. The two surfaces must agree: the claim is **component-only**, and the mechanism/category is selected in Phase 0 after the champion analyzes the existing profiling data for the component.
+
+Each champion broadcasts exactly one claim message in the form:
+
+```
+Claiming {component}
+```
+
+`{component}` MUST match a component name from `bottleneck_analysis.md`. The claim does **NOT** include a category — the mechanism (`kernel_replacement` / `kernel_fusion` / `dispatch_optimization`) is chosen in the Phase 0 proposal, after the champion analyzes the existing profiling data for the component.
+
+Collision resolution: sharing a component is **permitted** (two champions on the same component differentiate by mechanism in Phase 0). The later broadcaster does NOT automatically yield. The orchestrator's holistic review (below) decides whether the round needs more component spread; if so, it redirects the later broadcaster, who re-runs the waterfall to pick the next available component.
+
+### Orchestrator Review
+
+After all champions have broadcast, the orchestrator reads the complete set of **component** claims and evaluates them holistically. None of these checks duplicates the per-proposal eligibility gates — they're about *distribution* (which components), not *content* (which mechanism). The category is not known yet, so no check here keys on it.
+
+| # | Check | Action if it fails |
+|---|-------|--------------------|
+| 1 | Claims collectively cover the highest-`f_e2e` components in proportion to opportunity (top component must have at least 1 claim) | Redirect a champion to the underserved top component |
+| 2 | At least one claim targets a component *different from* the majority (anti-monoculture hedge) | If all claims target one component AND a viable secondary component exists: redirect the last broadcaster to the #2 component |
+| 3 | No claim targets a **fully-exhausted** component. A component is fully-exhausted only when the `state.json.campaign.rounds[$IDX].exhausted_technologies` entries for it (matching `applies_to_component` + `applies_to_shape_bucket`) clearly close off **every** optimization avenue for it — across all catalog classes (the legacy trio `kernel_replacement` / `kernel_fusion` / `dispatch_optimization` plus any other cataloged class or novel descriptor that fits the component). Because the schema records `technology_class` + `failure_mode` (no category field) and one `technology_class` can serve more than one category, **default to viable when the closure is ambiguous** — a component with any plausibly-un-tried avenue stays in contention; the precise per-technology check runs at the Phase 0 Diversity Check (Lead), once the mechanism is known. | Send the champion the exhaustion entries showing every avenue is closed and ask for a different component |
+| 4 | No claim targets a component whose `f_e2e` is below `campaign.config.min_e2e_improvement_pct` | Redirect to a viable component |
+
+**Where the per-technology exhausted check lives now:** because the claim carries no category, the precise per-technology match runs at the **Phase 0 Diversity Check (Lead)** (§ Diversity Check (Lead) item 2), once the champion's analysis has set the mechanism and the proposal declares a concrete `## Category` + Technology Selection block. At claim time the orchestrator rejects a component only when *all* its categories are exhausted (Check 3); a champion who claims a still-viable component and then proposes the one exhausted technology for it is flagged at the Phase 0 Diversity Check. This matches the `exhausted_technologies[]` schema, which is keyed by `technology_class` + `applies_to_component` + `applies_to_shape_bucket` (never by category) — the concrete technology is known from the written proposal.
+
+### Single-message orchestrator response
+
+The orchestrator replies once. Either:
+
+```
+Claims approved. Proceed to analyze + Phase 0.
+```
+
+(The approval cues the next step: champions analyze the existing profiling data for their assigned component before writing the proposal.)
+
+Or a redirect message addressed per-champion, e.g.:
+
+```
+champion-3: Your component ({component_X}) duplicates champion-1's and the round needs more spread (Check 2).
+  Re-run the waterfall and pick a different component. Suggested: {component_Y} (next viable per the ranked `f_e2e` list).
+
+champion-2: Approved.
+champion-1: Approved.
+```
+
+Redirects are about *components*, never categories — the category isn't chosen until Phase 0. After redirects, the orchestrator waits for the redirected champion(s) to re-broadcast, then re-runs the review. Loop until all claims pass — bound to 3 cycles to prevent infinite back-and-forth; on the 3rd failure, the orchestrator picks an assignment manually and instructs the champion to comply.
+
+### Why this replaces the old Diversity Check items
+
+The previous Diversity Check Decision 2 ("Dominant Component Coverage (MANDATORY)") was a *post-hoc reject* — it ran after Phase 0 proposals existed and forced revision when coverage was missing. That wasted a champion's Phase 0 work. The claim phase guarantees coverage *before* anyone writes a proposal, so the post-hoc reject is no longer needed.
+
+The previous Decision 3 ("Technology Diversity After EXHAUSTED Round (soft)") is now split by granularity, and stays a **soft** requirement. At claim time, Check 3 (above) + waterfall step 2 in the agent definition reject only *fully-exhausted components* (every category exhausted) — a component-level filter, since the category isn't known yet. The precise per-technology filter — "a champion re-attempting an `exhausted_technologies[]` entry must document what changed" — runs at the **Phase 0 Diversity Check (Lead) item 2**, after the champion's analysis of the existing data has set the mechanism. Together they keep a champion from silently repeating an exhausted technology, while still allowing a champion to claim a component that has *some* exhausted categories but a viable one remaining.
 
 ## Phase 0: Independent Proposals
 
@@ -95,22 +153,34 @@ All champions execute **in parallel**. Each champion reads the grounded bottlene
 Each champion writes:
 
 ```
-{artifact_dir}/debate/proposals/{champion_id}_proposal.md
+{artifact_dir}/rounds/{CR}/debate/proposals/{champion_id}_proposal.md
 ```
+
+Where `{CR}` is the current campaign round (`campaign.current_round` from `state.json`). All debate artifacts live under `rounds/{CR}/debate/` per the canonical layout in `references/artifact-layout.md`.
 
 Champions write proposals per `references/debate-rules.md` (see Evidence Tiers for claim-evidence requirements, Micro-Experiment Rules for allowed/forbidden experiments, Baseline Provenance Rule for API matching, and Micro-Experiment Artifact Requirements for proof-of-execution).
 
 ### Proposal Eligibility Gate (Lead)
 
-After Phase 0 submissions, the lead checks each proposal against two gates before any debate begins:
+After Phase 0 submissions, the lead checks each proposal against the gates below before any debate begins.
 
-**Gate 1 — Custom Kernel Mandate:**
-- **Pass**: Proposal involves writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code.
-- **Reject**: Config-only changes, flag-flipping, parameter tuning, or no kernel code scope described.
+**Gate 1 — Authored-Mechanism Mandate** (north star: *real engineering work, no flag-flipping*; full definition in `SKILL.md` NN#8):
+- **Pass**: Proposal **authors mechanism logic OR host-side structure** — a custom/fused kernel (`custom_kernel` / `kernel_replacement` / `kernel_fusion` / `attention_kv_layout`), OR a load-time weight restructuring + library GEMM (`weight_layout_transform`), OR authored scheduling/dispatch/comm/graph-pass host-side code (`dispatch_optimization` / `execution_pipeline_restructuring` / `communication_strategy` / `compute_graph_pass`), OR a novel mechanism that authors logic/structure against a profiled bottleneck. *(This correctly passes a paused `dispatch_optimization` proposal — host-side, no kernel — which the old kernel-only wording wrongly excluded.)*
+- **Reject**: A retuned scheduling/tuning value where the kernel/cubin body is byte-identical and a compiler, autotuner, library tactic-table, policy list, predicate flip, or env var emits the speedup — `num_warps` / `num_stages` / `BLOCK_SIZE_*` / `@autotune` tuples / tactic tables / `custom_ops` list edits / boolean predicate flips / env-var flips. *A constant in a `.py` file is still config, regardless of the measured win.* Also reject if no authored mechanism is described.
 
-**Gate 2 — Precision Classification:**
+**Gate 2 — Technology Selection block:**
+- **Pass**: Proposal includes a populated Technology Selection block per `references/technology-selection.md` § Required proposal fields.
+- **Reject**: Block absent, incomplete, or fields contain unsupported assertions (e.g., "baseline technology: unknown" without evidence, "anti-regression check: not applicable" when the proposal is higher-abstraction than the baseline).
+
+**Gate 3 — Precision Classification:**
 - **Pass**: Proposal includes a `Precision Classification` field declaring `lossless` or `lossy`, citing the dtype boundary rule from `references/debate-scoring-rubric.md` § Lossy Classification Rule.
 - **Reject**: Classification field absent or does not cite the dtype boundary rule.
+
+**Gate 4 — Category Block:**
+- **Pass**: Proposal includes a populated `## Category` block per `references/optimization-categories.md` § Verifying a Proposal's Category Block, with all five fields populated (`Selected`, `Slice targeted`, `Projection formula`, `Justification`, `Expected validation gates`). The declared `Selected` value MUST be a catalog class, a legacy alias, or a named novel descriptor (per `references/optimization-categories.md` § The Category Catalog) — `category` is a descriptor, not the eligibility decision (the gate is Gate 1 above). The declared `Projection formula` MUST match the formula for the **slice** that category attacks in `references/optimization-categories.md` § Per-Category Projection Formulas (nearest-analogue regime formula for a novel descriptor).
+- **Reject**: Block absent, missing required fields, or `Projection formula` does not match the declared category's slice. Wrong-slice projection formula additionally caps E2E impact at 0/10 in scoring per `references/debate-scoring-rubric.md`. *(Note: an unrecognized `Selected` name is NOT a Gate-4 reject — a novel mechanism names a new descriptor; eligibility is decided by Gate 1.)*
+
+> The per-technology exhausted check is **not** a hard eligibility gate — it is a soft check at the Diversity Check (Lead) below (item 2), because at claim time only the component is known and the mechanism isn't fixed until the proposal declares its `## Category` + Technology Selection block.
 
 **Rejection action**: Message the champion to revise. If no compliant revision is submitted, the candidate is eliminated.
 
@@ -118,15 +188,29 @@ After Phase 0 submissions, the lead checks each proposal against two gates befor
 
 ### Diversity Check (Lead)
 
-After the eligibility gate, the lead reviews proposal diversity:
+After the eligibility gate, the lead reviews proposal diversity. Component-coverage concerns are now handled *before* proposals are written by the Phase -1 Target Claim phase. Two checks remain here: the f-value source check, and the per-technology exhausted check — the latter relocated from claim time, now that each proposal's mechanism is finally known.
 
-1. **f-value source check**: For each proposal, check whether the champion used `f_decode` (from the per-decode-step breakdown) or `f_total` (from the full trace). If the target kernel isn't in the decode breakdown, note this — the champion may be targeting prefill latency intentionally, or may have used a misleading f-value.
+1. **f-value source check**: For each proposal, check whether the champion used `f_e2e` (the correct Amdahl multiplier from the Top Components table — `f_decode × decode_busy × decode_share_of_e2e`), `f_decode` (the diagnostic ranking column), or `f_total` (full-trace, including warmup/prefill, generally wrong for decode-heavy workloads). If any workload-dilution red flag fires (`decode_busy < 0.85`, `prefill_share_of_e2e > 0.10`, or `input_len >= 512`) and the champion's projection plugs `f_decode` directly into Amdahl without the conversion to `f_e2e`, flag it — the scoring rubric applies a 2-point deduction (see `references/debate-scoring-rubric.md` § E2E impact potential). If the target kernel isn't in the decode breakdown, note this — the champion may be targeting prefill latency intentionally.
 
-2. **Dominant Component Coverage (MANDATORY)**: At least one proposal MUST target the component with the highest `f_decode` from bottleneck_analysis.md. If the top component exceeds 50% of decode time, at least two proposals must target it with distinct techniques. A component may only be excluded from all proposals if two independent micro-experiments (from different champions) demonstrate it is within 10% of its physical ceiling (BW or compute utilization). If no proposal targets the dominant component after Phase 0, the lead MUST reject the lowest-scoring proposal and require a revision targeting it.
+2. **Per-technology exhausted check (soft)**: For each proposal, now that its `## Category` / `technology_class` is declared, check whether the `(applies_to_component == proposal.component) × (technology_class == proposal.technology) × failure_mode` tuple is present in `state.json.campaign.rounds[$IDX].exhausted_technologies[]` for this shape bucket (treat `applies_to_component`/`applies_to_shape_bucket` = `null` as matching all). If it matches an exhausted entry (and `expires_after_reprofile` is not satisfied), send the champion the specific exhaustion entry and ask for a different mechanism/technology — or a documented justification of what changed vs. the prior attempt, per `references/technology-selection.md` § Technology diversity across rounds (the "document the loop" soft requirement). This is the natural home for the check: the mechanism is known here, whereas at claim time only component-level exhaustion (Phase -1 Check 3) can be evaluated. When `exhausted_technologies[]` is empty (e.g., round 1), this check is a no-op.
+
+> **Replaced checks**: The previous "Dominant Component Coverage (MANDATORY)" check is subsumed by the Phase -1 Target Claim phase, which guarantees *component* coverage *before* proposals are written. The "Technology Diversity After EXHAUSTED Round (soft)" check is **relocated to item 2 above** (not removed, and still soft): per-technology (`component × technology_class × failure_mode`) exhaustion is checked HERE, once the mechanism is known; only the component-level remainder (skip a component when ALL its categories are exhausted) stays at Phase -1 Check 3. See § Phase -1: Target Claim above.
+
+## Champion Spawn Context
+
+Spawn 2-4 champions. A champion claims a *component* in Phase -1, analyzes the existing profiling data for that component, and self-selects `kernel_replacement` / `kernel_fusion` / `dispatch_optimization` in Phase 0 based on that analysis and the eligibility gates above. The spawn prompt assigns the component axis only; the mechanism is the champion's Phase 0 conclusion from the data.
+
+The lead's spawn-prompt construction follows this order:
+
+1. **Standard champion-orientation context** (artifact_dir, target component summary, paths to relevant artifacts). The "target component summary" lists the ranked `f_e2e` components for the *claim waterfall* and the paths to the existing profiling data; it states components only, not a category for any component.
+2. **Workload Dilution summary** (decode_busy, decode_share_of_e2e, inter_kernel_share, prefill_share — copy directly from the researcher's table for the primary BS).
+3. **Standard champion task body** (Claim Phase = claim a component; then analyze the existing profiling data for that component; then Phase 0 instructions, debate rules pointer, Technology Selection + Category block requirements).
 
 ## Round Structure
 
-Normal minimum: **2 rounds**. Maximum: **5 rounds**. Each round has three sequential phases.
+Normal minimum: **1 round**. Maximum: **5 rounds**. Each round has three sequential phases. A 2nd round triggers automatically if any champion declares open items after Phase C of round 1.
+
+**Path template**: `{CR}` is `campaign.current_round` from `state.json` (1 for the first campaign round). `{N}` is the debate sub-round within that campaign round (1..5). Applies uniformly including R1 — every debate sub-round is scoped under `rounds/{CR}/debate/round_{N}/`.
 
 ### Phase A: Evidence Presentation
 
@@ -135,7 +219,7 @@ All champions execute **in parallel**.
 Each champion writes:
 
 ```
-{artifact_dir}/debate/round_{N}/{op_id}_argument.md
+{artifact_dir}/rounds/{CR}/debate/round_{N}/{op_id}_argument.md
 ```
 
 Champions write arguments per `references/debate-rules.md` (see Evidence Tiers for required evidence levels). Champions **must** run micro-experiments during this phase (see `references/debate-rules.md` § Micro-Experiment Rules).
@@ -152,7 +236,7 @@ Round-robin assignment:
 Each champion writes:
 
 ```
-{artifact_dir}/debate/round_{N}/{op_id}_critique_{target_id}.md
+{artifact_dir}/rounds/{CR}/debate/round_{N}/{op_id}_critique_{target_id}.md
 ```
 
 Critiques must address: feasibility math weaknesses, overlooked risks, incorrect assumptions, and hardware resource accounting (SMEM budget, register usage, occupancy, wave count). See `references/debate-rules.md` for evidence tier requirements.
@@ -164,10 +248,38 @@ All champions execute **in parallel**.
 Each champion responds to the critique they received and writes:
 
 ```
-{artifact_dir}/debate/round_{N}/{op_id}_rebuttal.md
+{artifact_dir}/rounds/{CR}/debate/round_{N}/{op_id}_rebuttal.md
 ```
 
 Rebuttals must provide counter-evidence, concede valid points explicitly, or propose concrete mitigation for acknowledged weaknesses. See `references/debate-rules.md` for evidence tier requirements.
+
+### Open Items Declaration (end of Phase C)
+
+At the end of their Phase C rebuttal file, each champion appends an Open Items Declaration. Champions emit ONLY the lines that apply — delete inapplicable categories:
+
+If open items exist:
+```markdown
+## Open Items Declaration
+- [UNADDRESSED_CRITIQUE] <description of critique not fully rebutted>
+- [NEW_EVIDENCE] <new claim introduced in rebuttal that wasn't cross-examined>
+```
+
+If all critiques are satisfactorily addressed:
+```markdown
+## Open Items Declaration
+- [NONE]
+```
+
+Categories:
+- `UNADDRESSED_CRITIQUE`: A Phase B critique that the champion's rebuttal did not fully engage with
+- `NEW_EVIDENCE`: New factual claim or evidence introduced in a rebuttal that other champions haven't had a chance to examine
+- `NONE`: No open items remaining — champion considers all critiques satisfactorily addressed
+
+**Decision logic** (orchestrator, after all Phase C rebuttals land):
+- If ANY champion's declaration contains `[UNADDRESSED_CRITIQUE]` or `[NEW_EVIDENCE]` with a non-empty description → trigger round 2
+- If ALL champions declare only `[NONE]` → proceed to scoring/selection
+
+Champions are trusted. The scoring rubric naturally penalizes weak rebuttals — a champion who hides open items to avoid round 2 will score lower because unaddressed critiques are visible to the scorer.
 
 ## Communication Flow
 
@@ -180,7 +292,7 @@ The main session moderates the debate using `SendMessage`:
 
 ## Convergence Criteria
 
-Stop early (only after exceeding minimum rounds) if **either** condition is met:
+For rounds 2+ (after open items trigger a continuation), stop early if **either** condition is met:
 
 1. **Clear winners**: The top 3-4 candidates have no unaddressed critiques remaining, and all other candidates have conceded material weaknesses.
 2. **Stagnation**: Round N+1 arguments substantially repeat round N with no new evidence or counter-arguments introduced.
@@ -192,28 +304,29 @@ After the final round:
 1. Main session reads **all** debate artifacts across all rounds.
 2. Scores each candidate per `references/debate-scoring-rubric.md`.
 3. Selects **3-4 winners** to advance to Stage 4 parallel tracks.
-4. Writes the decision to:
+4. Writes the decision to `state.json`:
 
 ```
-{artifact_dir}/debate/summary.md
+state.json.campaign.rounds[N-1].debate.selected_candidates = [
+  {op_id, track_assignment, score_breakdown,
+   stage_4_validation_obligations, cited_evidence},
+  ... one entry per winner (typically 2-4 per round)
+]
 ```
 
-The summary includes: per-candidate scores, rationale for selection, and any conceded weaknesses that Stage 4 implementation must address.
+This is the **authoritative cross-agent contract** — each Stage 4/5 implementation champion reads the entry matching its assigned `op_id` first. `op_id` values in this array must match entries in `selected_winners` (the list of chosen op_id strings). All downstream decisions (track_assignment, validation obligations, evidence citations) live in typed fields. No prose justification is part of the contract.
 
-Flag proposals with per-BS differentiated impact (e.g., M<=32 kernel specialization, decode-only path). These are candidates for `GATED_PASS` and should be noted in `summary.md` so Stage 4-5 implementers are prepared for crossover probing.
+5. Runs the deterministic renderer to produce a human-readable summary:
 
-### Post-Selection Evidence Gate
+```
+python .claude/skills/ammo/scripts/render_debate_summary.py \
+  --state {artifact_dir}/state.json \
+  --out {artifact_dir}/rounds/{CR}/debate/summary.md
+```
 
-After winner selection but BEFORE shutting down debate champions, the lead opens a **15-minute evidence window**:
+`summary.md` is a rendered view of `selected_candidates`; it contains numeric values, enum flags, and citation links only. If `summary.md` and `state.json` ever disagree, `state.json` wins — `summary.md` is regenerated from state, not hand-edited. No agent has a write path to `summary.md`.
 
-1. Broadcast to all champions: "Winners selected. 15-minute window for late findings that could override selection. Submit to `{artifact_dir}/debate/late_findings/`."
-2. If any champion submits a late finding citing a hard constraint violation (SMEM exceeded, API incompatibility, optimization already deployed):
-   - The lead evaluates the finding against available evidence
-   - If the finding is substantiated: the winner is eliminated and the next-highest-scoring candidate advances
-   - If the finding is unsubstantiated: noted but selection stands
-3. After 15 minutes (or all champions respond "no findings"): proceed to shutdown.
-
-This gate addresses the structural gap where Champion-1 in c08b370fc identified both fatal flaws in "Late Findings" after selection was finalized, with no mechanism for action.
+Proposals with per-BS differentiated impact (e.g., `M<=32` kernel specialization, decode-only path) are candidates for `GATED_PASS`. These are encoded in `stage_4_validation_obligations` (e.g., `crossover_probe`), not in prose.
 
 ## Debate Rules Reference
 
@@ -223,22 +336,22 @@ Micro-experiment guidelines, artifact requirements, baseline provenance rules, a
 
 After winner selection:
 
-1. Send `shutdown_request` to all champion agents.
-2. Do NOT call TeamDelete. The round team persists for Stages 4-5 implementation.
-3. TeamDelete is called only after all implementation tracks complete (see `parallel-tracks.md` and `SKILL.md` Stage 4-5 section).
+1. Send `shutdown_request` to each champion: `SendMessage(to=<champion_id>, message={"type": "shutdown_request"})`. A champion approves only when its work is complete; if one replies `approve: false`, let it finish and re-send once it reports done.
+2. Confirm each champion left the team roster (its `shutdown_approved` arrived) before spawning implementation agents. A champion still on the roster is still running.
+3. Do NOT call TeamDelete. The round team persists for Stages 4-5 implementation. TeamDelete is called only after all implementation tracks complete (see `parallel-tracks.md` and `SKILL.md` Stage 4-5 section).
 
 ## Artifact Structure
 
-### Round 1 (or single-pass campaigns)
+All debate artifacts for campaign round `{CR}` live under `rounds/{CR}/debate/`. There is no separate first-round vs Nth-round shape — the round-scoped path applies uniformly from round 1 onward (see `references/artifact-layout.md`):
 
 ```
-{artifact_dir}/debate/
+{artifact_dir}/rounds/{CR}/debate/
   summary.md
   proposals/
     champion-1_proposal.md
     champion-2_proposal.md
     champion-3_proposal.md
-  round_1/
+  round_1/                  (debate sub-round within campaign round CR)
     champion-1_argument.md
     champion-1_critique_champion-2.md
     champion-1_rebuttal.md
@@ -254,39 +367,7 @@ After winner selection:
     ...
 ```
 
-### Campaign Round 2+ (scoped paths)
+The debate gate hook enforces the v2 layout: writes to legacy `debate/` (without a `rounds/{CR}/` prefix) are blocked.
 
-For campaign rounds beyond the first, debate artifacts must use campaign-round-scoped paths to avoid overwriting previous rounds' evidence:
-
-```
-{artifact_dir}/debate/campaign_round_{N}/
-  summary.md
-  proposals/
-    champion-1_proposal.md
-    ...
-  round_1/          (debate round within this campaign round)
-    ...
-  round_2/
-    ...
-  micro_experiments/
-    ...
-```
-
-The debate gate hook enforces this: round 2+ debates that use the legacy `debate/` path are blocked.
-
-Note: "round_1" inside the campaign round directory refers to **debate rounds** (argument/critique/rebuttal cycles). The outer "campaign_round_{N}" refers to **campaign rounds** (profiling cycles).
-
-## Overlapped Debate Considerations
-
-When running as an overlapped debate during Stages 4-5:
-
-1. **Debate champions MUST NOT message implementation agents.** The orchestrator does not provide implementation agent names. If a champion receives an unexpected message from an unknown agent, ignore it and notify the orchestrator.
-
-2. **Artifact paths MUST use campaign-round scoping**: `debate/campaign_round_{N+1}/`. This is already enforced by the debate gate hook for round 2+, and remains enforced for overlapped debates.
-
-3. **GPU access during overlap**: Debate champions may run GPU micro-benchmarks via the pool (`--num-gpus 1`). If the pool is exhausted, the reserve call blocks — keep experiments brief to minimize contention with implementation tracks. See `references/gpu-pool.md` for the reservation pattern.
-
-4. **Phase timing may be longer**: The orchestrator interleaves debate moderation with implementation monitoring. Debate phases may take longer to start because the orchestrator is busy gating implementation results. Champions should NOT assume a phase will start within any specific time window.
-
-5. **The orchestrator decides debate timing**: Debate champions should wait for phase-start broadcasts from the orchestrator. Do not self-advance to the next phase.
+Note: "round_1" inside `rounds/{CR}/debate/` refers to **debate sub-rounds** (argument/critique/rebuttal cycles). The outer `rounds/{CR}/` refers to **campaign rounds** (profiling cycles).
 

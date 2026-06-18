@@ -7,7 +7,7 @@ Determines the batch-size threshold where an optimization transitions from benef
 Crossover probing activates when:
 - At least one tested BS has verdict `PASS` (speedup >= 1.0)
 - At least one tested BS has verdict `REGRESSED` (speedup below noise tolerance but above catastrophic)
-- The champion has evaluated gating feasibility and spawned a sub-agent to probe
+- The champion has evaluated gating feasibility and is running crossover probing itself
 
 If ALL tested BS are PASS/NOISE, no probing needed. If ALL are REGRESSED/CATASTROPHIC, the track FAILs — no probing can help.
 
@@ -69,13 +69,13 @@ crossover_threshold = lo
 ## One Attempt Rule
 
 After crossover probing completes and the champion implements gating:
-- The champion spawns a sub-agent for kernel re-validation (5.1a + 5.2) AND re-runs the sweep (5.1b + 5.3a + 5.3b)
+- The champion re-runs the kernel correctness & speedup checks AND re-runs the sweep (5.1b + 5.3a + 5.3b)
 - If any gate shows REGRESSED or CATASTROPHIC at any BS: **track FAILs**
 - Do NOT attempt nested gating (no recursive probing)
 
 ## State Recording
 
-Record crossover probing results in `state.json:parallel_tracks.{op_id}.gating.crossover_probing`:
+Record crossover probing results in `state.json` at `campaign.rounds[$IDX].parallel_tracks.tracks[op_id].gating.crossover_probing` (where `$IDX = campaign.current_round - 1`):
 
 ```json
 {
@@ -94,4 +94,4 @@ Record crossover probing results in `state.json:parallel_tracks.{op_id}.gating.c
 
 ## Conservative Bias
 
-When in doubt, use the last known-beneficial BS as the threshold. A slightly narrower beneficial range is better than shipping a regression. The env var gating always provides an escape hatch for operators.
+When in doubt, use the last known-beneficial BS as the threshold (recorded in `state.json.campaign.rounds[N-1].parallel_tracks.tracks[op].gating.crossover_probing.confirmed_bs`). A slightly narrower beneficial range is better than shipping a regression. The env var gating always provides an escape hatch for operators.

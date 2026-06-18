@@ -18,7 +18,7 @@ FAIL=0
 TOTAL=0
 
 TMPDIR=$(mktemp -d)
-cleanup() { rm -rf "$TMPDIR" /tmp/hook-stderr /tmp/hook-stdout 2>/dev/null || true; }
+cleanup() { rm -rf "$TMPDIR" "$TMPDIR/hook-stderr" "$TMPDIR/hook-stdout" 2>/dev/null || true; }
 trap cleanup EXIT
 
 # ─────────────────────────────────────────────
@@ -53,7 +53,7 @@ run_test() {
     local actual_exit=0
     TOTAL=$((TOTAL + 1))
 
-    echo "$json_input" | bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
+    echo "$json_input" | env HOME="$TMPDIR" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
 
     local pass=true
 
@@ -62,21 +62,21 @@ run_test() {
 
     # Required output check
     if [ -n "$check_output" ]; then
-        if ! grep -qF "$check_output" /tmp/hook-stdout 2>/dev/null; then
+        if ! grep -qF "$check_output" "$TMPDIR/hook-stdout" 2>/dev/null; then
             pass=false
         fi
     fi
 
     # Forbidden output check
     if [ -n "$forbid_output" ]; then
-        if grep -qF "$forbid_output" /tmp/hook-stdout 2>/dev/null; then
+        if grep -qF "$forbid_output" "$TMPDIR/hook-stdout" 2>/dev/null; then
             pass=false
         fi
     fi
 
     # When output is expected, validate JSON
-    if [ -n "$check_output" ] && [ -s /tmp/hook-stdout ]; then
-        if ! jq . /tmp/hook-stdout >/dev/null 2>&1; then
+    if [ -n "$check_output" ] && [ -s "$TMPDIR/hook-stdout" ]; then
+        if ! jq . "$TMPDIR/hook-stdout" >/dev/null 2>&1; then
             echo "  WARN: stdout is not valid JSON!"
             pass=false
         fi
@@ -96,8 +96,8 @@ run_test() {
             echo "  FAIL [$TOTAL]: $test_name (expected=$expected_exit, got=$actual_exit)"
             [ -n "$check_output" ]   && echo "        required output : $check_output"
             [ -n "$forbid_output" ]  && echo "        forbidden output: $forbid_output"
-            echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
-            echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+            echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+            echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
             FAIL=$((FAIL + 1))
         fi
     fi
@@ -111,7 +111,7 @@ check_json_field() {
     TOTAL=$((TOTAL + 1))
 
     local actual_value
-    actual_value=$(echo "$json_input" | bash "$HOOK" 2>/dev/null | jq -r "$jq_expr" 2>/dev/null || echo "JQ_FAILED")
+    actual_value=$(echo "$json_input" | env HOME="$TMPDIR" bash "$HOOK" 2>/dev/null | jq -r "$jq_expr" 2>/dev/null || echo "JQ_FAILED")
 
     if [ "$actual_value" = "$expected_value" ]; then
         echo "  PASS [$TOTAL]: $test_name"
@@ -135,9 +135,9 @@ make_champion_transcript "$CHAMP_T" "champion-1"
 echo "== Agent type filtering =="
 # ════════════════════════════════════════════
 
-run_test "ammo-champion → injects reminder" 0 \
+run_test "ammo-champion → no output (debate monitors removed)" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    "additionalContext"
+    "" "additionalContext"
 
 run_test "ammo-impl-champion → injects reminder" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op003\"},\"transcript_path\":\"$ORCH_T\"}" \
@@ -163,110 +163,122 @@ run_test "empty subagent_type → no output" 0 \
 echo ""; echo "== Session identity gate =="
 # ════════════════════════════════════════════
 
-run_test "Orchestrator session (no agentName in transcript) → fires" 0 \
+run_test "Orchestrator session (no agentName in transcript), ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    "additionalContext"
+    "" "additionalContext"
 
-run_test "Champion session (agentName=champion-1) → suppressed" 0 \
+run_test "Champion session (agentName=champion-1), ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-2\"},\"transcript_path\":\"$CHAMP_T\"}" \
     "" "additionalContext"
 
 MONITOR_T="$TMPDIR/monitor_transcript.jsonl"
 make_champion_transcript "$MONITOR_T" "monitor-1"
-run_test "Monitor session (agentName=monitor-1) → suppressed" 0 \
+run_test "Monitor session, ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-3\"},\"transcript_path\":\"$MONITOR_T\"}" \
     "" "additionalContext"
 
-run_test "No transcript_path provided → fail-open (fires)" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"}}" \
-    "additionalContext"
+# T3a: Post-compaction — the lead orchestrator's transcript gains an
+# agentName=team-lead entry after context compaction. The old inline
+# "if any agentName present → suppress" logic silenced the nudge in this
+# case, which is a regression. The helper must treat agentName=team-lead
+# as the lead, so the hook still fires.
+TL_T="$TMPDIR/teamlead_transcript.jsonl"
+echo '{"type":"permission-mode"}' > "$TL_T"
+echo '{"agentName":"team-lead","type":"user"}' >> "$TL_T"
+run_test "Lead transcript (agentName=team-lead), ammo-champion → no output" 0 \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$TL_T\"}" \
+    "" "additionalContext"
 
-run_test "Missing transcript file → fail-open (fires)" 0 \
+run_test "No transcript_path, ammo-champion → no output" 0 \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"}}" \
+    "" "additionalContext"
+
+run_test "Missing transcript file, ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"/nonexistent/path/transcript.jsonl\"}" \
-    "additionalContext"
+    "" "additionalContext"
 
 EMPTY_T="$TMPDIR/empty_transcript.jsonl"
 : > "$EMPTY_T"
-run_test "Empty transcript file (0 bytes) → fail-open (fires)" 0 \
+run_test "Empty transcript file, ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$EMPTY_T\"}" \
-    "additionalContext"
+    "" "additionalContext"
 
 # ════════════════════════════════════════════
 echo ""; echo "== Name handling =="
 # ════════════════════════════════════════════
 
-check_json_field "champion-1 → reminder mentions monitor-champion-1" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    '.hookSpecificOutput.additionalContext | contains("monitor-champion-1")' \
+check_json_field "impl-champion-op003 → reminder mentions monitor-impl-champion-op003 (name handling)" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op003\"},\"transcript_path\":\"$ORCH_T\"}" \
+    '.hookSpecificOutput.additionalContext | contains("monitor-impl-champion-op003")' \
     "true"
 
-check_json_field "impl-champion-op003 → reminder mentions monitor-impl-champion-op003" \
+check_json_field "impl-champion-op003 → reminder mentions monitor-impl-champion-op003 (impl type)" \
     "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op003\"},\"transcript_path\":\"$ORCH_T\"}" \
     '.hookSpecificOutput.additionalContext | contains("monitor-impl-champion-op003")' \
     "true"
 
 # Named agent: correct agent name in reminder (not transcript path)
-check_json_field "Named agent → agentType=ammo-transcript-monitor in reminder" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
+check_json_field "Named impl-champion → agentType=ammo-transcript-monitor in reminder" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op001\"},\"transcript_path\":\"$ORCH_T\"}" \
     '.hookSpecificOutput.additionalContext | contains("ammo-transcript-monitor")' \
     "true"
 
-# Unnamed agent (empty name) — fires with "unnamed" warning
-run_test "Agent with empty name → fires with unnamed warning" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"\"},\"transcript_path\":\"$ORCH_T\"}" \
+# Unnamed impl-champion (empty name) — fires with "unnamed" warning
+run_test "Impl-champion with empty name → fires with unnamed warning" 0 \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"\"},\"transcript_path\":\"$ORCH_T\"}" \
     "unnamed"
 
-run_test "Agent with missing name key → fires with unnamed warning" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\"},\"transcript_path\":\"$ORCH_T\"}" \
+run_test "Impl-champion with missing name key → fires with unnamed warning" 0 \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\"},\"transcript_path\":\"$ORCH_T\"}" \
     "unnamed"
 
-# Unnamed champion in champion session — session gate correctly suppresses
+# Unnamed impl-champion in champion session — session gate correctly suppresses
 CHAMP_GATE_T="$TMPDIR/champ_for_gate.jsonl"
 make_champion_transcript "$CHAMP_GATE_T" "existing-champion"
-run_test "Unnamed agent in champion session → suppressed by session gate" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\"},\"transcript_path\":\"$CHAMP_GATE_T\"}" \
+run_test "Unnamed impl-champion in champion session → suppressed by session gate" 0 \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\"},\"transcript_path\":\"$CHAMP_GATE_T\"}" \
     "" "additionalContext"
 
-# Unnamed agent with no transcript_path — fires with unnamed warning (fail-open)
-run_test "Unnamed agent, no transcript → fires with unnamed warning" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"\"}}" \
+# Unnamed impl-champion with no transcript_path — fires with unnamed warning (fail-open)
+run_test "Unnamed impl-champion, no transcript → fires with unnamed warning" 0 \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"\"}}" \
     "unnamed"
 
-# Special characters in name — jq --arg handles them safely
+# Special characters in name — jq --arg handles them safely (use impl-champion)
 run_test "Name with double-quotes → valid JSON output" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"name-with-\\\"quotes\\\"\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"name-with-\\\"quotes\\\"\"},\"transcript_path\":\"$ORCH_T\"}" \
     "monitor-name-with"
 
 run_test "Name with backslash → valid JSON output" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"op\\\\003\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"op\\\\003\"},\"transcript_path\":\"$ORCH_T\"}" \
     "additionalContext"
 
 run_test "Name with HTML special chars → valid JSON output" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"agent<tag>&amp;\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"agent<tag>&amp;\"},\"transcript_path\":\"$ORCH_T\"}" \
     "additionalContext"
 
 # ════════════════════════════════════════════
 echo ""; echo "== JSON output validity =="
 # ════════════════════════════════════════════
 
-# Validate structure: top-level key must be hookSpecificOutput
+# Validate structure: top-level key must be hookSpecificOutput (use impl-champion since debate champions no longer fire)
 check_json_field "Output has hookSpecificOutput key" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op001\"},\"transcript_path\":\"$ORCH_T\"}" \
     'has("hookSpecificOutput")' \
     "true"
 
 check_json_field "hookSpecificOutput has hookEventName=PostToolUse" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op001\"},\"transcript_path\":\"$ORCH_T\"}" \
     '.hookSpecificOutput.hookEventName' \
     "PostToolUse"
 
 check_json_field "hookSpecificOutput has additionalContext field" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op001\"},\"transcript_path\":\"$ORCH_T\"}" \
     '.hookSpecificOutput | has("additionalContext")' \
     "true"
 
 check_json_field "additionalContext starts with AMMO MONITOR REMINDER" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op001\"},\"transcript_path\":\"$ORCH_T\"}" \
     '.hookSpecificOutput.additionalContext | startswith("AMMO MONITOR REMINDER")' \
     "true"
 
@@ -320,31 +332,31 @@ run_test "agentName on line 5 (boundary of head -5 window) → suppressed" 0 \
 AGENT_L6_T="$TMPDIR/agent_line6.jsonl"
 for i in 1 2 3 4 5; do echo '{"type":"system","subtype":"compact"}' >> "$AGENT_L6_T"; done
 echo '{"agentName":"champion-1","type":"user","sessionId":"s1"}' >> "$AGENT_L6_T"
-run_test "agentName on line 6 (outside head -5 window) → fires (treated as orchestrator)" 0 \
+run_test "agentName on line 6 (outside head -5 window), ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-2\"},\"transcript_path\":\"$AGENT_L6_T\"}" \
-    "additionalContext"
+    "" "additionalContext"
 
 # 5 lines of non-agent system entries → no agentName found → fires as orchestrator
 SYSTEM_ONLY_T="$TMPDIR/system_only.jsonl"
 for i in 1 2 3 4 5; do
     echo '{"type":"system","subtype":"compact","sessionId":"s1"}' >> "$SYSTEM_ONLY_T"
 done
-run_test "5 non-agent system lines (no agentName) → fires (orchestrator)" 0 \
+run_test "5 non-agent system lines (no agentName), ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$SYSTEM_ONLY_T\"}" \
-    "additionalContext"
+    "" "additionalContext"
 
 # ════════════════════════════════════════════
 echo ""; echo "== JSON output is compact (single line) =="
 # ════════════════════════════════════════════
 
 run_test "Output is compact JSON (single line)" 0 \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op001\"},\"transcript_path\":\"$ORCH_T\"}" \
     "hookSpecificOutput"
 
 # Verify it's exactly one line
 TOTAL=$((TOTAL + 1))
-LINE_COUNT=$(echo "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    | bash "$HOOK" 2>/dev/null | wc -l)
+LINE_COUNT=$(echo "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op001\"},\"transcript_path\":\"$ORCH_T\"}" \
+    | env HOME="$TMPDIR" bash "$HOOK" 2>/dev/null | wc -l)
 if [ "$LINE_COUNT" -eq 1 ]; then
     echo "  PASS [$TOTAL]: Output is exactly 1 line (compact JSON)"
     PASS=$((PASS + 1))
@@ -359,7 +371,7 @@ echo ""; echo "== Non-champion agents produce no stdout =="
 
 TOTAL=$((TOTAL + 1))
 STDOUT_BYTES=$(echo "{\"tool_input\":{\"subagent_type\":\"ammo-delegate\",\"name\":\"d1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    | bash "$HOOK" 2>/dev/null | wc -c)
+    | env HOME="$TMPDIR" bash "$HOOK" 2>/dev/null | wc -c)
 if [ "$STDOUT_BYTES" -eq 0 ]; then
     echo "  PASS [$TOTAL]: ammo-delegate produces empty stdout"
     PASS=$((PASS + 1))
@@ -370,7 +382,7 @@ fi
 
 TOTAL=$((TOTAL + 1))
 STDOUT_BYTES=$(echo "{\"tool_input\":{\"subagent_type\":\"ammo-transcript-monitor\",\"name\":\"m1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    | bash "$HOOK" 2>/dev/null | wc -c)
+    | env HOME="$TMPDIR" bash "$HOOK" 2>/dev/null | wc -c)
 if [ "$STDOUT_BYTES" -eq 0 ]; then
     echo "  PASS [$TOTAL]: ammo-transcript-monitor produces empty stdout"
     PASS=$((PASS + 1))
@@ -383,18 +395,18 @@ fi
 echo ""; echo "== Reminder content spot-checks =="
 # ════════════════════════════════════════════
 
-check_json_field "Reminder mentions agent name" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    '.hookSpecificOutput.additionalContext | contains("champion-1")' \
+check_json_field "Reminder mentions agent name (impl-champion)" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op003\"},\"transcript_path\":\"$ORCH_T\"}" \
+    '.hookSpecificOutput.additionalContext | contains("impl-champion-op003")' \
     "true"
 
-check_json_field "Reminder mentions agent type" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
-    '.hookSpecificOutput.additionalContext | contains("ammo-champion")' \
+check_json_field "Reminder mentions agent type (impl-champion)" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op003\"},\"transcript_path\":\"$ORCH_T\"}" \
+    '.hookSpecificOutput.additionalContext | contains("ammo-impl-champion")' \
     "true"
 
-check_json_field "Reminder instructs to spawn before other work" \
-    "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$ORCH_T\"}" \
+check_json_field "Reminder instructs to spawn before other work (impl-champion)" \
+    "{\"tool_input\":{\"subagent_type\":\"ammo-impl-champion\",\"name\":\"impl-champion-op003\"},\"transcript_path\":\"$ORCH_T\"}" \
     '.hookSpecificOutput.additionalContext | contains("before spawning any other agents")' \
     "true"
 
@@ -417,9 +429,9 @@ echo '{"type":"permission-mode","sessionId":"s1"}' > "$CORRUPT_T"
 printf '%20000s\n' '' >> "$CORRUPT_T"   # 20k-space corrupt line
 echo '{"type":"user","message":{"role":"user","content":"hello"}}' >> "$CORRUPT_T"
 # No agentName line → should fire (treated as orchestrator after jq handles corrupt line)
-run_test "Corrupt line in transcript (no agentName) → fires" 0 \
+run_test "Corrupt line in transcript (no agentName), ammo-champion → no output" 0 \
     "{\"tool_input\":{\"subagent_type\":\"ammo-champion\",\"name\":\"champion-1\"},\"transcript_path\":\"$CORRUPT_T\"}" \
-    "additionalContext"
+    "" "additionalContext"
 
 CORRUPT_AGENT_T="$TMPDIR/corrupt_with_agent.jsonl"
 echo '{"type":"permission-mode","sessionId":"s1"}' > "$CORRUPT_AGENT_T"

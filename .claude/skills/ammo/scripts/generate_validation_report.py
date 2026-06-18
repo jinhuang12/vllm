@@ -174,17 +174,40 @@ def _render_e2e_section(e2e: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _is_v2_layout(artifact_dir: Path) -> bool:
+    return (artifact_dir / "rounds").is_dir()
+
+
+def _resolve_e2e_path(artifact_dir: Path, round_arg: Optional[int],
+                      slot: Optional[str]) -> Path:
+    """v2: rounds/{N}/sweeps/{slot}/e2e_latency_results.json
+    legacy: {artifact_dir}/e2e_latency/e2e_latency_results.json
+    """
+    if _is_v2_layout(artifact_dir) and round_arg is not None and slot:
+        return (artifact_dir / "rounds" / str(round_arg) / "sweeps" / slot
+                / "e2e_latency_results.json")
+    return artifact_dir / "e2e_latency" / "e2e_latency_results.json"
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--artifact-dir", type=str, required=True)
     p.add_argument("--env-json", type=str, default=None)
     p.add_argument("--e2e-json", type=str, default=None)
+    p.add_argument("--round", type=int, default=None,
+                   help=("Campaign round (1-indexed). With --slot, reads "
+                         "rounds/{N}/sweeps/{SLOT}/e2e_latency_results.json."))
+    p.add_argument("--slot", type=str, default=None,
+                   help="Sweep slot under rounds/{N}/sweeps/ (e.g. baseline, opt/op007, integration).")
 
     args = p.parse_args()
 
     artifact_dir = Path(args.artifact_dir).expanduser().resolve()
     env_path = Path(args.env_json).expanduser().resolve() if args.env_json else (artifact_dir / "env.json")
-    e2e_path = Path(args.e2e_json).expanduser().resolve() if args.e2e_json else (artifact_dir / "e2e_latency" / "e2e_latency_results.json")
+    if args.e2e_json:
+        e2e_path = Path(args.e2e_json).expanduser().resolve()
+    else:
+        e2e_path = _resolve_e2e_path(artifact_dir, args.round, args.slot)
     target_path = artifact_dir / "target.json"
 
     env = _load_json(env_path)

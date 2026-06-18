@@ -46,29 +46,35 @@ def _run_git(
 def _find_campaign_worktrees(
     artifact_dir: Path, repo_root: Path
 ) -> List[Dict[str, str]]:
-    """Find campaign worktrees from state.json parallel_tracks."""
+    """Find campaign worktrees from every round's parallel_tracks.tracks."""
     state_path = artifact_dir / "state.json"
     if not state_path.exists():
         return []
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    tracks = state.get("parallel_tracks", {})
+    rounds = state.get("campaign", {}).get("rounds", [])
 
     worktrees = []
     seen_paths = set()
-    for track_id, track_data in tracks.items():
-        if not isinstance(track_data, dict):
+    for rnd in rounds:
+        if not isinstance(rnd, dict):
             continue
-        wt_path = track_data.get("worktree")
-        branch = track_data.get("branch")
-        if wt_path and wt_path not in seen_paths:
-            seen_paths.add(wt_path)
-            worktrees.append({
-                "path": wt_path,
-                "branch": branch or "unknown",
-                "track_id": track_id,
-                "status": track_data.get("status", "UNKNOWN"),
-            })
+        tracks = rnd.get("parallel_tracks", {}).get("tracks", {})
+        if not isinstance(tracks, dict):
+            continue
+        for track_id, track_data in tracks.items():
+            if not isinstance(track_data, dict):
+                continue
+            wt_path = track_data.get("worktree") or track_data.get("worktree_path")
+            branch = track_data.get("branch") or track_data.get("worktree_branch")
+            if wt_path and wt_path not in seen_paths:
+                seen_paths.add(wt_path)
+                worktrees.append({
+                    "path": wt_path,
+                    "branch": branch or "unknown",
+                    "track_id": track_id,
+                    "status": track_data.get("status", "UNKNOWN"),
+                })
 
     # Also check for additional worktrees under .claude/worktrees/ that match
     # the same session but aren't in parallel_tracks (e.g. researcher agents)

@@ -19,9 +19,34 @@ TMPDIR=$(mktemp -d)
 ARTIFACT_DIR="$TMPDIR/kernel_opt_artifacts/test_target"
 mkdir -p "$ARTIFACT_DIR"
 
-# Create minimal state.json so AMMO campaign is detected as active
+# Create minimal state.json so AMMO campaign is detected as active.
+# ammo-pretool-guard.sh only globs for state.json file existence; field content
+# is not parsed. Seeded with v2 shape for consistency with the rest of the suite.
 cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{ "campaign": { "status": "active" } }
+{
+  "target": {"model_id": "test-model", "hardware": "H100", "dtype": "bf16", "tp": 1, "ep": 1, "component": "auto"},
+  "session_id": null,
+  "gpu_resources": {"gpu_count": 1, "gpu_model": "NVIDIA H100", "memory_total_gib": 80.0, "cuda_visible_devices": "0"},
+  "campaign": {
+    "schema_version": "3.0",
+    "status": "active",
+    "current_round": 1,
+    "current_stage": "1_baseline",
+    "config": {"min_e2e_improvement_pct": 1.0, "noise_tolerance_pct": 0.5, "catastrophic_regression_pct": 5.0},
+    "rounds": [
+      {
+        "round_id": 1,
+        "status": "IN_PROGRESS",
+        "baseline": {"started_at": null, "completed_at": null},
+        "bottleneck_mining": {"started_at": null, "completed_at": null, "top_bottleneck_share_pct": null},
+        "debate": {"started_at": null, "completed_at": null, "candidates": [], "rounds_completed": 0, "max_rounds": 4, "selected_winners": []},
+        "parallel_tracks": {"started_at": null, "completed_at": null, "tracks": {}},
+        "integration": {"started_at": null, "completed_at": null, "status": "pending"},
+        "campaign_eval": {"started_at": null, "completed_at": null}
+      }
+    ]
+  }
+}
 EOF
 
 GPU_RES_DIR="$TMPDIR/gpu_res"
@@ -29,7 +54,7 @@ mkdir -p "$GPU_RES_DIR"
 
 cleanup() {
     rm -rf "$TMPDIR"
-    rm -f /tmp/hook-stderr
+    rm -f "$TMPDIR/hook-stderr"
 }
 trap cleanup EXIT
 
@@ -56,14 +81,14 @@ run_test() {
         CLAUDE_PROJECT_DIR="$TMPDIR" \
         CLAUDE_SESSION_ID="test-session" \
         AMMO_GPU_RES_DIR="$GPU_RES_DIR" \
-        bash "$HOOK" 2>/tmp/hook-stderr || actual_exit=$?
+        bash "$HOOK" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
 
     if [ "$actual_exit" -eq "$expected_exit" ]; then
         echo "  PASS [$TOTAL]: $test_name (exit=$actual_exit)"
         PASS=$((PASS + 1))
     else
         echo "  FAIL [$TOTAL]: $test_name (expected=$expected_exit, got=$actual_exit)"
-        echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+        echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
         FAIL=$((FAIL + 1))
     fi
 }

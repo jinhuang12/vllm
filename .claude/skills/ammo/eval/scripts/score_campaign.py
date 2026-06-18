@@ -93,7 +93,7 @@ def score_e2e(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """
     campaign = snapshot.get("campaign") or {}
     status = campaign.get("status")
-    cumulative = campaign.get("cumulative_e2e_speedup", 1.0)
+    cumulative = campaign.get("cumulative_speedup_vs_round1", 1.0)
     shipped = campaign.get("shipped_optimizations_count", 0)
     rounds = campaign.get("rounds", [])
 
@@ -520,7 +520,7 @@ def _ensure_accuracy_verification(snapshot: Dict[str, Any]) -> None:
         })
 
     # Compute verified-only cumulative speedup
-    total_cumulative = campaign.get("cumulative_e2e_speedup", 1.0)
+    total_cumulative = campaign.get("cumulative_speedup_vs_round1", 1.0)
     total_shipped = len(ops_detail)
     verified_count = sum(1 for op in ops_detail if op.get("accuracy_verified", False))
     ratio = verified_count / total_shipped if total_shipped > 0 else 1.0
@@ -594,7 +594,7 @@ def compute_scorecard(
     # Raw metrics summary
     campaign = snapshot.get("campaign") or {}
     raw_metrics = {
-        "cumulative_e2e_speedup": campaign.get("cumulative_e2e_speedup"),
+        "cumulative_speedup_vs_round1": campaign.get("cumulative_speedup_vs_round1"),
         "shipped_optimizations": campaign.get("shipped_optimizations_count"),
         "total_rounds": campaign.get("total_rounds"),
         "total_proposals": (snapshot.get("debate") or {}).get("total_proposals"),
@@ -786,7 +786,7 @@ def generate_report(scorecard: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
         lines.append("|---|---|---|")
         gate_descriptions = {
             "5.1a": "Kernel correctness (torch.allclose)",
-            "5.1b": "GSM8K accuracy (opt >= baseline)",
+            "5.1b": "GSM8K accuracy (opt >= baseline - tolerance)",
             "5.2": "Kernel speedup / kill gate",
             "5.3": "E2E speedup threshold",
         }
@@ -803,7 +803,7 @@ def generate_report(scorecard: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
         all_margins = acc_analysis.get("all_accuracy_margins", [])
         near_misses = acc_analysis.get("near_misses", [])
         lines.append(f"- Total 5.1b failures: {acc_analysis.get('total_5_1b_failures', 0)}")
-        lines.append(f"- Near-misses (gap <= 1%): {len(near_misses)}")
+        lines.append(f"- Near-misses (gap <= 1.5%): {len(near_misses)}")
         lines.append("")
         if all_margins:
             lines.append("| Track | Classification | Opt Accuracy | Baseline | Gap | Questions Delta | Near-Miss |")

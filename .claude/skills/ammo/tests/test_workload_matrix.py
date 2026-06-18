@@ -371,11 +371,11 @@ class TestRenderE2ESection:
 class TestNsysProfileIntegration:
     """Tests for nsys profiling integration (prefix construction, file rename, error handling)."""
 
-    def _build_nsys_prefix(self, buckets, label="baseline", nsys_dir="/tmp/nsys"):
+    def _build_nsys_prefix(self, buckets, label="baseline", nsys_dir="/tmp/nsys", nsys_trace="cuda"):
         """Replicate the nsys prefix construction logic from main()."""
         return [
             "nsys", "profile",
-            "--trace=cuda,nvtx",
+            f"--trace={nsys_trace},nvtx",
             "--sample=none",
             "--capture-range=cudaProfilerApi",
             f"--capture-range-end=repeat:{len(buckets)}",
@@ -402,6 +402,13 @@ class TestNsysProfileIntegration:
         buckets = [{"input_len": 64, "output_len": 512, "batch_size": 1}]
         prefix = self._build_nsys_prefix(buckets)
         assert "--capture-range-end=repeat:1" in prefix
+
+    def test_nsys_prefix_supports_cuda_sw_trace_backend(self):
+        """Blackwell (B200/B300) runs use software CUDA tracing."""
+        buckets = [{"input_len": 64, "output_len": 2, "batch_size": 8}]
+        prefix = self._build_nsys_prefix(buckets, nsys_trace="cuda-sw")
+        assert "--trace=cuda-sw,nvtx" in prefix
+        assert "--cuda-graph-trace=node" in prefix
 
     def test_nsys_file_rename_sequence(self, tmp_path):
         """Verify actual file rename from nsys sequential numbering to bucket tags."""

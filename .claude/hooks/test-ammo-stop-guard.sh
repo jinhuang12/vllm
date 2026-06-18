@@ -2,9 +2,11 @@
 # Test harness for ammo-stop-guard.sh (Stop hook)
 # Run: bash .claude/hooks/test-ammo-stop-guard.sh
 #
+# v2 state.json shape: round-centric. All seed payloads nest per-round
+# state (debate, parallel_tracks, integration) under campaign.rounds[N-1].
+#
 # Tests:
 #   Bug 1 — Role filtering: only lead/solo orchestrator should get nudges
-#   Bug 2 — Completed vs not-started overlap detection
 #   Regression — Existing functionality preserved
 
 set -euo pipefail
@@ -21,7 +23,7 @@ mkdir -p "$ARTIFACT_DIR"
 
 cleanup() {
     rm -rf "$TMPDIR"
-    rm -f /tmp/hook-stderr
+    rm -f "$TMPDIR/hook-stderr"
     rm -f "/tmp/ammo-stop-nudged-test-session"
     rm -f "/tmp/ammo-stop-nudged-unknown"
     rm -f "/tmp/ammo-stop-nudged-lead-session-123"
@@ -40,43 +42,89 @@ run_test() {
     # Clean marker files before each test
     rm -f /tmp/ammo-stop-nudged-* 2>/dev/null || true
 
-    echo "$json_input" | env HOME="$TMPDIR" CLAUDE_PROJECT_DIR="$TMPDIR" bash "$HOOK" 2>/tmp/hook-stderr || actual_exit=$?
+    echo "$json_input" | env HOME="$TMPDIR" CLAUDE_PROJECT_DIR="$TMPDIR" bash "$HOOK" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
 
     if [ "$actual_exit" -eq "$expected_exit" ]; then
         echo "  PASS [$TOTAL]: $test_name (exit=$actual_exit)"
         PASS=$((PASS + 1))
     else
         echo "  FAIL [$TOTAL]: $test_name (expected=$expected_exit, got=$actual_exit)"
-        echo "        stderr: $(cat /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+        echo "        stderr: $(cat "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
         FAIL=$((FAIL + 1))
     fi
+}
+
+# ── v2 state-seed helpers ──
+# _default_round IDX STATUS  → emit a round JSON object (used for rounds[] array).
+_default_round() {
+    local rid="$1"
+    local status="${2:-IN_PROGRESS}"
+    cat <<JSON
+{
+  "round_id": $rid,
+  "status": "$status",
+  "team_name": null,
+  "profiling_baseline_path": null,
+  "baseline": {"started_at": null, "completed_at": null, "e2e_latency": null, "per_bs_verdict": null},
+  "bottleneck_mining": {"started_at": null, "completed_at": null, "top_bottleneck_share_pct": null},
+  "debate": {"started_at": null, "completed_at": null, "candidates": [], "rounds_completed": 0, "max_rounds": 4, "selected_winners": []},
+  "parallel_tracks": {"started_at": null, "completed_at": null, "tracks": {}},
+  "integration": {"started_at": null, "completed_at": null, "status": "pending", "passing_candidates": [], "failed_candidates": [], "selected_candidates": [], "conflict_analysis": null, "combined_patch_branch": null, "combined_e2e_result": null, "e2e_latency_combined": null, "per_bs_verdict": null, "commit_sha": null, "final_decision": null, "resolver_invoked": null, "resolver_outcome": null, "conflicting_tracks": null},
+  "campaign_eval": {"started_at": null, "completed_at": null},
+  "shipped": [],
+  "dropped": [],
+  "cumulative_speedup_after": null,
+  "combined_e2e_speedup_x": null,
+  "combined_e2e_delta_pp": null,
+  "note": null,
+  "round_summary": null
+}
+JSON
+}
+
+# write_state OUT_PATH  (reads stdin as jq mutation expression applied to base v2 state)
+# Usage: write_state "$ARTIFACT_DIR/state.json" '<jq_expr>'
+write_state() {
+    local out="$1"
+    local expr="${2:-.}"
+    local tmp_base
+    tmp_base=$(mktemp)
+    cat > "$tmp_base" <<JSON
+{
+  "target": {"model_id": "test-model", "hardware": "H100", "dtype": "bf16", "tp": 1, "dp": 1, "ep": 1, "component": "auto"},
+  "session_id": null,
+  "gpu_resources": {"gpu_count": 1, "gpu_model": "NVIDIA H100", "memory_total_gib": 80.0, "cuda_visible_devices": "0"},
+  "campaign": {
+    "schema_version": "4.0",
+    "status": "active",
+    "current_round": 1,
+    "current_stage": "1_baseline",
+    "config": {"min_e2e_improvement_pct": 1.0, "noise_tolerance_pct": 0.5, "catastrophic_regression_pct": 5.0},
+    "cumulative_speedup_vs_round1": 1.0,
+    "round_1_baseline_latency_s": null,
+    "shipped_optimizations": [],
+    "agent_costs": [],
+    "rounds": [$(_default_round 1 IN_PROGRESS)]
+  }
+}
+JSON
+    jq "$expr" "$tmp_base" > "$out"
+    rm -f "$tmp_base"
 }
 
 # ══════════════════════════════════════════════════
 echo "== Bug 1: Role Filtering — Teammates must be silenced =="
 # ══════════════════════════════════════════════════
 
-# Setup: active campaign at stages 4-5 with overlapped debate active (round 2)
-# This is the scenario that produced 269 overlapped_active_wait false positives.
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": true,
-      "phase": "debating",
-      "selected_winners": [],
-      "profiling_basis": "bottleneck_analysis.md",
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" },
-    "op004": { "status": "in_progress" }
-  }
-}
-EOF
+# Setup: active campaign at stage 7 (nudge-worthy).
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
 # Setup team config: lead is "lead-session-123"
 mkdir -p "$TMPDIR/.claude/teams/ammo-round-2"
@@ -85,8 +133,7 @@ cat > "$TMPDIR/.claude/teams/ammo-round-2/config.json" << 'EOF'
   "leadSessionId": "lead-session-123",
   "members": [
     {"name": "impl-champion-op003", "sessionId": "teammate-session-1"},
-    {"name": "impl-validator-op003", "sessionId": "teammate-session-2"},
-    {"name": "champion-r3-1", "sessionId": "teammate-session-3"}
+    {"name": "impl-validator-op003", "sessionId": "teammate-session-2"}
   ]
 }
 EOF
@@ -100,83 +147,38 @@ run_test "Teammate (agent_type=verifier) silenced" 0 \
     '{"session_id": "lead-session-123", "agent_type": "verifier", "agent_id": "uuid-2"}'
 
 # Test 3: Lead (no agent_type) → should get nudged (exit 2)
-run_test "Lead (no agent_type) gets overlap-active nudge" 2 \
+run_test "Lead (no agent_type) gets stage-7 nudge" 2 \
     '{"session_id": "lead-session-123"}'
 
-# Test 4: Teammate receiving "not launched" warning (the 40 false positives)
-# Setup: round 2, stages 4-5, overlap NOT launched yet
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" },
-    "op004": { "status": "in_progress" }
-  }
-}
-EOF
-
-run_test "Teammate silenced for 'not launched' warning" 0 \
-    '{"session_id": "lead-session-123", "agent_type": "implementor", "agent_id": "uuid-3"}'
-
-# Test 5: Lead should get the "not launched" warning
-run_test "Lead gets 'not launched' warning at stage 4-5 round 2" 2 \
-    '{"session_id": "lead-session-123"}'
-
-# Test 6: Teammate receiving Stage 7 report nag (the 7 false positives)
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "campaign_complete", "current_round": 3 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
+# Test 4: Teammate receiving Stage 7 report nag
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.status = "campaign_complete" |
+  .campaign.current_round = 3 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 SHIPPED)"',
+    '"$(_default_round 3 EXHAUSTED)"'
+  ]
+'
 
 run_test "Teammate silenced for Stage 7 report nag" 0 \
     '{"session_id": "lead-session-123", "agent_type": "general-purpose", "agent_id": "uuid-4"}'
 
-# Test 7: Lead should get Stage 7 report nag (no REPORT.md)
+# Test 5: Lead should get Stage 7 report nag (no REPORT.md)
 run_test "Lead gets Stage 7 report nag (no REPORT.md)" 2 \
     '{"session_id": "lead-session-123"}'
 
-# Test 8: Solo orchestrator (no team configs) → should still get nudged
+# Test 6: Solo orchestrator (no team configs) → should still get nudged
 rm -rf "$TMPDIR/.claude/teams"
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": true,
-      "phase": "debating",
-      "selected_winners": [],
-      "profiling_basis": "bottleneck_analysis.md",
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" }
-  }
-}
-EOF
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
 run_test "Solo orchestrator (no teams) gets nudge" 2 \
     '{"session_id": "unknown"}'
@@ -195,15 +197,15 @@ cat > "$DOCKER_CONFIG_DIR/teams/ammo-round-2/config.json" << 'TCEOF'
 TCEOF
 FAKE_HOME=$(mktemp -d)  # empty HOME with no .claude/teams/
 
-# Campaign state: stage 4_5, round 2, overlap active (would nudge orchestrator)
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": { "next_round_overlap": { "active": true, "phase": "debating", "selected_winners": [], "profiling_basis": "bottleneck_analysis.md", "f_values_at_proposal": {} } },
-  "parallel_tracks": { "op003": { "status": "in_progress" } }
-}
-EOF
+# Campaign state: stage 7 active (would nudge orchestrator)
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
 TOTAL=$((TOTAL + 1))
 rm -f /tmp/ammo-stop-nudged-* 2>/dev/null || true
@@ -230,14 +232,14 @@ cat > /tmp/test-transcript-B.jsonl << 'EOF'
 EOF
 
 # Campaign: stage 7 active (would nudge orchestrator)
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": { "next_round_overlap": { "active": false, "phase": null, "selected_winners": [], "profiling_basis": null, "f_values_at_proposal": {} } },
-  "parallel_tracks": {}
-}
-EOF
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
 run_test "Tmux teammate detected via transcript agentName" 0 \
     '{"session_id": "teammate-session-1", "transcript_path": "/tmp/test-transcript-B.jsonl"}'
@@ -273,107 +275,6 @@ EOF
 
 # ══════════════════════════════════════════════════
 echo ""
-echo "== Bug 2: Completed overlap must NOT trigger 'not launched' =="
-# ══════════════════════════════════════════════════
-
-# Test 9: Overlap completed (phase=selection_complete, active=false) → no nudge
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": "selection_complete",
-      "selected_winners": ["op005", "op006"],
-      "profiling_basis": "bottleneck_analysis.md",
-      "f_values_at_proposal": {"op005": 0.12, "op006": 0.08}
-    }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" },
-    "op004": { "status": "in_progress" }
-  }
-}
-EOF
-
-run_test "Completed overlap (phase=selection_complete) → no nudge" 0 \
-    '{"session_id": "lead-session-123"}'
-
-# Test 10: Overlap completed with winners but phase cleared → no nudge
-# (selected_winners non-empty proves debate completed even if phase is null)
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": ["op005"],
-      "profiling_basis": "bottleneck_analysis.md",
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" },
-    "op004": { "status": "in_progress" }
-  }
-}
-EOF
-
-run_test "Completed overlap (winners non-empty, phase null) → no nudge" 0 \
-    '{"session_id": "lead-session-123"}'
-
-# Test 11: Overlap truly not started (phase=null, no winners) at round 2 → should nudge
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" },
-    "op004": { "status": "in_progress" }
-  }
-}
-EOF
-
-run_test "Not-started overlap (no winners, no phase) → lead gets nudge" 2 \
-    '{"session_id": "lead-session-123"}'
-
-# Test 12: Overlap in progress (active=true) → lead should wait
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": true,
-      "phase": "phase_0",
-      "selected_winners": [],
-      "profiling_basis": "bottleneck_analysis.md",
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" }
-  }
-}
-EOF
-
-run_test "Active overlap (phase_0) → lead gets 'wait' nudge" 2 \
-    '{"session_id": "lead-session-123"}'
-
-# ══════════════════════════════════════════════════
-echo ""
 echo "== Regression: Existing correct behavior preserved =="
 # ══════════════════════════════════════════════════
 
@@ -384,22 +285,16 @@ run_test "No state.json → silent pass" 0 \
     '{"session_id": "lead-session-123"}'
 
 # Test 14: Terminal campaign + REPORT.md → silent pass
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "campaign_complete", "current_round": 3 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.status = "campaign_complete" |
+  .campaign.current_round = 3 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 SHIPPED)"',
+    '"$(_default_round 3 EXHAUSTED)"'
+  ]
+'
 echo "# Optimization Report" > "${ARTIFACT_DIR}/REPORT.md"
 
 run_test "Terminal campaign + REPORT.md → silent pass" 0 \
@@ -408,108 +303,67 @@ run_test "Terminal campaign + REPORT.md → silent pass" 0 \
 rm -f "${ARTIFACT_DIR}/REPORT.md"
 
 # Test 15: Paused campaign → silent pass
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "paused", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.status = "paused" |
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "4_5_parallel_tracks" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
 run_test "Paused campaign → silent pass" 0 \
     '{"session_id": "lead-session-123"}'
 
-# Test 16: Round 1 at stages 4-5 → no overlap check needed, silent pass
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 1 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {
-    "op001": { "status": "in_progress" }
-  }
-}
-EOF
+# Test 16: Stages 4-5 → silent pass (no nudge since overlap logic removed)
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 1 |
+  .campaign.current_stage = "4_5_parallel_tracks" |
+  .campaign.rounds = [
+    ('"$(_default_round 1 IN_PROGRESS)"' | .parallel_tracks.tracks = {"op001": {"status": "IN_PROGRESS", "verdict": null}})
+  ]
+'
 
-run_test "Round 1 implementation → no overlap needed, silent pass" 0 \
+run_test "Round 1 implementation → silent pass" 0 \
     '{"session_id": "lead-session-123"}'
 
 # Test 17: Stage 7 active → lead gets threshold-check nudge
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
 run_test "Stage 7 active → lead gets threshold-check nudge" 2 \
     '{"session_id": "lead-session-123"}'
 
 # Test 18: Stage 7b → lead gets report nudge
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "7b_report_gen",
-  "campaign": { "status": "campaign_complete", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.status = "campaign_complete" |
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7b_report" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 EXHAUSTED)"'
+  ]
+'
 
 run_test "Stage 7b → lead gets report nudge" 2 \
     '{"session_id": "lead-session-123"}'
 
 # Test 19-20: Circuit breaker — second stop attempt passes through
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
 # First stop → nudge (exit 2), creates marker
 run_test "Circuit breaker: 1st stop → nudge" 2 \
@@ -521,56 +375,27 @@ rm -f /tmp/ammo-stop-nudged-* 2>/dev/null || true
 # Run hook twice: first creates marker, second sees it
 echo '{"session_id": "lead-session-123"}' | env HOME="$TMPDIR" CLAUDE_PROJECT_DIR="$TMPDIR" bash "$HOOK" 2>/dev/null || true
 actual_exit=0
-echo '{"session_id": "lead-session-123"}' | env HOME="$TMPDIR" CLAUDE_PROJECT_DIR="$TMPDIR" bash "$HOOK" 2>/tmp/hook-stderr || actual_exit=$?
+echo '{"session_id": "lead-session-123"}' | env HOME="$TMPDIR" CLAUDE_PROJECT_DIR="$TMPDIR" bash "$HOOK" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
 if [ "$actual_exit" -eq 0 ]; then
     echo "  PASS [$TOTAL]: Circuit breaker: 2nd stop → pass through (exit=$actual_exit)"
     PASS=$((PASS + 1))
 else
     echo "  FAIL [$TOTAL]: Circuit breaker: 2nd stop → pass through (expected=0, got=$actual_exit)"
-    echo "        stderr: $(cat /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(cat "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
     FAIL=$((FAIL + 1))
 fi
 
-# Test 21: Other stage with no active overlap → silent pass
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "3_debate",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": false,
-      "phase": null,
-      "selected_winners": [],
-      "profiling_basis": null,
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
+# Test 21: Debate stage → silent pass
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "3_debate" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 
-run_test "Other stage, no active overlap → silent pass" 0 \
-    '{"session_id": "lead-session-123"}'
-
-# Test 22: Other stage with stale active overlap → lead gets nudge
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{
-  "stage": "6_integration",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": true,
-      "phase": "debating",
-      "selected_winners": [],
-      "profiling_basis": "bottleneck_analysis.md",
-      "f_values_at_proposal": {}
-    }
-  },
-  "parallel_tracks": {}
-}
-EOF
-
-run_test "Other stage with stale active overlap → lead gets nudge" 2 \
+run_test "Debate stage → silent pass" 0 \
     '{"session_id": "lead-session-123"}'
 
 # ══════════════════════════════════════════════════
@@ -580,14 +405,17 @@ echo "== Verifier edge-case probe: CLAUDE_CONFIG_DIR == HOME/.claude =="
 
 # Edge-case probe: when CLAUDE_CONFIG_DIR is explicitly set to the same value
 # as $HOME/.claude, team detection must still work (no path divergence).
-# This guards against the fix over-constraining: if CLAUDE_CONFIG_DIR is set
-# but happens to equal the default path, teammates must still be silenced.
 TOTAL=$((TOTAL + 1))
 rm -f /tmp/ammo-stop-nudged-* 2>/dev/null || true
-# State: stage 6, active overlap (would nudge orchestrator)
-cat > "$ARTIFACT_DIR/state.json" << 'EOF'
-{"stage":"6_integration","campaign":{"status":"active","current_round":2},"debate":{"next_round_overlap":{"active":true,"phase":"debating","selected_winners":[],"profiling_basis":"bottleneck_analysis.md","f_values_at_proposal":{}}},"parallel_tracks":{}}
-EOF
+# State: stage 7 (would nudge orchestrator)
+write_state "$ARTIFACT_DIR/state.json" '
+  .campaign.current_round = 2 |
+  .campaign.current_stage = "7_campaign_eval" |
+  .campaign.rounds = [
+    '"$(_default_round 1 SHIPPED)"',
+    '"$(_default_round 2 IN_PROGRESS)"'
+  ]
+'
 actual_exit=0
 echo '{"session_id": "teammate-session-1"}' | \
     env HOME="$TMPDIR" CLAUDE_PROJECT_DIR="$TMPDIR" CLAUDE_CONFIG_DIR="$TMPDIR/.claude" \
@@ -605,9 +433,6 @@ echo "== Verifier edge-case probe 2: transcript_path given but file missing =="
 # ══════════════════════════════════════════════════
 
 # Edge-case: transcript_path in JSON but file doesn't exist → fail-open.
-# The [ -f "$TRANSCRIPT_PATH" ] guard must skip transcript detection,
-# fall through to team config check (is_lead=true), and nudge the orchestrator.
-# Guards against the fix accidentally blocking lead when transcript is absent.
 run_test "Missing transcript file → fail-open, lead still gets nudge" 2 \
     '{"session_id": "lead-session-123", "transcript_path": "/tmp/nonexistent-does-not-exist-98765.jsonl"}'
 

@@ -42,6 +42,8 @@ class TargetFields:
     num_iters: int
     noise_tolerance_pct: float
     catastrophic_regression_pct: float
+    data_parallel_size: int = 1
+    enable_expert_parallel: bool = False
 
 
 def _write_text(path: Path, text: str, *, force: bool) -> None:
@@ -74,6 +76,8 @@ def _default_target_fields(args: argparse.Namespace) -> TargetFields:
         num_iters=args.num_iters,
         noise_tolerance_pct=args.noise_tolerance_pct,
         catastrophic_regression_pct=args.catastrophic_regression_pct,
+        data_parallel_size=getattr(args, "data_parallel_size", 1),
+        enable_expert_parallel=getattr(args, "enable_expert_parallel", False),
     )
 
 
@@ -86,6 +90,7 @@ def _constraints_md(fields: TargetFields) -> str:
 - Hardware: {fields.hardware}
 - Dtype / quant format: {fields.dtype}
 - TP / EP: tp={fields.tp}, ep={fields.ep}
+- Data Parallel / Expert Parallel: dp={fields.data_parallel_size}, enable_expert_parallel={fields.enable_expert_parallel}
 - Max model len: {fields.max_model_len}
 - Decode buckets (batch sizes): {fields.batch_sizes}
 - E2E workload: input_len={fields.input_len}, output_len={fields.output_len}
@@ -98,71 +103,143 @@ def _constraints_md(fields: TargetFields) -> str:
 
 """
 
-def _state_json(fields: TargetFields, artifact_dir: Path, min_e2e_improvement_pct: float = 1.0,
-                noise_tolerance_pct: float = 0.5,
-                catastrophic_regression_pct: float = 5.0) -> Dict[str, Any]:
+_SCHEMA_PATH = Path(__file__).resolve().parents[3] / "schemas" / "state.schema.json"
+
+
+def _schema_default(path: str, fallback: float) -> float:
+    """Read a default value from state.schema.json at a dotted `campaign.config.*` path.
+
+    Keeping the defaults in the schema lets us change them once and have writers
+    pick them up automatically — no per-call-site drift.
+    """
+    try:
+        schema = json.loads(_SCHEMA_PATH.read_text())
+        props = schema["properties"]["campaign"]["properties"]["config"]["properties"]
+        return float(props[path]["default"])
+    except (FileNotFoundError, KeyError, json.JSONDecodeError, TypeError, ValueError):
+        return fallback
+
+
+def _state_json(fields: TargetFields, artifact_dir: Path, min_e2e_improvement_pct: float = 0.25,
+                noise_tolerance_pct: float | None = None,
+                catastrophic_regression_pct: float | None = None) -> Dict[str, Any]:
+    # Defaults resolved from state.schema.json — schema is the single source of truth.
+    if noise_tolerance_pct is None:
+        noise_tolerance_pct = _schema_default("noise_tolerance_pct", 0.5)
+    if catastrophic_regression_pct is None:
+        catastrophic_regression_pct = _schema_default("catastrophic_regression_pct", 5.0)
     return {
         "target": {
             "model_id": fields.model_id,
             "hardware": fields.hardware,
             "dtype": fields.dtype,
             "tp": fields.tp,
+            "dp": fields.data_parallel_size,
             "ep": fields.ep,
             "component": "auto",
         },
-        "stage": "1_baseline",
-        "summary": "Initialized.",
+        "session_id": None,
         "gpu_resources": {
             "gpu_count": 1,
             "gpu_model": PLACEHOLDER,
             "memory_total_gib": 0,
             "cuda_visible_devices": "0",
         },
-        "debate": {
-            "team_name": None,
-            "candidates": [],
-            "rounds_completed": 0,
-            "max_rounds": 4,
-            "selected_winners": [],
-            "selection_rationale": None,
-            "next_round_overlap": {
-                "active": False,
-                "phase": None,
-                "selected_winners": [],
-                "profiling_basis": None,
-                "f_values_at_proposal": {},
-            },
-        },
-        "parallel_tracks": {},
-        "integration": {
-            "status": "pending",
-            "passing_candidates": [],
-            "conflict_analysis": None,
-            "combined_patch_branch": None,
-            "combined_e2e_result": None,
-            "final_decision": None,
-        },
-        "stage_timestamps": {
-            "1_baseline": {"started_at": None, "completed_at": None},
-            "2_bottleneck_mining": {"started_at": None, "completed_at": None},
-            "3_debate": {"started_at": None, "completed_at": None},
-            "4_5_parallel_tracks": {"started_at": None, "completed_at": None},
-            "6_integration": {"started_at": None, "completed_at": None},
-            "7_campaign_eval": {"started_at": None, "completed_at": None},
-        },
-        "session_id": None,  # Lead records session UUID at campaign start; eval extracts timing/costs from logs
-        "agent_costs": [],  # Auto-populated by eval pipeline from session logs
         "campaign": {
+            "schema_version": "4.1",
             "status": "active",
             "current_round": 1,
-            "min_e2e_improvement_pct": min_e2e_improvement_pct,
-            "noise_tolerance_pct": noise_tolerance_pct,
-            "catastrophic_regression_pct": catastrophic_regression_pct,
-            "cumulative_e2e_speedup": 1.0,
-            "rounds": [],
+            "current_stage": "1_baseline",
+            "config": {
+                "min_e2e_improvement_pct": min_e2e_improvement_pct,
+                "noise_tolerance_pct": noise_tolerance_pct,
+                "catastrophic_regression_pct": catastrophic_regression_pct,
+            },
             "shipped_optimizations": [],
+            "agent_costs": [],
+            "rounds": [
+                {
+                    "round_id": 1,
+                    "status": "IN_PROGRESS",
+                    "team_name": None,
+                    "profiling_baseline_path": None,
+                    "baseline": {
+                        "started_at": None,
+                        "completed_at": None,
+                        "e2e_latency": None,
+                        "per_bs_verdict": None,
+                    },
+                    "bottleneck_mining": {
+                        "started_at": None,
+                        "completed_at": None,
+                        "top_bottleneck_share_pct": None,
+                    },
+                    "debate": {
+                        "started_at": None,
+                        "completed_at": None,
+                        "candidates": [],
+                        "rounds_completed": 0,
+                        "max_rounds": 4,
+                        "selected_winners": [],
+                    },
+                    "parallel_tracks": {
+                        "started_at": None,
+                        "completed_at": None,
+                        "tracks": {},
+                    },
+                    "integration": {
+                        "started_at": None,
+                        "completed_at": None,
+                        "status": "pending",
+                        "passing_candidates": [],
+                        "failed_candidates": [],
+                        "selected_candidates": [],
+                        "conflict_analysis": None,
+                        "combined_patch_branch": None,
+                        "combined_e2e_result": None,
+                        "e2e_latency_combined": None,
+                        "per_bs_verdict": None,
+                        "commit_sha": None,
+                        "final_decision": None,
+                        "resolver_invoked": None,
+                        "resolver_outcome": None,
+                        "conflicting_tracks": None,
+                    },
+                    "campaign_eval": {
+                        "started_at": None,
+                        "completed_at": None,
+                    },
+                    "audit": {},
+                    "shipped": [],
+                    "dropped": [],
+                    "cumulative_speedup_after": None,
+                    "combined_e2e_speedup_x": None,
+                    "combined_e2e_delta_pp": None,
+                    "note": None,
+                    "round_summary": None,
+                }
+            ],
         },
     }
+
+
+def _compose_extra_args(fields: TargetFields) -> List[str]:
+    """Compose bench.extra_args from DP / EP fields.
+
+    DP > 1 triggers auto-injection of --distributed-executor-backend
+    external_launcher, which vLLM requires for data-parallel execution via
+    torchrun. The sweep script validates that no conflicting backend value
+    was appended post-hoc (e.g., via frontend additionalFlags).
+    """
+    extra: List[str] = []
+    if fields.data_parallel_size > 1:
+        extra.extend([
+            "--data-parallel-size", str(fields.data_parallel_size),
+            "--distributed-executor-backend", "external_launcher",
+        ])
+    if fields.enable_expert_parallel:
+        extra.append("--enable-expert-parallel")
+    return extra
 
 
 def _target_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
@@ -185,7 +262,7 @@ def _target_json(fields: TargetFields, artifact_dir: Path) -> Dict[str, Any]:
         "bench": {
             "runner": "vllm_bench_latency",
             "vllm_cmd": "vllm",
-            "extra_args": [],
+            "extra_args": _compose_extra_args(fields),
             "baseline_extra_args": [],
             "opt_extra_args": [],
             "baseline_env": {},
@@ -227,15 +304,25 @@ def main() -> None:
     p.add_argument("--dtype", type=str, default=None)
 
     p.add_argument("--tp", type=int, default=1)
-    p.add_argument("--ep", type=int, default=1)
-    p.add_argument("--min-e2e-improvement", type=float, default=1.0,
-                   help="Stop campaign when no candidate can yield >= this %% E2E improvement (default: 1.0)")
+    p.add_argument("--ep", type=int, default=1,
+                   help="Legacy expert-parallel sizing field — persisted to target.ep "
+                        "in state.json. Does NOT enable vLLM expert parallelism. "
+                        "Use --enable-expert-parallel to actually enable EP.")
+    p.add_argument("--data-parallel-size", type=int, default=1,
+                   help="vLLM data-parallel size. When > 1, new_target.py injects "
+                        "--distributed-executor-backend external_launcher into "
+                        "bench.extra_args (required for torchrun DP).")
+    p.add_argument("--enable-expert-parallel", action="store_true",
+                   help="Enable vLLM expert parallelism (passes "
+                        "--enable-expert-parallel through to bench.extra_args).")
+    p.add_argument("--min-e2e-improvement", type=float, default=0.25,
+                   help="Stop campaign when no candidate can yield >= this %% E2E improvement (default: 0.25)")
 
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--input-len", type=int, default=64)
     p.add_argument("--output-len", type=int, default=512)
     p.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 8, 32])
-    p.add_argument("--num-iters", type=int, default=5)
+    p.add_argument("--num-iters", type=int, default=10)
 
     # Gating options (BS-dependent optimization support)
     p.add_argument("--noise-tolerance-pct", type=float, default=0.5,
@@ -250,23 +337,42 @@ def main() -> None:
 
     fields = _default_target_fields(args)
 
-    # Create standard subdirs.
-    (artifact_dir / "investigation").mkdir(exist_ok=True)
-    (artifact_dir / "runs").mkdir(exist_ok=True)
-    (artifact_dir / "nsys").mkdir(exist_ok=True)
+    # Create v2 round-scoped scaffold for round 1.
+    # Spec: docs/superpowers/specs/2026-05-12-ammo-artifact-layout-design.md (§Bootstrap)
+    # Reference: ai_cli_session/.claude/skills/ammo/references/artifact-layout.md
+    round_dir = artifact_dir / "rounds" / "1"
+    for subdir in (
+        "profiling/nsys",
+        "profiling/ncu",
+        "sweeps/baseline/json",
+        "sweeps/baseline/logs",
+        "sweeps/baseline/status",
+        "sweeps/opt",
+        "sweeps/integration",
+        "sweeps/golden_capture",
+        "mining",
+        "debate/proposals",
+        "debate/micro_experiments",
+        "debate/monitor_audits",
+        "tracks",
+        "audits",
+        "_archive",
+    ):
+        (round_dir / subdir).mkdir(parents=True, exist_ok=True)
+    # Cross-round (campaign-level) blockers dir — NOT round-scoped.
     (artifact_dir / "blockers").mkdir(exist_ok=True)
 
-    _write_text(artifact_dir / "constraints.md", _constraints_md(fields), force=args.force)
-    _write_json(artifact_dir / "state.json", _state_json(
+    state = _state_json(
         fields, artifact_dir, args.min_e2e_improvement,
         noise_tolerance_pct=args.noise_tolerance_pct,
         catastrophic_regression_pct=args.catastrophic_regression_pct,
-    ), force=args.force)
+    )
+    _write_json(artifact_dir / "state.json", state, force=args.force)
     _write_json(artifact_dir / "target.json", _target_json(fields, artifact_dir), force=args.force)
 
     print(f"Initialized artifact directory: {artifact_dir}")
-    print("Created: constraints.md, state.json, target.json")
-    print("Next: fill constraints.md (Phase 1) and run collect_env.py")
+    print("Created: state.json, target.json, rounds/1/ scaffold")
+    print("Next: write rounds/1/constraints.md (Phase 1) and run collect_env.py")
 
 
 if __name__ == "__main__":

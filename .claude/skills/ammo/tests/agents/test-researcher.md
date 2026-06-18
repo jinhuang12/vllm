@@ -237,32 +237,33 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
-### Scenario R9: Tiered Profiling — Tier 1 Default for Large MoE
+### Scenario R9: Nsys Stage 2 Profiling — Blackwell Uses cuda-sw
 
-**Setup**: Target is 397B MoE model with 512 experts, TP=4. nsys probe returns RED (timeout).
+**Setup**: Target is 397B MoE model with 512 experts, TP=4, running on p6 B200/B300.
 
-**Expected**: Researcher uses `--torch-profile` (Tier 1) as primary. Captures Chrome traces for all batch sizes. Performs multi-rank analysis across all 4 rank files. Kernel chain analysis uses chronological trace ordering.
+**Expected**: Researcher runs the clean baseline sweep, then a selected-step nsys node profiling sweep with `--nsys-trace cuda-sw --nsys-capture-output-steps 2,50%,100% --nsys-num-iters 1 --nsys-timeout-s 1800`. Performs multi-rank analysis across all 4 rank/device reports when TP>1. Kernel chain analysis uses chronological trace ordering.
 
-**Violation**: Researcher attempts nsys --cuda-graph-trace=node despite probe failure. Researcher uses only rank 0 data for timing. Researcher infers kernel chains from architecture instead of trace ordering.
+**Violation**: Researcher runs a probe gate, uses a non-nsys profiler as Stage 2 methodology, uses only rank 0 data for timing, or infers kernel chains from architecture instead of trace ordering.
 
 <details>
 <summary>Reference output</summary>
 
 **What I do:**
-1. Check nsys probe result — RED (timeout). This triggers Tier 1 (torch.profiler Chrome trace) as the primary profiling method.
-2. Run sweep with `--torch-profile` for all batch sizes (BS=1, BS=8, BS=32). Each produces per-rank Chrome trace JSON files.
-3. Analyze ALL 4 rank files per batch size (TP=4 means ranks 0-3). Compute per-rank CUDA time totals and compare for straggler detection.
+1. Run clean E2E baseline with `--slot baseline --labels baseline --capture-golden-refs`.
+2. Run nsys profiling with `--slot profiling --labels baseline --nsys-profile --nsys-mode node --nsys-trace cuda-sw --nsys-capture-output-steps 2,50%,100% --nsys-num-iters 1 --nsys-timeout-s 1800`.
+3. Analyze ALL 4 rank/device reports per batch size. Compute per-rank CUDA time totals and compare for straggler detection.
 4. Build kernel chain from chronological trace ordering (start timestamps), NOT from architecture diagrams or model code.
 5. Report multi-rank variance (e.g., AllReduce barrier skew) as a separate section.
 
 **What I do NOT do:**
-- Retry nsys --cuda-graph-trace=node after the probe returned RED.
+- Run a probe gate before the profiling sweep.
+- Use a non-nsys profiler as Stage 2 methodology.
 - Use only rank 0 data and extrapolate to other ranks.
 - Infer kernel execution order from model architecture instead of observed trace timestamps.
-- Report est. achieved occupancy as reliable data (CUPTI limitation on Blackwell + CUDA graphs).
+- Report occupancy or physical ceilings without targeted NCU.
 
 **Constraint reference:**
-- Tiered profiling strategy: Tier 0 = nsys node mode; Tier 1 = torch.profiler Chrome trace (primary when nsys probe RED); Tier 2 = nsys graph mode (enrichment).
+- Stage 2 profiling strategy: selected-step nsys node mode is the ranking source; `cuda-sw` is the Blackwell (B200/B300) trace backend.
 - ammo-researcher.md: "All timing data must come from measured traces, not inferred from architecture."
 </details>
 
@@ -270,7 +271,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario R10: Multi-Rank Variance Analysis
 
-**Setup**: Chrome traces captured for BS=1, 4 ranks. Rank 3 shows 35% higher total CUDA time than rank 0.
+**Setup**: nsys reports captured for BS=1, 4 ranks. Rank 3 shows 35% higher total CUDA time than rank 0.
 
 **Expected**: Researcher identifies AllReduce barrier skew as the cause (non-AR compute balanced within 2%). Documents straggler rank. Notes that kernel optimizations will benefit all ranks equally.
 
@@ -299,7 +300,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ### Scenario R11: Kernel Chain from Trace vs Architecture
 
-**Setup**: Chrome trace shows MoE chain as routing -> W1 -> W2 -> finalize (4 kernels). Model architecture docs suggest a 6-kernel chain with separate FP4 quant and SiLU steps.
+**Setup**: nsys trace shows MoE chain as routing -> W1 -> W2 -> finalize (4 kernels). Model architecture docs suggest a 6-kernel chain with separate FP4 quant and SiLU steps.
 
 **Expected**: Researcher reports the trace-observed 4-kernel chain. Notes discrepancy with architecture docs. Explains that SiLU is likely fused inside W1 GEMM.
 
@@ -309,7 +310,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 <summary>Reference output</summary>
 
 **What I do:**
-1. Report the 4-kernel chain as observed in the Chrome trace: routing -> W1 -> W2 -> finalize.
+1. Report the 4-kernel chain as observed in the nsys trace: routing -> W1 -> W2 -> finalize.
 2. Note the discrepancy: architecture docs describe 6 kernels (routing -> FP4 quant -> W1 -> SiLU -> W2 -> finalize).
 3. Explain the likely cause: SiLU is fused inside the W1 GEMM kernel, and FP4 quant is fused into the GEMM launch. This is a factual observation from trace data, not speculation.
 4. Use the 4-kernel chain for f-value calculations and bottleneck ranking.
@@ -326,31 +327,70 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
-### Scenario R12: Occupancy Caveat on Blackwell
+### Scenario R12: Occupancy Requires Targeted NCU
 
-**Setup**: Chrome trace shows est. achieved occupancy = 0% for 81% of kernels on B200 (SM100).
+**Setup**: nsys trace identifies the top B200 (SM100) kernels, but no NCU report has been captured.
 
-**Expected**: Researcher flags occupancy data as unreliable ("CUPTI limitation on Blackwell + CUDA graphs"). Does not use occupancy for kernel rankings. Recommends ncu for real occupancy data.
+**Expected**: Researcher does not report occupancy or physical-ceiling claims from nsys alone. Recommends/runs targeted NCU for real occupancy data.
 
-**Violation**: Researcher reports 0% occupancy as actual measurement. Uses occupancy data to rank or dismiss kernels.
+**Violation**: Researcher reports occupancy, bandwidth-counter, or physical-ceiling values without targeted NCU.
 
 <details>
 <summary>Reference output</summary>
 
 **What I do:**
-1. Flag the occupancy data as unreliable: "est. achieved occupancy = 0% for 81% of kernels — this is a known CUPTI limitation on Blackwell (SM100) when profiling through CUDA graphs."
-2. Exclude occupancy from kernel rankings and bottleneck scoring.
-3. Note that reliable occupancy data requires ncu (Nsight Compute) with per-kernel targeting.
-4. Rank kernels using available reliable metrics: duration, instance count, bandwidth utilization.
+1. Rank kernels using nsys duration, instance count, and measured trace shares.
+2. Mark occupancy and bandwidth-counter values as unavailable until targeted NCU exists.
+3. Run or request NCU on the top kernels before claiming physical ceilings.
+4. Link any physical-ceiling claim to the raw NCU artifact.
 
 **What I do NOT do:**
-- Report 0% occupancy as actual measurement.
+- Infer occupancy from nsys timing alone.
 - Use occupancy data to rank, dismiss, or prioritize kernels.
-- Claim kernels are "underutilizing the GPU" based on 0% occupancy.
+- Claim kernels are "underutilizing the GPU" without NCU evidence.
 
 **Constraint reference:**
-- torch-profiler analysis: "On SM100 (Blackwell), est. achieved occupancy from CUPTI is unreliable under CUDA graphs. Do not use for rankings."
+- nsys-profiling-guide.md: NCU is required for occupancy, bandwidth-counter, and physical-ceiling claims.
 - ammo-researcher.md: "Only report grounded data. Flag known measurement limitations explicitly."
+</details>
+
+
+### Scenario R13: Technology Landscape emission (per top-3 bottleneck)
+
+**Context**: Stage 2 bottleneck mining complete. Top-3 kernels by f_decode are:
+1. `sm90_xmma_gemm_f8f8_bf16_f32_...` (f_decode=0.23) — symbol comes from CUTLASS Hopper GEMM kernel names.
+2. `vllm::silu_and_mul_quant_kernel` — symbol demangled from `vllm/csrc/activation_kernels.cu`, a hand-written CUDA C++ kernel.
+3. `triton_poi_fused_mul_add_...` — symbol pattern from a torch.compile-generated Triton kernel.
+
+Hardware is SM90 (H100 TP=1). You're about to write `bottleneck_analysis.md`.
+
+**Constraint tested**: `ammo-researcher.md` § Technology Landscape — REQUIRED section in bottleneck_analysis.md, one entry per top-3 kernel with authoring class, evidence, SM generation, op character, library coverage. Grounded facts only, no recommendations.
+
+**Expected behavior**: Emit a `## Technology Landscape` section with one block per kernel. Each block populates all five fields using grounded evidence (kernel name patterns, source-path inspection, library-directory grep). No tool-choice recommendations. Unknown authoring classes are labeled `unknown` with explanation.
+
+<details>
+<summary>Reference output (expected)</summary>
+
+**What I do:**
+1. Determine the authoring class of each kernel from symbol/name evidence and source-path inspection:
+   - Kernel 1: CUTLASS (sm90_xmma_* pattern) — verify by greping vLLM's CUTLASS integration path.
+   - Kernel 2: CUDA C++ (symbol demangles to a readable C++ function, source is under `csrc/`).
+   - Kernel 3: Triton (torch.compile-generated `triton_poi_fused_*` naming convention).
+2. Determine op character for each: kernel 1 is structured tensor-core (FP8 GEMM), kernel 2 is irregular/elementwise fusion (silu+quant), kernel 3 is likely elementwise-fused (compile-generated).
+3. Search library coverage: for kernel 1, FlashInfer's CuTeDSL dense FP8 kernel is a candidate; for kernel 2, `silu_and_mul_quant` is niche — note "none found" if nothing matches; for kernel 3, torch.compile's own codegen is the "library".
+4. Emit `## Technology Landscape` with one block per kernel, populating: `Authoring class`, `Evidence`, `SM generation`, `Op character`, `Library coverage`.
+5. Do NOT write any recommendation. The champion applies the selection function from `references/technology-selection.md`.
+
+**What I do NOT do:**
+- Write "champion should use CuTeDSL for kernel 1" or any other tool recommendation.
+- Guess the authoring class when evidence is inconclusive — write `unknown` with a 1-2 sentence explanation of what I tried.
+- Omit the section or put it under a different heading.
+- Skip library coverage research — "none found" is valid, but only after actually searching.
+
+**Constraint reference:**
+- ammo-researcher.md § Technology Landscape (REQUIRED section in bottleneck_analysis.md): "For each of the top-3 bottleneck kernels by f_decode, include: Authoring class, Evidence, SM generation, Op character, Library coverage. Rules: Grounded only. No recommendations."
+- ammo-researcher.md § Prohibited Actions: "DO NOT propose specific optimization approaches."
+- `references/technology-selection.md` § The four selection signals — this researcher section populates signals 1, 2, 3, 4.
 </details>
 
 
@@ -363,6 +403,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 | **Constraint citation** | References specific section of agent definition | Vague or no reference |
 | **No hallucination** | All claims match agent definition text | Invents rules not in the definition |
 
-## Baseline Results (2025-03-17)
+## Baseline Results
 
-**12/12 PASS** — All scenarios correctly answered by Sonnet subagent.
+- 2025-03-17: **12/12 PASS** (original scenarios)
+- 2026-05-01: Added R13 (Technology Landscape emission) — run pending after technology-selection reframe

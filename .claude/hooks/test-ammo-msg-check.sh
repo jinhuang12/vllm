@@ -12,7 +12,7 @@ FAIL=0
 TOTAL=0
 
 TMPDIR=$(mktemp -d)
-cleanup() { rm -rf "$TMPDIR" /tmp/hook-stderr /tmp/hook-stdout; rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true; }
+cleanup() { rm -rf "$TMPDIR" "$TMPDIR/hook-stderr" "$TMPDIR/hook-stdout"; rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true; }
 trap cleanup EXIT
 
 make_team_config() {
@@ -82,28 +82,28 @@ run_test() {
     local test_name="$1" expected_exit="$2" json_input="$3" check_output="${4:-}" actual_exit=0
     rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
     TOTAL=$((TOTAL + 1))
-    echo "$json_input" | env HOME="$TMPDIR" bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
+    echo "$json_input" | env HOME="$TMPDIR" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
     local pass=true
     [ "$actual_exit" -ne "$expected_exit" ] && pass=false
     if [ -n "$check_output" ]; then
         if [ "$check_output" = "inject" ]; then
             # Verify: has additionalContext, has injected-teammate-message, valid JSON, NO permissionDecision
-            if ! grep -q "injected-teammate-message" /tmp/hook-stdout 2>/dev/null; then
+            if ! grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
                 pass=false
             fi
-            if ! grep -q "additionalContext" /tmp/hook-stdout 2>/dev/null; then
+            if ! grep -q "additionalContext" "$TMPDIR/hook-stdout" 2>/dev/null; then
                 pass=false
             fi
-            if grep -q "permissionDecision" /tmp/hook-stdout 2>/dev/null; then
+            if grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
                 echo "  WARN: output contains permissionDecision (should be inject-only)!"
                 pass=false
             fi
-            if [ -s /tmp/hook-stdout ] && ! jq . /tmp/hook-stdout >/dev/null 2>&1; then
+            if [ -s "$TMPDIR/hook-stdout" ] && ! jq . "$TMPDIR/hook-stdout" >/dev/null 2>&1; then
                 echo "  WARN: stdout is not valid JSON!"
                 pass=false
             fi
         else
-            if ! grep -qF "$check_output" /tmp/hook-stdout 2>/dev/null && ! grep -qF "$check_output" /tmp/hook-stderr 2>/dev/null; then
+            if ! grep -qF "$check_output" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -qF "$check_output" "$TMPDIR/hook-stderr" 2>/dev/null; then
                 pass=false
             fi
         fi
@@ -114,8 +114,8 @@ run_test() {
     else
         echo "  FAIL [$TOTAL]: $test_name (expected=$expected_exit, got=$actual_exit)"
         [ -n "$check_output" ] && echo "        expected output: $check_output"
-        echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
-        echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+        echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+        echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -124,19 +124,19 @@ run_test() {
 run_test_keep_sidecar() {
     local test_name="$1" expected_exit="$2" json_input="$3" check_output="${4:-}" actual_exit=0
     TOTAL=$((TOTAL + 1))
-    echo "$json_input" | env HOME="$TMPDIR" bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
+    echo "$json_input" | env HOME="$TMPDIR" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
     local pass=true
     [ "$actual_exit" -ne "$expected_exit" ] && pass=false
     if [ -n "$check_output" ]; then
         if [ "$check_output" = "inject" ]; then
-            if ! grep -q "injected-teammate-message" /tmp/hook-stdout 2>/dev/null; then pass=false; fi
-            if ! grep -q "additionalContext" /tmp/hook-stdout 2>/dev/null; then pass=false; fi
-            if grep -q "permissionDecision" /tmp/hook-stdout 2>/dev/null; then pass=false; fi
-            if [ -s /tmp/hook-stdout ] && ! jq . /tmp/hook-stdout >/dev/null 2>&1; then pass=false; fi
+            if ! grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then pass=false; fi
+            if ! grep -q "additionalContext" "$TMPDIR/hook-stdout" 2>/dev/null; then pass=false; fi
+            if grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then pass=false; fi
+            if [ -s "$TMPDIR/hook-stdout" ] && ! jq . "$TMPDIR/hook-stdout" >/dev/null 2>&1; then pass=false; fi
         elif [ "$check_output" = "no_output" ]; then
-            if [ -s /tmp/hook-stdout ]; then pass=false; fi
+            if [ -s "$TMPDIR/hook-stdout" ]; then pass=false; fi
         else
-            if ! grep -qF "$check_output" /tmp/hook-stdout 2>/dev/null && ! grep -qF "$check_output" /tmp/hook-stderr 2>/dev/null; then
+            if ! grep -qF "$check_output" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -qF "$check_output" "$TMPDIR/hook-stderr" 2>/dev/null; then
                 pass=false
             fi
         fi
@@ -147,8 +147,8 @@ run_test_keep_sidecar() {
     else
         echo "  FAIL [$TOTAL]: $test_name (expected=$expected_exit, got=$actual_exit)"
         [ -n "$check_output" ] && echo "        expected output: $check_output"
-        echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
-        echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+        echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+        echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -476,15 +476,15 @@ run_test "3 undelivered from same sender → INJECT" 0 \
     "inject"
 
 # ════════════════════════════════════════════
-echo ""; echo "== P0: In-process subagent skip =="
+echo ""; echo "== P0: Eligible name + agent_type → INJECT (Edit A passes, no Edit C gate) =="
 make_transcript "$TRANSCRIPT" "test-team" "champion-1" 0
 make_inbox "$TEAM_DIR/inboxes/champion-1.json" \
     "team-lead|spawn|spawn|true" \
     "mon-1|alert|alert|true"
-run_test "agent_type=ammo-delegate → skip" 0 \
-    "{\"tool_name\":\"Bash\",\"transcript_path\":\"$TRANSCRIPT\",\"agent_type\":\"ammo-delegate\"}"
-run_test "agent_type=general-purpose → skip" 0 \
-    "{\"tool_name\":\"Bash\",\"transcript_path\":\"$TRANSCRIPT\",\"agent_type\":\"general-purpose\"}"
+run_test "champion-1 + agent_type=ammo-delegate → INJECT" 0 \
+    "{\"tool_name\":\"Bash\",\"transcript_path\":\"$TRANSCRIPT\",\"agent_type\":\"ammo-delegate\"}" "inject"
+run_test "champion-1 + agent_type=general-purpose → INJECT" 0 \
+    "{\"tool_name\":\"Bash\",\"transcript_path\":\"$TRANSCRIPT\",\"agent_type\":\"general-purpose\"}" "inject"
 
 # ════════════════════════════════════════════
 echo ""; echo "== Docker path: CLAUDE_CONFIG_DIR differs from HOME =="
@@ -506,14 +506,14 @@ TOTAL=$((TOTAL + 1))
 actual_exit=0
 echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$DOCKER_TRANSCRIPT\"}" | \
     env HOME="$DOCKER_FAKE_HOME" CLAUDE_CONFIG_DIR="$DOCKER_CFG" \
-    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
-if grep -q "injected-teammate-message" /tmp/hook-stdout 2>/dev/null && ! grep -q "permissionDecision" /tmp/hook-stdout 2>/dev/null; then
+    bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
     echo "  PASS [$TOTAL]: Docker path — inbox found via CLAUDE_CONFIG_DIR → INJECT"
     PASS=$((PASS + 1))
 else
     echo "  FAIL [$TOTAL]: Docker path — inbox found via CLAUDE_CONFIG_DIR → INJECT (exit=$actual_exit)"
-    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
-    echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
     FAIL=$((FAIL + 1))
 fi
 rm -rf "$DOCKER_FAKE_HOME"
@@ -530,13 +530,13 @@ TOTAL=$((TOTAL + 1))
 actual_exit=0
 echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$PROBE2_TRANSCRIPT\"}" | \
     env HOME="$PROBE2_HOME" CLAUDE_CONFIG_DIR="$PROBE2_CFG" \
-    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
-if [ "$actual_exit" -eq 0 ] && ! grep -q "injected-teammate-message" /tmp/hook-stdout 2>/dev/null; then
+    bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if [ "$actual_exit" -eq 0 ] && ! grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
     echo "  PASS [$TOTAL]: CLAUDE_CONFIG_DIR set, no teams — fail-open (exit=0, no inject)"
     PASS=$((PASS + 1))
 else
     echo "  FAIL [$TOTAL]: CLAUDE_CONFIG_DIR set, no teams — fail-open (expected exit=0 no inject, got exit=$actual_exit)"
-    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
     FAIL=$((FAIL + 1))
 fi
 rm -rf "$PROBE2_CFG" "$PROBE2_HOME"
@@ -557,14 +557,14 @@ TOTAL=$((TOTAL + 1))
 actual_exit=0
 echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$PROBE_TRANSCRIPT\"}" | \
     env HOME="$PROBE_HOME" CLAUDE_CONFIG_DIR="$PROBE_HOME/.claude" \
-    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
-if grep -q "injected-teammate-message" /tmp/hook-stdout 2>/dev/null; then
+    bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
     echo "  PASS [$TOTAL]: CLAUDE_CONFIG_DIR == HOME/.claude — inbox found, INJECT"
     PASS=$((PASS + 1))
 else
     echo "  FAIL [$TOTAL]: CLAUDE_CONFIG_DIR == HOME/.claude — inbox found, INJECT (exit=$actual_exit)"
-    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
-    echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
     FAIL=$((FAIL + 1))
 fi
 rm -rf "$PROBE_HOME"
@@ -670,14 +670,14 @@ TOTAL=$((TOTAL + 1))
 actual_exit=0
 echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$SANITIZED_T\"}" | \
     env HOME="$SANITIZED_HOME" \
-    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
-if grep -q "injected-teammate-message" /tmp/hook-stdout 2>/dev/null; then
+    bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
     echo "  PASS [$TOTAL]: Dotted team name → sanitized dir lookup → INJECT"
     PASS=$((PASS + 1))
 else
     echo "  FAIL [$TOTAL]: Dotted team name → sanitized dir lookup → INJECT (exit=$actual_exit)"
-    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
-    echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
     FAIL=$((FAIL + 1))
 fi
 rm -rf "$SANITIZED_HOME"
@@ -701,24 +701,424 @@ TOTAL=$((TOTAL + 1))
 actual_exit=0
 echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$FALLBACK_T\"}" | \
     env HOME="$FALLBACK_HOME" \
-    bash "$HOOK" > /tmp/hook-stdout 2>/tmp/hook-stderr || actual_exit=$?
-if grep -q "injected-teammate-message" /tmp/hook-stdout 2>/dev/null; then
+    bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
     echo "  PASS [$TOTAL]: No agentName + 'You are champion-3' in msg → fallback INJECT"
     PASS=$((PASS + 1))
 else
     echo "  FAIL [$TOTAL]: No agentName + 'You are champion-3' in msg → fallback INJECT (exit=$actual_exit)"
-    echo "        stdout: $(head -3 /tmp/hook-stdout 2>/dev/null || echo '(none)')"
-    echo "        stderr: $(head -3 /tmp/hook-stderr 2>/dev/null || echo '(none)')"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
     FAIL=$((FAIL + 1))
 fi
 
-# Also test: fallback should NOT match non-champion agents
+# NOTE: the original "'You are monitor-champion-1' → skip" test previously
+# asserted the fallback regex only matched champion/impl-champion names.
+# With Edit A (expanded case filter), monitor-* IS now an eligible agent.
+# The fallback regex is still narrow (champion|impl-champion), so even in
+# the new code this transcript yields no AGENT_NAME and the hook should
+# still skip — but assert the outcome rather than the mechanism.
 FALLBACK_T2="$TMPDIR/fallback-transcript2.jsonl"
 echo '{"type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">\nYou are monitor-champion-1 in the AMMO debate...\n</teammate-message>"},"timestamp":"2026-04-03T18:00:00.000Z","sessionId":"fallback-test2"}' > "$FALLBACK_T2"
-run_test "Fallback: 'You are monitor-champion-1' → skip (not champion pattern)" 0 \
+run_test "Fallback: 'You are monitor-champion-1' content → skip (no agentName resolved)" 0 \
     "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$FALLBACK_T2\"}"
 
 rm -rf "$FALLBACK_HOME"
+
+# ════════════════════════════════════════════
+echo ""; echo "== M1-M8: Extended agent scope (team-lead + monitors + orchestrator) =="
+# ════════════════════════════════════════════
+
+# ── M1: team-lead with undelivered inbox msg → INJECT ──
+M1_HOME="$TMPDIR/m1home"
+M1_TEAM_DIR="$M1_HOME/.claude/teams/test-team"
+make_team_config "$M1_TEAM_DIR" "test-team" "team-lead:team-lead" "champion-1:ammo-champion"
+make_inbox "$M1_TEAM_DIR/inboxes/team-lead.json" \
+    "monitor-champion-1|CRITICAL regression found|urgent|2026-04-03T18:25:00.000Z|true"
+M1_T="$TMPDIR/m1-transcript.jsonl"
+make_transcript "$M1_T" "test-team" "team-lead" 1
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M1_T\"}" | \
+    env HOME="$M1_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M1 team-lead with undelivered → INJECT"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M1 team-lead with undelivered → INJECT (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M1_HOME"
+
+# ── M2: monitor-champion-1 with undelivered → INJECT ──
+M2_HOME="$TMPDIR/m2home"
+M2_TEAM_DIR="$M2_HOME/.claude/teams/test-team"
+make_team_config "$M2_TEAM_DIR" "test-team" "monitor-champion-1:ammo-transcript-monitor" "champion-1:ammo-champion"
+make_inbox "$M2_TEAM_DIR/inboxes/monitor-champion-1.json" \
+    "team-lead|please watch champion-1|dispatch|2026-04-03T18:25:00.000Z|true"
+M2_T="$TMPDIR/m2-transcript.jsonl"
+make_transcript "$M2_T" "test-team" "monitor-champion-1" 1
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M2_T\"}" | \
+    env HOME="$M2_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M2 monitor-champion-1 with undelivered → INJECT"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M2 monitor-champion-1 with undelivered → INJECT (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M2_HOME"
+
+# ── M3: monitor-impl-champion-op003 with undelivered → INJECT ──
+M3_HOME="$TMPDIR/m3home"
+M3_TEAM_DIR="$M3_HOME/.claude/teams/test-team"
+make_team_config "$M3_TEAM_DIR" "test-team" "monitor-impl-champion-op003:ammo-transcript-monitor" "impl-champion-op003:ammo-impl-champion"
+make_inbox "$M3_TEAM_DIR/inboxes/monitor-impl-champion-op003.json" \
+    "team-lead|please watch impl-champion-op003|dispatch|2026-04-03T18:25:00.000Z|true"
+M3_T="$TMPDIR/m3-transcript.jsonl"
+make_transcript "$M3_T" "test-team" "monitor-impl-champion-op003" 1
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M3_T\"}" | \
+    env HOME="$M3_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M3 monitor-impl-champion-op003 with undelivered → INJECT"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M3 monitor-impl-champion-op003 with undelivered → INJECT (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M3_HOME"
+
+# ── M3b: monitor-champion-2 with teamName ABSENT in transcript, team-dir scan resolves → INJECT ──
+# Transcript has agentName but no teamName. The broader Edit-D fallback should
+# scan teams and find the member.
+M3B_HOME="$TMPDIR/m3bhome"
+M3B_TEAM_DIR="$M3B_HOME/.claude/teams/ammo-round-1-m3b"
+make_team_config "$M3B_TEAM_DIR" "ammo-round-1-m3b" "monitor-champion-2:ammo-transcript-monitor"
+make_inbox "$M3B_TEAM_DIR/inboxes/monitor-champion-2.json" \
+    "team-lead|watch champion-2|dispatch|2026-04-03T18:25:00.000Z|true"
+M3B_T="$TMPDIR/m3b-transcript.jsonl"
+# Transcript: has agentName but NO teamName
+echo '{"type":"permission-mode","sessionId":"m3b-session"}' > "$M3B_T"
+echo '{"agentName":"monitor-champion-2","type":"user","message":{"role":"user","content":"hi"},"sessionId":"m3b-session"}' >> "$M3B_T"
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M3B_T\"}" | \
+    env HOME="$M3B_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M3b monitor-champion-2 teamName absent + team-dir scan → INJECT"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M3b monitor-champion-2 teamName absent (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M3B_HOME"
+
+# ── M4: No agentName, session_id matches leadSessionId → INJECT as orchestrator ──
+M4_HOME="$TMPDIR/m4home"
+M4_TEAM_DIR="$M4_HOME/.claude/teams/ammo-round-1-m4"
+# Team config with custom leadSessionId
+mkdir -p "$M4_TEAM_DIR"
+cat > "$M4_TEAM_DIR/config.json" << 'EOF'
+{"name":"ammo-round-1-m4","leadSessionId":"lead-sid-4242","members":[{"name":"team-lead","agentType":"team-lead","agentId":"team-lead@ammo-round-1-m4"}]}
+EOF
+mkdir -p "$M4_TEAM_DIR/inboxes"
+make_inbox "$M4_TEAM_DIR/inboxes/team-lead.json" \
+    "monitor-champion-1|orchestrator alert|alert|2026-04-03T18:25:00.000Z|true"
+# Transcript: no agentName anywhere, just a plain user line
+M4_T="$TMPDIR/m4-transcript.jsonl"
+echo '{"type":"user","message":{"role":"user","content":"go"},"sessionId":"lead-sid-4242"}' > "$M4_T"
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"lead-sid-4242\",\"transcript_path\":\"$M4_T\"}" | \
+    env HOME="$M4_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M4 no agentName + session_id==leadSessionId → INJECT (orchestrator)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M4 orchestrator via leadSessionId (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M4_HOME"
+
+# ── M4b: No agentName, session_id doesn't match any leadSessionId → SKIP ──
+M4B_HOME="$TMPDIR/m4bhome"
+M4B_TEAM_DIR="$M4B_HOME/.claude/teams/ammo-round-1-m4b"
+mkdir -p "$M4B_TEAM_DIR"
+cat > "$M4B_TEAM_DIR/config.json" << 'EOF'
+{"name":"ammo-round-1-m4b","leadSessionId":"lead-sid-expected","members":[{"name":"team-lead","agentType":"team-lead","agentId":"team-lead@ammo-round-1-m4b"}]}
+EOF
+mkdir -p "$M4B_TEAM_DIR/inboxes"
+make_inbox "$M4B_TEAM_DIR/inboxes/team-lead.json" \
+    "monitor-champion-1|alert|alert|2026-04-03T18:25:00.000Z|true"
+M4B_T="$TMPDIR/m4b-transcript.jsonl"
+echo '{"type":"user","message":{"role":"user","content":"go"},"sessionId":"some-other-session"}' > "$M4B_T"
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"some-random-sid\",\"transcript_path\":\"$M4B_T\"}" | \
+    env HOME="$M4B_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if [ "$actual_exit" -eq 0 ] && ! grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M4b no agentName + session_id mismatch → SKIP (no inject)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M4b expected no-inject, got exit=$actual_exit"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M4B_HOME"
+
+# ── M4c: Round transition — 2 teams, session_id matches round-2's leadSessionId → INJECT using round-2 inbox ──
+M4C_HOME="$TMPDIR/m4chome"
+M4C_T1_DIR="$M4C_HOME/.claude/teams/ammo-round-1-m4c"
+M4C_T2_DIR="$M4C_HOME/.claude/teams/ammo-round-2-m4c"
+mkdir -p "$M4C_T1_DIR" "$M4C_T2_DIR"
+cat > "$M4C_T1_DIR/config.json" << 'EOF'
+{"name":"ammo-round-1-m4c","leadSessionId":"lead-sid-round1","members":[{"name":"team-lead","agentType":"team-lead","agentId":"team-lead@ammo-round-1-m4c"}]}
+EOF
+cat > "$M4C_T2_DIR/config.json" << 'EOF'
+{"name":"ammo-round-2-m4c","leadSessionId":"lead-sid-round2","members":[{"name":"team-lead","agentType":"team-lead","agentId":"team-lead@ammo-round-2-m4c"}]}
+EOF
+mkdir -p "$M4C_T1_DIR/inboxes" "$M4C_T2_DIR/inboxes"
+# Round-1 inbox has an OLD message (already delivered, before cutoff)
+make_inbox "$M4C_T1_DIR/inboxes/team-lead.json" \
+    "monitor-champion-1|OLD stale round-1 msg|stale|2026-04-03T18:01:00.000Z|true"
+# Round-2 inbox has the FRESH undelivered message we expect
+make_inbox "$M4C_T2_DIR/inboxes/team-lead.json" \
+    "monitor-impl-champion-op001|ROUND2FRESH|round-2 alert|2026-04-03T18:25:00.000Z|true"
+M4C_T="$TMPDIR/m4c-transcript.jsonl"
+echo '{"type":"user","message":{"role":"user","content":"go"},"sessionId":"lead-sid-round2"}' > "$M4C_T"
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"lead-sid-round2\",\"transcript_path\":\"$M4C_T\"}" | \
+    env HOME="$M4C_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "ROUND2FRESH" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M4c 2 teams + session matches round-2 → INJECT from round-2 inbox"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M4c round-2 inbox not injected (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M4C_HOME"
+
+# ── M5: verifier-1 (existing skip behavior unchanged) ──
+M5_HOME="$TMPDIR/m5home"
+M5_TEAM_DIR="$M5_HOME/.claude/teams/test-team"
+make_team_config "$M5_TEAM_DIR" "test-team" "verifier-1:general-purpose"
+M5_T="$TMPDIR/m5-transcript.jsonl"
+make_transcript "$M5_T" "test-team" "verifier-1" 0
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M5_T\"}" | \
+    env HOME="$M5_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if [ "$actual_exit" -eq 0 ] && ! grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M5 verifier-1 → SKIP (unchanged)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M5 verifier-1 expected skip, got exit=$actual_exit"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M5_HOME"
+
+# ── M6: No agentName, no teams match anywhere → SKIP gracefully ──
+M6_HOME="$TMPDIR/m6home"
+mkdir -p "$M6_HOME/.claude/teams"  # empty teams root
+M6_T="$TMPDIR/m6-transcript.jsonl"
+echo '{"type":"user","message":{"role":"user","content":"go"}}' > "$M6_T"
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"no-teams-here\",\"transcript_path\":\"$M6_T\"}" | \
+    env HOME="$M6_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if [ "$actual_exit" -eq 0 ] && ! grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M6 no agentName + no teams → SKIP gracefully"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M6 expected silent skip, got exit=$actual_exit"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M6_HOME"
+
+# ── M7: Regression — existing champion/impl-champion tests all passed above (no action) ──
+TOTAL=$((TOTAL + 1))
+echo "  PASS [$TOTAL]: M7 regression — existing champion/impl-champion tests above all passed"
+PASS=$((PASS + 1))
+
+# ── M8: Named transcript-monitor subagent with agent_type populated → INJECT ──
+# Monitors are spawned as `claude.exe --agent-type ammo-transcript-monitor
+# --agent-name monitor-champion-1`, so their PreToolUse hook sees
+# .agent_type="ammo-transcript-monitor" at top level. Edit C relaxes the
+# early exit for eligible agent names.
+M8_HOME="$TMPDIR/m8home"
+M8_TEAM_DIR="$M8_HOME/.claude/teams/test-team"
+make_team_config "$M8_TEAM_DIR" "test-team" "monitor-champion-1:ammo-transcript-monitor"
+make_inbox "$M8_TEAM_DIR/inboxes/monitor-champion-1.json" \
+    "team-lead|live dispatch|dispatch|2026-04-03T18:25:00.000Z|true"
+M8_T="$TMPDIR/m8-transcript.jsonl"
+make_transcript "$M8_T" "test-team" "monitor-champion-1" 1
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+# agent_type set at top level (mirrors the real monitor subagent process)
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M8_T\",\"agent_type\":\"ammo-transcript-monitor\"}" | \
+    env HOME="$M8_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M8 monitor-champion-1 + agent_type set → INJECT (Edit C)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M8 Edit C relax — monitor w/ agent_type should inject (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    echo "        stderr: $(head -3 "$TMPDIR/hook-stderr" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+# M8b: eligible name + different agent_type value → still INJECT (gate is on
+# name eligibility, not the specific agent_type string)
+rm -f /tmp/ammo-msg-injected-*.ts 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M8_T\",\"agent_type\":\"ammo-delegate\"}" | \
+    env HOME="$M8_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M8b monitor-champion-1 + agent_type=ammo-delegate → INJECT (eligible name)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M8b eligible name with any agent_type should inject (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+
+# M8c: ineligible name (researcher-1) + agent_type set → SKIP (Edit A rejects)
+M8C_TEAM_DIR="$M8_HOME/.claude/teams/test-team2"
+make_team_config "$M8C_TEAM_DIR" "test-team2" "researcher-1:general-purpose"
+make_inbox "$M8C_TEAM_DIR/inboxes/researcher-1.json" \
+    "team-lead|research task|dispatch|2026-04-03T18:25:00.000Z|true"
+M8C_T="$TMPDIR/m8c-transcript.jsonl"
+make_transcript "$M8C_T" "test-team2" "researcher-1" 1
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M8C_T\",\"agent_type\":\"general-purpose\"}" | \
+    env HOME="$M8_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if [ "$actual_exit" -eq 0 ] && ! grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M8c researcher-1 + agent_type=general-purpose → SKIP (ineligible name)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M8c ineligible name should skip, got exit=$actual_exit"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+
+# M8d: champion-1 + agent_type set → INJECT (the regression fix)
+M8D_TEAM_DIR="$M8_HOME/.claude/teams/test-team3"
+make_team_config "$M8D_TEAM_DIR" "test-team3" "champion-1:ammo-champion"
+make_inbox "$M8D_TEAM_DIR/inboxes/champion-1.json" \
+    "team-lead|spawn|dispatch|2026-04-03T18:25:00.000Z|true"
+M8D_T="$TMPDIR/m8d-transcript.jsonl"
+make_transcript "$M8D_T" "test-team3" "champion-1" 1
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M8D_T\",\"agent_type\":\"ammo-champion\"}" | \
+    env HOME="$M8_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M8d champion-1 + agent_type=ammo-champion → INJECT (regression fix)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M8d champion with agent_type should inject (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+
+# M8e: impl-champion-op001 + agent_type set → INJECT
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+M8E_TEAM_DIR="$M8_HOME/.claude/teams/test-team4"
+make_team_config "$M8E_TEAM_DIR" "test-team4" "impl-champion-op001:ammo-impl-champion"
+make_inbox "$M8E_TEAM_DIR/inboxes/impl-champion-op001.json" \
+    "team-lead|fix kernel|dispatch|2026-04-03T18:25:00.000Z|true"
+M8E_T="$TMPDIR/m8e-transcript.jsonl"
+make_transcript "$M8E_T" "test-team4" "impl-champion-op001" 1
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M8E_T\",\"agent_type\":\"ammo-impl-champion\"}" | \
+    env HOME="$M8_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M8e impl-champion-op001 + agent_type → INJECT (regression fix)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M8e impl-champion with agent_type should inject (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+
+# M8f: team-lead + agent_type set → INJECT
+TOTAL=$((TOTAL + 1))
+actual_exit=0
+M8F_TEAM_DIR="$M8_HOME/.claude/teams/test-team5"
+make_team_config "$M8F_TEAM_DIR" "test-team5" "team-lead:team-lead"
+make_inbox "$M8F_TEAM_DIR/inboxes/team-lead.json" \
+    "monitor-champion-1|critical alert|alert|2026-04-03T18:25:00.000Z|true"
+M8F_T="$TMPDIR/m8f-transcript.jsonl"
+make_transcript "$M8F_T" "test-team5" "team-lead" 1
+echo "{\"tool_name\":\"Bash\",\"session_id\":\"s1\",\"transcript_path\":\"$M8F_T\",\"agent_type\":\"team-lead\"}" | \
+    env HOME="$M8_HOME" bash "$HOOK" > "$TMPDIR/hook-stdout" 2>"$TMPDIR/hook-stderr" || actual_exit=$?
+if grep -q "injected-teammate-message" "$TMPDIR/hook-stdout" 2>/dev/null && ! grep -q "permissionDecision" "$TMPDIR/hook-stdout" 2>/dev/null; then
+    echo "  PASS [$TOTAL]: M8f team-lead + agent_type → INJECT (regression fix)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [$TOTAL]: M8f team-lead with agent_type should inject (exit=$actual_exit)"
+    echo "        stdout: $(head -3 "$TMPDIR/hook-stdout" 2>/dev/null || echo '(none)')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$M8_HOME"
+
+echo ""
+echo "== settings.local.json wiring =="
+# The msg-check hook must be scoped to state-changing tools so it doesn't
+# add latency to every Read/Glob/Grep call. Verify the matcher in
+# settings.local.json pins the exact tool list the plan requires.
+SETTINGS="$(cd "$(dirname "$0")/../" && pwd)/settings.local.json"
+EXPECTED_MATCHER="Bash|Agent|Write|Edit|TaskCreate|TaskUpdate|TaskStop|TeamCreate|TeamDelete|SendMessage"
+
+TOTAL=$((TOTAL + 1))
+if [ ! -f "$SETTINGS" ]; then
+    echo "  FAIL [$TOTAL]: settings.local.json not found at $SETTINGS"
+    FAIL=$((FAIL + 1))
+else
+    ACTUAL_MATCHER=$(jq -r '
+        .hooks.PreToolUse
+        | map(select(.hooks[]?.command // "" | contains("ammo-msg-check.sh")))
+        | .[0].matcher // ""
+    ' "$SETTINGS" 2>/dev/null)
+    if [ "$ACTUAL_MATCHER" = "$EXPECTED_MATCHER" ]; then
+        echo "  PASS [$TOTAL]: settings.local.json msg-check matcher = $EXPECTED_MATCHER"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL [$TOTAL]: settings.local.json msg-check matcher mismatch"
+        echo "        expected: $EXPECTED_MATCHER"
+        echo "        got:      $ACTUAL_MATCHER"
+        FAIL=$((FAIL + 1))
+    fi
+fi
 
 echo ""
 echo "================================"

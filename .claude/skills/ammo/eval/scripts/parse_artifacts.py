@@ -7,13 +7,24 @@ structured JSON snapshot suitable for scoring and archival.
 All inputs are optional — missing files yield null fields, never errors.
 
 Inputs (searched in artifact_dir):
-  state.json, target.json, env.json, constraints.md,
-  investigation/bottleneck_analysis.md,
-  debate/summary.md, debate/proposals/*.md,
-  debate/campaign_round_*/summary.md,
-  tracks/op*/validation_results.md,
-  tracks/op*/e2e_latency/e2e_latency_results.json,
-  tracks/op*/validation_summary.json
+  state.json, target.json, env.json,
+
+  Legacy (flat) layout:
+    constraints.md,
+    investigation/bottleneck_analysis.md,
+    debate/summary.md, debate/proposals/*.md,
+    debate/campaign_round_*/summary.md,
+    tracks/op*/validation_results.md,
+    tracks/op*/e2e_latency/e2e_latency_results.json,
+    tracks/op*/validation_summary.json
+
+  Artifact Layout V2 (self-describing rounds/{N}/...):
+    rounds/*/constraints.md,
+    rounds/*/debate/summary.md, rounds/*/debate/proposals/*.md,
+    rounds/*/debate/round_*/*.md,
+    rounds/*/sweeps/opt/*/e2e_latency_results.json
+
+  Both layouts are searched and unioned; either alone is sufficient.
 
 Output:
   artifacts_snapshot.json (to --output or stdout)
@@ -64,6 +75,58 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 _LOSSY_OP_PATTERN = re.compile(
     r"fp8|int4|int8|w8a16|w4a16|quantiz|awq|gptq|squeezellm", re.IGNORECASE
 )
+
+
+# ---------------------------------------------------------------------------
+# v2 state accessors
+# ---------------------------------------------------------------------------
+
+def _rounds(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return state.get("campaign", {}).get("rounds", []) or []
+
+
+def _current_round(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the current round dict, or an empty dict if missing."""
+    rounds = _rounds(state)
+    cr = state.get("campaign", {}).get("current_round")
+    if isinstance(cr, int) and 1 <= cr <= len(rounds):
+        rnd = rounds[cr - 1]
+        if isinstance(rnd, dict):
+            return rnd
+    # Fall back to the last round if current_round is out of bounds
+    for rnd in reversed(rounds):
+        if isinstance(rnd, dict):
+            return rnd
+    return {}
+
+
+def _current_tracks(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the current round's parallel_tracks.tracks map."""
+    tracks = _current_round(state).get("parallel_tracks", {}).get("tracks", {})
+    return tracks if isinstance(tracks, dict) else {}
+
+
+def _current_integration(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the current round's integration block."""
+    integration = _current_round(state).get("integration", {})
+    return integration if isinstance(integration, dict) else {}
+
+
+def _all_tracks(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge every round's parallel_tracks.tracks into a single {op_id: track} map.
+
+    Later rounds overwrite earlier ones on duplicate op_ids (rare but possible).
+    """
+    merged: Dict[str, Any] = {}
+    for rnd in _rounds(state):
+        if not isinstance(rnd, dict):
+            continue
+        tracks = rnd.get("parallel_tracks", {}).get("tracks", {})
+        if isinstance(tracks, dict):
+            for op_id, track in tracks.items():
+                if isinstance(track, dict):
+                    merged[op_id] = track
+    return merged
 
 
 def _classify_op_lossy(
@@ -120,10 +183,10 @@ def _parse_accuracy_verification(
     Returns a block describing which shipped ops are lossy, which were
     accuracy-verified, and a verified-only cumulative speedup estimate.
     """
-    parallel_tracks = state.get("parallel_tracks", {})
+    parallel_tracks = _all_tracks(state)
     shipped_ops = state.get("campaign", {}).get("shipped_optimizations", [])
     rounds = campaign_data.get("rounds", [])
-    total_cumulative = campaign_data.get("cumulative_e2e_speedup", 1.0)
+    total_cumulative = campaign_data.get("cumulative_speedup_vs_round1", 1.0)
 
     ops_detail: List[Dict[str, Any]] = []
     lossless_count = 0
@@ -254,15 +317,54 @@ def _classify_gate_failure(fail_reason: Optional[str], verdict: Optional[str],
 def _extract_accuracy_numbers(fail_reason: Optional[str]) -> Optional[Dict[str, Any]]:
     """Extract accuracy percentages and question counts from fail_reason strings.
 
-    Handles formats like:
-      "Gate 5.1b v2 FAIL: opt_accuracy 89.0% (178/200) < baseline_accuracy 89.5% (179/200)"
-      "Gate 5.1b FAIL: 88.5% vs 89.0% (-1 question)"
-      "89.0% vs 89.5% (-1q)"
+    Handles three generations of the Gate 5.1b verdict string:
+      Pattern 0 (new, tolerance-bearing, post 2026-05-01):
+        "Gate 5.1b v2 FAIL: opt_accuracy 86.0% (1134/1319) < threshold 88.0%
+         (baseline 89.0% - 1.0pp tolerance)"
+      Pattern 1 (legacy strict):
+        "Gate 5.1b v2 FAIL: opt_accuracy 89.0% (178/1319) < baseline_accuracy 89.5% (179/1319)"
+      Pattern 2 (oldest free-form):
+        "Gate 5.1b FAIL: 88.5% vs 89.0% (-1 question)"
+
+    Pattern 0 is preferred when present; its `baseline_correct` is derived
+    (round(opt_total * baseline_pct/100)) and flagged via
+    `baseline_correct_approximate=True` because the new verdict string omits
+    the exact A/B fraction for the baseline. Pattern 1 carries the exact
+    baseline count and sets the flag to False.
     """
     if not fail_reason:
         return None
 
     result: Dict[str, Any] = {}
+
+    # Pattern 0: "opt_accuracy X% (A/B) [<>]=? threshold Y% (baseline Z% - Tpp tolerance)"
+    # Preferred — introduced alongside --correctness-tolerance-pct.
+    m0 = re.search(
+        r"opt_accuracy\s+(\d+\.?\d*)%\s*\((\d+)/(\d+)\)\s*[<>]=?\s*threshold\s+(\d+\.?\d*)%\s*\(baseline\s+(\d+\.?\d*)%\s*-\s*(\d+\.?\d*)pp\s*tolerance\)",
+        fail_reason,
+    )
+    if m0:
+        result["opt_accuracy_pct"] = float(m0.group(1))
+        result["opt_correct"] = int(m0.group(2))
+        result["opt_total"] = int(m0.group(3))
+        result["threshold_pct"] = float(m0.group(4))
+        result["baseline_accuracy_pct"] = float(m0.group(5))
+        result["tolerance_pct"] = float(m0.group(6))
+        # accuracy_gap is baseline - opt (same semantics as Pattern 1) —
+        # NOT threshold-derived, so near-miss math stays consistent across
+        # tolerance settings.
+        result["accuracy_gap_pct"] = round(
+            result["baseline_accuracy_pct"] - result["opt_accuracy_pct"], 2
+        )
+        # Pattern 0's verdict string omits the baseline A/B count; derive it.
+        # baseline_correct is approximated via rounding.
+        result["baseline_total"] = result["opt_total"]
+        result["baseline_correct"] = round(
+            result["opt_total"] * result["baseline_accuracy_pct"] / 100
+        )
+        result["baseline_correct_approximate"] = True
+        result["questions_delta"] = result["opt_correct"] - result["baseline_correct"]
+        return result
 
     # Pattern 1: "opt_accuracy X% (A/B) < baseline_accuracy Y% (C/D)"
     m = re.search(
@@ -278,6 +380,7 @@ def _extract_accuracy_numbers(fail_reason: Optional[str]) -> Optional[Dict[str, 
         result["baseline_total"] = int(m.group(6))
         result["accuracy_gap_pct"] = round(result["baseline_accuracy_pct"] - result["opt_accuracy_pct"], 2)
         result["questions_delta"] = result["opt_correct"] - result["baseline_correct"]
+        result["baseline_correct_approximate"] = False
         return result
 
     # Pattern 2: "X% vs Y% (-Nq)" or "X% vs Y% (-N question)"
@@ -357,22 +460,25 @@ def _parse_campaign(state: Dict[str, Any]) -> Dict[str, Any]:
     for r in rounds_data:
         if not isinstance(r, dict):
             continue
-        impl_results = r.get("implementation_results", {})
+        tracks = r.get("parallel_tracks", {}).get("tracks", {})
+        if not isinstance(tracks, dict):
+            tracks = {}
         shipped = r.get("shipped", [])
         failed_count = sum(
-            1 for v in impl_results.values()
-            if isinstance(v, dict) and v.get("status") == "FAILED"
+            1 for v in tracks.values()
+            if isinstance(v, dict) and v.get("status") in ("FAIL", "FAILED")
         )
-        total_candidates = len(impl_results)
+        integration = r.get("integration", {}) if isinstance(r.get("integration"), dict) else {}
+        selected_candidates = integration.get("selected_candidates") or []
 
         rounds.append({
             "round_id": r.get("round_id"),
-            "top_bottleneck_share_pct": r.get("top_bottleneck_share_pct"),
-            "candidates_proposed": len(r.get("selected_candidates", [])),
-            "candidates_selected": len(r.get("selected_candidates", [])),
+            "top_bottleneck_share_pct": r.get("bottleneck_mining", {}).get("top_bottleneck_share_pct"),
+            "candidates_proposed": len(tracks),
+            "candidates_selected": len(selected_candidates) if selected_candidates else len(tracks),
             "candidates_shipped": len(shipped),
             "candidates_failed": failed_count,
-            "round_e2e_speedup": _best_e2e_from_results(impl_results),
+            "round_e2e_speedup": _best_e2e_from_tracks(tracks),
             "cumulative_speedup_after": r.get("cumulative_speedup_after"),
         })
 
@@ -380,22 +486,28 @@ def _parse_campaign(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": campaign.get("status"),
         "total_rounds": campaign.get("current_round", len(rounds)),
-        "cumulative_e2e_speedup": campaign.get("cumulative_e2e_speedup", 1.0),
+        "cumulative_speedup_vs_round1": campaign.get("cumulative_speedup_vs_round1", 1.0),
         "shipped_optimizations_count": len(shipped_opts),
         "shipped_optimization_ids": shipped_opts,
         "rounds": rounds,
     }
 
 
-def _best_e2e_from_results(impl_results: Dict[str, Any]) -> Optional[float]:
-    """Extract the best e2e_speedup from implementation_results."""
+def _best_e2e_from_tracks(tracks: Dict[str, Any]) -> Optional[float]:
+    """Extract the best e2e_speedup from a round's parallel_tracks.tracks dict."""
     best = None
-    for v in impl_results.values():
-        if isinstance(v, dict) and v.get("status") in ("PASSED", "GATED_PASS"):
-            speedup = v.get("e2e_speedup")
-            if isinstance(speedup, (int, float)):
-                if best is None or speedup > best:
-                    best = speedup
+    for v in tracks.values():
+        if not isinstance(v, dict):
+            continue
+        status = v.get("status")
+        verdict = v.get("verdict")
+        passing = status in ("PASS", "GATED_PASS", "PASSED") or verdict in ("PASS", "GATED_PASS")
+        if not passing:
+            continue
+        speedup = v.get("e2e_speedup")
+        if isinstance(speedup, (int, float)):
+            if best is None or speedup > best:
+                best = speedup
     return best
 
 
@@ -404,9 +516,17 @@ def _best_e2e_from_results(impl_results: Dict[str, Any]) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 def _parse_e2e_results(artifact_dir: Path) -> Optional[Dict[str, Any]]:
-    """Find and parse e2e_latency_results.json from tracks or root."""
-    # Search order: tracks/op*/e2e_latency/, then root e2e_latency/
-    e2e_files = list(artifact_dir.glob("tracks/*/e2e_latency/e2e_latency_results.json"))
+    """Find and parse e2e_latency_results.json from tracks or root.
+
+    Search order (first non-empty wins):
+      1. v2 layout — rounds/*/sweeps/opt/*/e2e_latency_results.json
+      2. legacy   — tracks/*/e2e_latency/e2e_latency_results.json
+      3. legacy   — e2e_latency/e2e_latency_results.json (root)
+    """
+    # v2 self-describing layout: rounds/{N}/sweeps/opt/{op_id}/e2e_latency_results.json
+    e2e_files = list(artifact_dir.glob("rounds/*/sweeps/opt/*/e2e_latency_results.json"))
+    if not e2e_files:
+        e2e_files = list(artifact_dir.glob("tracks/*/e2e_latency/e2e_latency_results.json"))
     if not e2e_files:
         e2e_files = list(artifact_dir.glob("e2e_latency/e2e_latency_results.json"))
     if not e2e_files:
@@ -459,14 +579,18 @@ def _parse_e2e_results(artifact_dir: Path) -> Optional[Dict[str, Any]]:
 
 def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
     """Parse gate pass/fail information from state.json and validation files."""
-    # Phase 1 baseline gate — determined by constraints.md existence
-    has_constraints = (artifact_dir / "constraints.md").exists()
+    # Phase 1 baseline gate — determined by constraints.md existence.
+    # Both legacy (constraints.md at root) and v2 (rounds/*/constraints.md) count.
+    has_constraints = (
+        (artifact_dir / "constraints.md").exists()
+        or any(artifact_dir.glob("rounds/*/constraints.md"))
+    )
     phase1 = {
         "status": "PASS" if has_constraints else "UNKNOWN",
     }
 
-    # Per-track validation gates
-    tracks_state = state.get("parallel_tracks", {})
+    # Per-track validation gates (current round)
+    tracks_state = _current_tracks(state)
     track_gates = []
     gate_type_counts: Dict[str, int] = {}  # e.g., {"5.1b": 3, "5.2": 1}
     accuracy_margins: List[Dict[str, Any]] = []  # per-track accuracy data
@@ -511,11 +635,16 @@ def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
                 "baseline_accuracy_pct": accuracy_data.get("baseline_accuracy_pct"),
                 "accuracy_gap_pct": accuracy_data.get("accuracy_gap_pct"),
                 "questions_delta": accuracy_data.get("questions_delta"),
-                "near_miss": (accuracy_data.get("accuracy_gap_pct") or 999) <= 1.0,
+                # Near-miss threshold is constant at 1.5pp: slightly above the
+                # 1.0pp default tolerance so runs that *just* missed the gate
+                # (e.g. 1.1pp gap at tol=1.0) still show up for review, but
+                # genuinely divergent runs don't drown the signal. See spec
+                # docs/superpowers/specs/2026-05-01-gsm8k-full-benchmark-tolerance-gate-design.md §Change 3.
+                "near_miss": (accuracy_data.get("accuracy_gap_pct") or 999) <= 1.5,
             })
 
-    # Integration gate
-    integration = state.get("integration", {})
+    # Integration gate (current round)
+    integration = _current_integration(state)
 
     return {
         "phase1_baseline": phase1,
@@ -539,19 +668,58 @@ def _parse_gates(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
 
 def _parse_debate(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
     """Parse debate quality metrics from debate artifacts and state."""
-    debate_state = state.get("debate", {})
     campaign = state.get("campaign", {})
     total_rounds = campaign.get("current_round", 1)
+    rounds = _rounds(state)
 
-    # Count proposals
-    proposals_dir = artifact_dir / "debate" / "proposals"
-    proposal_files = list(proposals_dir.glob("*.md")) if proposals_dir.exists() else []
+    def _round_debate(round_idx: int) -> Dict[str, Any]:
+        """Return the debate block for 1-based round_idx, or an empty dict."""
+        if 1 <= round_idx <= len(rounds):
+            rnd = rounds[round_idx - 1]
+            if isinstance(rnd, dict):
+                debate = rnd.get("debate", {})
+                if isinstance(debate, dict):
+                    return debate
+        return {}
 
-    # Also check campaign round debate dirs
-    for i in range(2, total_rounds + 1):
-        round_proposals = artifact_dir / "debate" / f"campaign_round_{i}" / "proposals"
-        if round_proposals.exists():
-            proposal_files.extend(round_proposals.glob("*.md"))
+    def _proposal_dirs_for_round(round_idx: int) -> List[Path]:
+        """Return all directories that may hold proposals for this round.
+
+        Combines the legacy flat layout with the v2 self-describing layout
+        (rounds/{N}/debate/proposals).
+        """
+        dirs: List[Path] = []
+        # v2 self-describing layout
+        dirs.append(artifact_dir / "rounds" / str(round_idx) / "debate" / "proposals")
+        # legacy flat layouts
+        if round_idx == 1:
+            dirs.append(artifact_dir / "debate" / "proposals")
+        else:
+            dirs.append(artifact_dir / "debate" / f"campaign_round_{round_idx}" / "proposals")
+        return dirs
+
+    def _debate_base_dirs_for_round(round_idx: int) -> List[Path]:
+        """Return all directories that may hold debate round_* subdirs / summary.md."""
+        dirs: List[Path] = []
+        # v2 self-describing layout
+        dirs.append(artifact_dir / "rounds" / str(round_idx) / "debate")
+        # legacy flat layouts
+        if round_idx == 1:
+            dirs.append(artifact_dir / "debate")
+        else:
+            dirs.append(artifact_dir / "debate" / f"campaign_round_{round_idx}")
+        return dirs
+
+    # Count proposals (union v2 + legacy across all rounds).
+    proposal_files: List[Path] = []
+    per_round_proposal_files: Dict[int, List[Path]] = {}
+    for round_idx in range(1, total_rounds + 1):
+        rfiles: List[Path] = []
+        for pdir in _proposal_dirs_for_round(round_idx):
+            if pdir.exists():
+                rfiles.extend(pdir.glob("*.md"))
+        per_round_proposal_files[round_idx] = rfiles
+        proposal_files.extend(rfiles)
 
     total_proposals = len(proposal_files)
 
@@ -569,32 +737,38 @@ def _parse_debate(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
         if re.search(r"bottleneck_analysis|nsys|profil|µs|microsec|\d+\.?\d*\s*(µs|us|ms)", content, re.IGNORECASE):
             proposals_with_grounding += 1
 
-    # Parse candidate scores from summary.md
+    # Parse candidate scores: prefer state.json structured contract
+    # (debate.selected_candidates[].score_breakdown.weighted_total) for
+    # post-refactor artifacts, fall back to summary.md regex for legacy ones.
     all_scores = []
     per_campaign_round = []
 
     for round_idx in range(1, total_rounds + 1):
-        if round_idx == 1:
-            summary_path = artifact_dir / "debate" / "summary.md"
-        else:
-            summary_path = artifact_dir / "debate" / f"campaign_round_{round_idx}" / "summary.md"
-
-        scores = _extract_candidate_scores(summary_path)
+        scores = _scores_from_state(_round_debate(round_idx))
+        if not scores:
+            # Try every base dir (v2 + legacy) for this round; first hit wins.
+            for base in _debate_base_dirs_for_round(round_idx):
+                scores = _extract_candidate_scores(base / "summary.md")
+                if scores:
+                    break
         if scores:
             all_scores.extend(scores)
 
-        # Count debate rounds for this campaign round
-        debate_round_dirs = []
-        base = artifact_dir / "debate" if round_idx == 1 else artifact_dir / "debate" / f"campaign_round_{round_idx}"
-        if base.exists():
-            debate_round_dirs = [d for d in base.iterdir() if d.is_dir() and re.match(r"round_\d+", d.name)]
+        # Count debate round_* subdirs across v2 and legacy bases (deduped by name).
+        debate_round_names = set()
+        for base in _debate_base_dirs_for_round(round_idx):
+            if base.exists():
+                for d in base.iterdir():
+                    if d.is_dir() and re.match(r"round_\d+", d.name):
+                        debate_round_names.add(d.name)
 
+        round_debate = _round_debate(round_idx)
         per_campaign_round.append({
             "campaign_round": round_idx,
-            "champion_count": len(debate_state.get("candidates", [])) if round_idx == 1 else None,
-            "proposals_count": len([p for p in proposal_files if str(p).find(f"campaign_round_{round_idx}") > -1]) if round_idx > 1 else len(list((artifact_dir / "debate" / "proposals").glob("*.md"))) if (artifact_dir / "debate" / "proposals").exists() else 0,
-            "debate_rounds": len(debate_round_dirs),
-            "winners_selected": len(debate_state.get("selected_winners", [])) if round_idx == 1 else None,
+            "champion_count": len(round_debate.get("candidates", []) or []),
+            "proposals_count": len(per_round_proposal_files.get(round_idx, [])),
+            "debate_rounds": len(debate_round_names),
+            "winners_selected": len(round_debate.get("selected_winners", []) or []),
             "candidate_scores": scores if scores else None,
         })
 
@@ -609,6 +783,27 @@ def _parse_debate(artifact_dir: Path, state: Dict[str, Any]) -> Dict[str, Any]:
         "all_candidate_scores": all_scores if all_scores else None,
         "per_campaign_round": per_campaign_round,
     }
+
+
+def _scores_from_state(round_debate: Dict[str, Any]) -> List[float]:
+    """Read per-winner weighted_total from state.json's structured debate contract.
+
+    Returns the scores of the selected winners for this round (typically 2-4
+    per round). Empty list if the round predates the structured contract
+    (state.schema.json PR #1c) — caller falls back to summary.md regex.
+    """
+    if not isinstance(round_debate, dict):
+        return []
+    selected = round_debate.get("selected_candidates") or []
+    scores: List[float] = []
+    for cand in selected:
+        if not isinstance(cand, dict):
+            continue
+        breakdown = cand.get("score_breakdown") or {}
+        total = breakdown.get("weighted_total")
+        if isinstance(total, (int, float)):
+            scores.append(float(total))
+    return scores
 
 
 def _extract_candidate_scores(summary_path: Path) -> List[float]:
@@ -653,33 +848,29 @@ def _extract_candidate_scores(summary_path: Path) -> List[float]:
 # ---------------------------------------------------------------------------
 
 def _parse_tracks(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Parse per-track results from state.json."""
-    tracks_state = state.get("parallel_tracks", {})
-    campaign = state.get("campaign", {})
-
+    """Parse per-track results from every round's parallel_tracks.tracks."""
     tracks = []
-    for track_id, track_data in tracks_state.items():
-        if not isinstance(track_data, dict):
+    for rnd in _rounds(state):
+        if not isinstance(rnd, dict):
             continue
-
-        # Determine which campaign round this track belongs to
-        campaign_round = None
-        for r in campaign.get("rounds", []):
-            if isinstance(r, dict) and track_id in r.get("selected_candidates", []):
-                campaign_round = r.get("round_id")
-                break
-
-        tracks.append({
-            "op_id": track_id,
-            "campaign_round": campaign_round,
-            "status": track_data.get("status", "UNKNOWN"),
-            "verdict": track_data.get("verdict"),
-            "correctness": track_data.get("correctness"),
-            "classification": track_data.get("classification"),
-            "kernel_speedup": track_data.get("kernel_speedup"),
-            "e2e_speedup": track_data.get("e2e_speedup"),
-            "fail_reason": track_data.get("fail_reason"),
-        })
+        round_id = rnd.get("round_id")
+        tracks_state = rnd.get("parallel_tracks", {}).get("tracks", {})
+        if not isinstance(tracks_state, dict):
+            continue
+        for track_id, track_data in tracks_state.items():
+            if not isinstance(track_data, dict):
+                continue
+            tracks.append({
+                "op_id": track_id,
+                "campaign_round": round_id,
+                "status": track_data.get("status", "UNKNOWN"),
+                "verdict": track_data.get("verdict"),
+                "correctness": track_data.get("correctness"),
+                "classification": track_data.get("classification"),
+                "kernel_speedup": track_data.get("kernel_speedup"),
+                "e2e_speedup": track_data.get("e2e_speedup"),
+                "fail_reason": track_data.get("fail_reason"),
+            })
 
     return tracks
 
@@ -698,6 +889,17 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 
+# Map the flat output stage name to the round sub-object key in v2 state.json.
+_STAGE_KEY_MAP: List[tuple] = [
+    ("1_baseline", "baseline"),
+    ("2_bottleneck_mining", "bottleneck_mining"),
+    ("3_debate", "debate"),
+    ("4_5_parallel_tracks", "parallel_tracks"),
+    ("6_integration", "integration"),
+    ("7_campaign_eval", "campaign_eval"),
+]
+
+
 def _parse_stage_timestamps(
     state: Dict[str, Any],
     session_data: Optional[Dict[str, Any]] = None,
@@ -705,7 +907,8 @@ def _parse_stage_timestamps(
     """Extract stage timing data.
 
     If session_data is provided, use its stage_timestamps (ground-truth from session logs).
-    Otherwise fall back to state.json stage_timestamps.
+    Otherwise derive from per-round stage sub-objects (baseline, bottleneck_mining, ...)
+    carried on each v2 round.
     """
     if session_data is not None:
         sd_ts = session_data.get("stage_timestamps")
@@ -745,33 +948,72 @@ def _parse_stage_timestamps(
                 "source": "session_logs",
             }
 
-    ts_data = state.get("stage_timestamps")
-    if not ts_data or not isinstance(ts_data, dict):
+    # Fall back to per-round stage sub-objects in v2 state.json.
+    rounds = _rounds(state)
+    if not rounds:
         return None
+
+    def _stage_entry(rnd: Dict[str, Any], round_key: str) -> Dict[str, Any]:
+        sub = rnd.get(round_key, {}) if isinstance(rnd, dict) else {}
+        return sub if isinstance(sub, dict) else {}
+
+    # Flat "stages" list: use the current round (fall back to the first populated round).
+    current = _current_round(state) or (rounds[0] if isinstance(rounds[0], dict) else {})
 
     stages = []
     total_seconds = 0.0
-    for stage_name in ["1_baseline", "2_bottleneck_mining", "3_debate",
-                       "4_5_parallel_tracks", "6_integration", "7_campaign_eval"]:
-        entry = ts_data.get(stage_name, {})
-        if not isinstance(entry, dict):
-            continue
-        started = _parse_iso(entry.get("started_at"))
-        completed = _parse_iso(entry.get("completed_at"))
+    for stage_name, round_key in _STAGE_KEY_MAP:
+        entry = _stage_entry(current, round_key)
+        started_at = entry.get("started_at")
+        completed_at = entry.get("completed_at")
+        started = _parse_iso(started_at)
+        completed = _parse_iso(completed_at)
         duration_s = None
         if started and completed:
             duration_s = (completed - started).total_seconds()
             total_seconds += duration_s
         stages.append({
             "stage": stage_name,
-            "started_at": entry.get("started_at"),
-            "completed_at": entry.get("completed_at"),
+            "started_at": started_at,
+            "completed_at": completed_at,
             "duration_seconds": round(duration_s, 1) if duration_s is not None else None,
         })
+
+    # Per-round breakdown: {round_1: {stage: {started_at, completed_at, duration_seconds}}}
+    per_round: Dict[str, Dict[str, Any]] = {}
+    any_timestamps = False
+    for rnd in rounds:
+        if not isinstance(rnd, dict):
+            continue
+        rid = rnd.get("round_id")
+        round_key = f"round_{rid}" if rid is not None else f"round_{len(per_round) + 1}"
+        round_stages: Dict[str, Any] = {}
+        for stage_name, sub_key in _STAGE_KEY_MAP:
+            entry = _stage_entry(rnd, sub_key)
+            started_at = entry.get("started_at")
+            completed_at = entry.get("completed_at")
+            if started_at or completed_at:
+                any_timestamps = True
+            started = _parse_iso(started_at)
+            completed = _parse_iso(completed_at)
+            duration_s = None
+            if started and completed:
+                duration_s = (completed - started).total_seconds()
+            round_stages[stage_name] = {
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_seconds": round(duration_s, 1) if duration_s is not None else None,
+            }
+        per_round[round_key] = round_stages
+
+    if not any_timestamps:
+        return None
 
     return {
         "stages": stages,
         "total_tracked_seconds": round(total_seconds, 1) if total_seconds > 0 else None,
+        "per_round": per_round,
+        "source": "state_json",
     }
 
 
@@ -780,11 +1022,33 @@ def _parse_stage_timestamps(
 # ---------------------------------------------------------------------------
 
 def _parse_delegation(artifact_dir: Path, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Parse delegation metrics from debate artifacts and state.json."""
-    debate_state = state.get("debate", {})
-    delegation = debate_state.get("delegation", {})
+    """Parse delegation metrics from debate artifacts and state.json.
 
-    if not delegation.get("enabled"):
+    Aggregates `debate.delegation` across every round — delegation is enabled
+    if any round's debate carries an `enabled: true` flag.
+    """
+    delegation: Dict[str, Any] = {}
+    enabled = False
+    for rnd in _rounds(state):
+        if not isinstance(rnd, dict):
+            continue
+        debate_state = rnd.get("debate", {}) if isinstance(rnd.get("debate"), dict) else {}
+        d = debate_state.get("delegation", {}) if isinstance(debate_state.get("delegation"), dict) else {}
+        if d.get("enabled"):
+            enabled = True
+        # Later rounds overwrite earlier ones on duplicate keys (last-wins for config;
+        # mappings and results are round-scoped so merge instead).
+        for key, val in d.items():
+            if key in ("champion_delegate_mapping", "delegate_results") and isinstance(val, dict):
+                merged = delegation.get(key, {})
+                if not isinstance(merged, dict):
+                    merged = {}
+                merged.update(val)
+                delegation[key] = merged
+            else:
+                delegation[key] = val
+
+    if not enabled:
         return {"enabled": False}
 
     mapping = delegation.get("champion_delegate_mapping", {})
@@ -858,7 +1122,7 @@ def _parse_agent_costs(
                 result["agent_list"] = agent_list
             return result
 
-    costs = state.get("agent_costs")
+    costs = state.get("campaign", {}).get("agent_costs")
     if not costs or not isinstance(costs, list):
         return None
 

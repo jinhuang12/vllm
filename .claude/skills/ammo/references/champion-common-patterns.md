@@ -1,6 +1,29 @@
 # Champion Common Patterns
 
-Shared interaction patterns for AMMO champion agents (debate and implementation). Role-specific additions (what to delegate, common monitor flags, Self-Validation Gate) stay inline in each agent definition.
+Shared interaction patterns for AMMO champion agents (debate and implementation). Role-specific additions (what to delegate, common monitor flags, kernel correctness & speedup checks) stay in each agent definition.
+
+## Worktree Venv — applies to every agent operating inside an op worktree
+
+If your cwd is under `.claude/worktrees/<op_id>/` (impl-champion or any delegate
+it spawns), the worktree-local `.venv` MUST be
+active before any `python`, `pytest`, `pip`, `ncu`, or `nsys` invocation.
+
+The session's outer `.venv` has an editable-install `.pth` that resolves
+`import vllm` to the session worktree's source tree — not your isolated op
+worktree. Running under the wrong venv silently loads the wrong code: profiling
+results, correctness checks, and benchmarks all become meaningless without any
+error message.
+
+```bash
+source .venv/bin/activate
+python -c "import vllm; print(vllm.__file__)"
+# The path must contain '/.claude/worktrees/<op_id>/'
+```
+
+Re-activate on every session resume — the shell's inherited `$VIRTUAL_ENV`
+points at the outer venv again. A PreToolUse hook one-shot-blocks the first
+offending command per session and prints the remediation; don't rely on it as
+your only check.
 
 ## Subagent Delegation
 
@@ -83,9 +106,9 @@ After starting the background command, **stop making tool calls** so your turn e
 
 One status check message per 10 minutes of silence. After sending, end your turn to receive the response. While waiting, do useful non-blocking work (review code, draft reports, pre-compute Amdahl's numbers, scaffold test files).
 
-## Transcript Monitor
+## Transcript Monitor (Impl-Stage Only)
 
-A transcript monitor agent reads your session log periodically and flags methodology errors via SendMessage. Messages arrive as `DA-MONITOR: [{SEVERITY}] ...` with evidence and recommended action.
+Impl-champions have a transcript monitor agent that reads your session log periodically and flags methodology errors via SendMessage. Messages arrive as `DA-MONITOR: [{SEVERITY}] ...` with evidence and recommended action. Debate champions do NOT have monitors — the adversarial debate structure provides quality control.
 
 ### Severity Responses
 
@@ -107,7 +130,7 @@ This ensures you receive monitor interjections promptly instead of discovering t
 
 ## Handling Incoming Messages (Tiered Assessment)
 
-Messages from teammates (validator, monitor, orchestrator) are NOT automatically correct. Context pressure degrades reasoning quality — both yours and theirs. Before acting on any finding, triage it.
+Messages from teammates (monitor, orchestrator) are NOT automatically correct. Context pressure degrades reasoning quality — both yours and theirs. Before acting on any finding, triage it.
 
 ### Step 1: Read Without Acting
 
@@ -146,7 +169,7 @@ Agent(
     MESSAGE: {full_message}
 
     CONTEXT:
-    - Plan: {artifact_dir}/debate/summary.md
+    - Plan: state.json.campaign.rounds[-1].debate.selected_candidates (filter by op_id=={op_id}) — authoritative. debate/summary.md is a rendered view; do not treat as the source of truth.
     - Current work state: {brief description of where you are}
     - Previous attempts to address this issue: {count} — {brief description}
 

@@ -61,9 +61,24 @@ For CPU-only commands (file reads, roofline math, ISA inspection), no reservatio
 | Micro-experiments (debate) | 1 | Keep brief to minimize contention |
 | Static analysis (`ncu --query-metrics`) | 1 | No kernel execution |
 | nsys single-kernel traces | 1 | Existing binary only |
-| E2E sweeps | `{tp}` | Match tensor parallelism from target.json |
+| E2E sweeps | `{tp*dp}` | Match total parallel world size (TP × DP) from target.json |
+| Parallel tracks / debate experiments | 1-N | Pool may exceed TP×DP; use remaining GPUs for concurrent tracks |
 
-For TP > 1, the pool allocates contiguous GPU blocks. If no contiguous block is available, the command fails — retry after other agents release.
+Each DP replica runs its own TP group, so an `N = TP × DP` session needs that many GPUs reserved as one contiguous block. Reserving only TP would starve the other DP replicas — torchrun spawns TP×DP ranks and the sweep deadlocks waiting for the missing workers.
+
+The session environment exposes `AMMO_TP_SIZE` and `AMMO_DP_SIZE` so you can compute `N` without reopening `target.json`:
+
+```bash
+NUM_GPUS=$(( ${AMMO_TP_SIZE:-1} * ${AMMO_DP_SIZE:-1} ))
+```
+
+**Post-decouple note:** The session's GPU pool size equals the `gpu_count` requested at session creation, which may exceed `TP × DP`. The extra GPUs enable parallel experiment tracks — multiple agents can reserve `--num-gpus 1` concurrently for kernel benchmarks while one agent holds `TP × DP` for an E2E sweep. Discover pool size via `gpu_reservation.py status` or:
+
+```bash
+POOL_SIZE=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
+```
+
+For E2E sweeps, `gpu_reservation.py` allocates a contiguous block of exactly `TP × DP` GPUs (the vLLM world size). Remaining pool GPUs stay available for parallel kernel work by other agents. If no contiguous block of `TP × DP` GPUs is free, the command fails — retry after other agents release.
 
 For sweep or nsys runs that legitimately exceed 15 min, add `--lease-hours 2` (or higher) to the reserve call so the lease doesn't expire mid-run.
 

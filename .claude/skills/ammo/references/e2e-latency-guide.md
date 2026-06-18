@@ -11,12 +11,12 @@ This file focuses on **how to run and interpret** E2E benchmarks. Default gates 
 
 | Stage | Tool | Why |
 |-------|------|-----|
-| Stage 1 (profiling) | `run_vllm_bench_latency_sweep.py --torch-profile` (Tier 1) or `--nsys-profile` (Tier 0) | E2E baseline + per-bucket profiling traces. Use `--torch-profile` when nsys probe fails; `--nsys-profile` when probe passes. See `nsys-profiling-guide.md` §3.10. |
-| Stages 5-6 (validation) | `run_vllm_bench_latency_sweep.py` | GPU-locked A/B comparison with fastpath evidence |
-| Development | `vllm bench latency` directly | Quick single-BS checks only (GPU must be idle, not for validation_results.md) |
+| Stage 1 (baseline) | `run_vllm_bench_latency_sweep.py --slot baseline` | Clean E2E timing — **no profiling flags allowed** (guard enforced). Authoritative numbers for speedup calculations. |
+| Stage 1 (profiling) | `run_vllm_bench_latency_sweep.py --slot profiling --nsys-profile --nsys-mode node --nsys-capture-output-steps 2,50%,100% --nsys-num-iters 1 --nsys-timeout-s 1800` | Bounded selected-step nsys attribution capture. Add `--nsys-trace cuda-sw` on Blackwell (B200/B300). E2E numbers here are profiler-contaminated and not used for comparisons. See `nsys-profiling-guide.md`. |
+| Stage 5 (validation) | `run_vllm_bench_latency_sweep.py` | GPU-locked A/B comparison with fastpath evidence |
+| Stage 6 (integration) | `run_vllm_bench_latency_sweep.py --fresh-cache` | Gate-quality measurement with clean compile cache. Only runs when ≥2 tracks pass; single passer uses short-circuit (copies Stage 5 results). EXHAUSTED rounds skip entirely. Replaces the former T16 re-profile. |
 
 For all measurements reported in `validation_results.md` or used for profiling, use the sweep script.
-The examples below show raw `vllm bench latency` for reference only — do not use them directly.
 
 ## Contents
 - Quickstart (baseline vs optimized)
@@ -27,86 +27,48 @@ The examples below show raw `vllm bench latency` for reference only — do not u
 - Troubleshooting
 - Recording results
 
-## Search anchors
-vllm bench latency, CUDA graphs, torch.compile, enforce-eager, input-len, output-len, batch-size sweep, activation.
-
-## Using Stage 1 Baselines (Validators)
-
-**Validators MUST use Stage 1 baseline numbers for E2E comparisons.** Do NOT run a baseline from the worktree.
-
-**Rationale**: Worktrees contain optimized code. Running `vllm bench latency` without the optimization flag from a worktree may still execute the optimized code path (e.g., if `pip install -e .` overwrote the global editable install, or if the optimization has no explicit enable flag). This contaminates the baseline, making both runs use the optimized path and hiding real improvements behind noise.
-
-**Optimized-only run (validator workflow)**:
-
-```bash
-cd .claude/worktrees/ammo-track-{op_id}
-source .venv/bin/activate
-<ENABLE_FLAG>=1 vllm bench latency \
-  --model <MODEL_ID> \
-  --tensor-parallel-size <TP> \
-  --max-model-len <MAX_LEN> \
-  --input-len 64 \
-  --output-len 512 \
-  --batch-size 8 \
-  --num-iters 5 \
-  --output-json {artifact_dir}/tracks/{op_id}/opt_bs8.json
-```
-
-Then compare against the Stage 1 baseline:
-
-```python
-import json
-baseline = json.load(open("{artifact_dir}/runs/baseline_bs8.json"))
-optimized = json.load(open("{artifact_dir}/tracks/{op_id}/opt_bs8.json"))
-speedup = baseline["avg_latency"] / optimized["avg_latency"]
-```
-
-Record in `validation_results.md`: "Baseline source: Stage 1 (not re-run)"
-
 ## Quickstart
 
 Run the sweep script from the artifact directory (which contains `target.json`):
 
 ```bash
-# Stage 1: E2E baseline + nsys profiling in one pass
-python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
-  --artifact-dir {artifact_dir} \
-  --nsys-profile
+# Stage 1a: Clean E2E baseline (no profiling — authoritative timing)
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --round 1 --slot baseline --labels baseline \
+  --capture-golden-refs
 
-# Stages 5-6: Validation sweep (no nsys)
-python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+# Stage 1b: Profiling traces (separate invocation — overhead doesn't pollute baseline)
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --round 1 --slot profiling --labels baseline \
+  --nsys-profile --nsys-mode node \
+  --nsys-capture-output-steps 2,50%,100% \
+  --nsys-num-iters 1 --nsys-timeout-s 1800
+
+# Stage 5: Per-track validation sweep (no nsys, no fresh-cache)
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
   --artifact-dir {artifact_dir}
+
+# Stage 6: Integration sweep (--fresh-cache for gate-quality measurement)
+# This replaces the former T16 re-profile step.
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --fresh-cache
+
+# Post-SHIP: Golden-refs capture (~15s, after env promotion)
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --labels baseline --capture-golden-refs --num-iters 1
 ```
 
 The sweep script reads model, workload, and env config from `target.json` — no need to specify `--model`, `--dtype`, `--batch-size`, etc. on the command line.
 
-<details><summary>Raw vllm bench latency commands (development reference only)</summary>
+### Fresh-cache isolation (`--fresh-cache`, v3.1)
 
-```bash
-# Baseline
-vllm bench latency \
-  --model <MODEL_ID> \
-  --tensor-parallel-size <TP> \
-  --max-model-len <MAX_LEN> \
-  --input-len 64 \
-  --output-len 512 \
-  --batch-size 8 \
-  --num-iters 5 \
-  --output-json /tmp/baseline_bs8.json
-
-# Optimized (replace <ENABLE_FLAG> with your optimization's flag)
-<ENABLE_FLAG>=1 vllm bench latency \
-  --model <MODEL_ID> \
-  --tensor-parallel-size <TP> \
-  --max-model-len <MAX_LEN> \
-  --input-len 64 \
-  --output-len 512 \
-  --batch-size 8 \
-  --num-iters 5 \
-  --output-json /tmp/opt_bs8.json
-```
-
-</details>
+Allocates `{out_root}/cache/{sweep_id}/` and injects `VLLM_CACHE_ROOT`
+and `TRITON_CACHE_DIR` into the child env so the sweep does not inherit
+warm compile caches from a previous sweep. Cache is removed on success.
+First launch of N pays full compile (~5 min for large models); launches
+2..N hit the warm in-sweep cache.
 
 ## Workload selection
 
@@ -126,51 +88,33 @@ If you claim a prefill win, run a second benchmark with a large input length (an
 
 Use the **same bucket set** you profiled in Stage 1 and plan to enable in Stage 6.
 
-Use the sweep script for automated multi-bucket benchmarking (loads model once per label):
+Use the sweep script for automated multi-bucket benchmarking (loads model once per label). Pass `--round {N} --slot {SLOT}` to write into the canonical round-scoped layout:
 
 ```bash
-python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir}
+.venv/bin/python scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --round {CR} --slot baseline
 ```
+
+`{SLOT}` is one of: `baseline` (Stage 1), `opt/{op_id}` (Stage 5 per-track), `integration` (Stage 6 combined sweep), `golden_capture` (post-SHIP golden-ref refresh).
 
 The script reads `target.json` for workload config. Supports both the flat format
 (`input_len`, `output_len`, `batch_sizes`) and `workload_matrix` for multi-dimensional
 `(input_len x output_len x batch_size)` sweeps.
 
-To also capture per-bucket nsys profiles during the sweep (avoiding model reload):
+To also capture per-bucket nsys profiles, run a **separate short profiling invocation** after the clean baseline:
 
 ```bash
-python scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir} --nsys-profile
+# Must use --slot profiling (--slot baseline + profiling flags = hard error)
+.venv/bin/python scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} --round {CR} --slot profiling --labels baseline \
+  --nsys-profile --nsys-mode node \
+  --nsys-capture-output-steps 2,50%,100% \
+  --nsys-num-iters 1 --nsys-timeout-s 1800
 ```
 
-This produces one `.nsys-rep` per bucket in `{artifact_dir}/e2e_latency/nsys/`.
-
-<details><summary>Manual equivalent (development only, NOT for validation)</summary>
-
-```bash
-for BS in 8 32; do
-  echo "=== batch_size=$BS ==="
-
-  vllm bench latency \
-    --model <MODEL_ID> \
-    --tensor-parallel-size <TP> \
-    --max-model-len <MAX_LEN> \
-    --input-len 64 --output-len 512 \
-    --batch-size $BS \
-    --num-iters 5 \
-    --output-json /tmp/baseline_bs${BS}.json
-
-  <ENABLE_FLAG>=1 vllm bench latency \
-    --model <MODEL_ID> \
-    --tensor-parallel-size <TP> \
-    --max-model-len <MAX_LEN> \
-    --input-len 64 --output-len 512 \
-    --batch-size $BS \
-    --num-iters 5 \
-    --output-json /tmp/opt_bs${BS}.json
-done
-```
-
-</details>
+This produces one `.nsys-rep` per bucket in `{artifact_dir}/rounds/{CR}/profiling/nsys/` (sibling to the sweep's results, NOT inside the sweep slot). The E2E numbers from this invocation are contaminated by nsys overhead and are NOT authoritative.
+Append `--nsys-trace cuda-sw` on Blackwell (B200/B300); leave it omitted for Hopper/Ampere.
+Use `--nsys-capture-output-steps 2,50%,100% --nsys-num-iters 1` by default for profiling. The sweep shifts `input_len` and captures short selected-step windows with vLLM's CUDA profiler. Fall back to `--nsys-output-len 2 --nsys-num-iters 1` only if selected-step capture fails, and document the missing depth coverage.
 
 ## Parity checklist (must match baseline)
 
@@ -231,7 +175,7 @@ Common causes:
 
 ## Recording results
 
-Write results to `{artifact_dir}/validation_results.md` with:
+Write results to `{artifact_dir}/rounds/{CR}/tracks/{op_id}/validation_results.md` (per-track, Stage 5) or `{artifact_dir}/rounds/{CR}/integration_validation.md` (Stage 6 integration) with:
 - full repro commands (baseline + optimized) and env vars
 - the bucket set and capture/compile settings
 - baseline vs optimized tables (speedup + improvement)

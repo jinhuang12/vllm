@@ -20,7 +20,7 @@ Minimal expected schema:
     "input_len": 64,
     "output_len": 512,
     "batch_sizes": [1,4,8],
-    "num_iters": 5
+    "num_iters": 10
   },
   "bench": {
     "runner": "vllm_bench_latency",
@@ -83,6 +83,7 @@ import os
 import re
 import shlex
 import selectors
+import signal
 import socket
 import subprocess
 import sys
@@ -97,6 +98,43 @@ import ast
 
 
 PLACEHOLDER = "<FILL_ME>"
+
+
+# ---------------------------------------------------------------------------
+# Rank-0 gating for SPMD torchrun ranks (§4.3 of the DP/EP parallelism spec)
+#
+# Under torchrun, each DP rank re-enters this script with a distinct RANK env.
+# All artifact I/O (JSON, logs, status) must go through the _rank0_* helpers
+# below so only rank 0 writes. When RANK is unset (existing DP=1 path),
+# _GLOBAL_RANK defaults to 0 → _IS_RANK0 is True → helpers delegate to the
+# original _write_* / open() functions, preserving byte-equivalent behavior.
+# ---------------------------------------------------------------------------
+
+_GLOBAL_RANK: int = int(os.environ.get("RANK", "0"))
+_IS_RANK0: bool = (_GLOBAL_RANK == 0)
+
+
+class _NullFile:
+    """File-shaped sink for non-rank-0 log opens.
+
+    Swallows writes so shared bucket-loop code paths don't need per-site
+    ``if _IS_RANK0`` guards around every ``log.write()`` call.
+    """
+
+    def write(self, *_a, **_kw) -> int:
+        return 0
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "_NullFile":
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
 
 
 @dataclass
@@ -141,20 +179,696 @@ def _ensure_worktree_pythonpath(env: Dict[str, str]) -> Dict[str, str]:
     return env
 
 
-def _sanitize_vllm_op_env(env: Dict[str, str]) -> Dict[str, str]:
-    """Strip all VLLM_OP* env vars from *env* to prevent cross-track contamination.
+def _inject_fresh_cache_env(env: Dict[str, str], sweep_cache_root: Path) -> Dict[str, str]:
+    """Inject per-sweep ``VLLM_CACHE_ROOT`` + ``TRITON_CACHE_DIR`` into *env*.
 
-    Prior-round gating flags (e.g. VLLM_OP001=1) may be present in the inherited
-    process environment because ``vllm/envs.py`` was edited on the worktree branch.
-    If left in place they silently activate stale optimizations during baseline and
-    opt sweeps, producing false negatives (as observed in the op003/op004 audit).
+    When ``--fresh-cache`` is set, each sweep uses an isolated compile-cache
+    directory so measurements are not skewed by partially-warm caches from a
+    previous sweep. ``VLLM_CACHE_ROOT`` is the sweep-scoped cache root; the
+    Triton compile cache lives inside it so both are torn down together.
 
-    Non-optimization VLLM vars (VLLM_ATTENTION_BACKEND, VLLM_USE_V1, etc.) are
-    preserved — only keys matching ``VLLM_OP\\d+`` are removed.
+    Do NOT set ``VLLM_DISABLE_COMPILE_CACHE=1`` — save must still work within
+    the run so each batch size amortizes compile across launches 2..N.
+
+    Does not mutate ``env`` in place.
+    """
+    env = dict(env)
+    env["VLLM_CACHE_ROOT"] = str(sweep_cache_root)
+    env["TRITON_CACHE_DIR"] = str(sweep_cache_root / "triton_cache")
+    return env
+
+
+def _inject_nsys_execute_timeout_env(
+    env: Dict[str, str], nsys_timeout_s: int
+) -> Dict[str, str]:
+    """Keep vLLM worker RPC timeout at least as high as the nsys bucket timeout.
+
+    nsys node-mode replay can make a single worker RPC, especially
+    ``sample_tokens``, run longer than vLLM's default 300s internal timeout.
+    The outer sweep timeout cannot help if the engine kills itself first, so
+    profiling runs must raise ``VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`` too.
+    """
+    env = dict(env)
+    current_raw = env.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS")
+    try:
+        current = int(current_raw) if current_raw is not None else 0
+    except ValueError:
+        current = 0
+    env["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = str(max(current, int(nsys_timeout_s)))
+    return env
+
+
+def _harvest_request_metrics(outputs: Any) -> Dict[str, float]:
+    """Extract per-request prefill/decode timing from vLLM ``RequestOutput``s.
+
+    Per spec §3.1, vLLM v1's ``RequestOutput.metrics`` carries monotonic
+    timestamps:
+      - ``prefill_s = first_token_ts - scheduled_ts``
+      - ``decode_s  = last_token_ts - first_token_ts``
+
+    Returns a dict with mean and p50 of each, or an empty dict when no
+    output carries a ``.metrics`` payload (older vLLM, beam-search Tier-C
+    fallback, all-None metrics, etc.). Defensive — never raises on missing
+    attributes.
+    """
+    if not outputs:
+        return {}
+
+    prefills: List[float] = []
+    decodes: List[float] = []
+    for out in outputs:
+        m = getattr(out, "metrics", None)
+        if m is None:
+            continue
+        sched = getattr(m, "scheduled_ts", None)
+        first = getattr(m, "first_token_ts", None)
+        last = getattr(m, "last_token_ts", None)
+        if not isinstance(sched, (int, float)):
+            continue
+        if not isinstance(first, (int, float)):
+            continue
+        if not isinstance(last, (int, float)):
+            continue
+        prefills.append(float(first) - float(sched))
+        decodes.append(float(last) - float(first))
+
+    if not prefills:
+        return {}
+
+    def _p50(vals: List[float]) -> float:
+        s = sorted(vals)
+        n = len(s)
+        if n == 1:
+            return s[0]
+        # Linear interpolation matches numpy default.
+        k = (n - 1) * 0.5
+        f = int(k)
+        c = min(f + 1, n - 1)
+        if f == c:
+            return s[f]
+        return s[f] + (s[c] - s[f]) * (k - f)
+
+    prefill_avg = sum(prefills) / len(prefills)
+    decode_avg = sum(decodes) / len(decodes)
+    total = prefill_avg + decode_avg
+    out: Dict[str, float] = {
+        "prefill_avg_s": prefill_avg,
+        "decode_avg_s": decode_avg,
+        "prefill_p50_s": _p50(prefills),
+        "decode_p50_s": _p50(decodes),
+    }
+    if total > 0:
+        out["decode_share_of_e2e"] = decode_avg / total
+    return out
+
+
+def _compute_token_throughput(
+    entry: Dict[str, Any], output_len: int, batch_size: int
+) -> Dict[str, float]:
+    """Derive output-token throughput (OTPS) and time-per-output-token (TPOT).
+
+    Prefers the REAL per-request decode timing harvested by
+    ``_harvest_request_metrics`` (``decode_avg_s = last_token_ts -
+    first_token_ts``). The prefill produces the first token and the decode
+    phase produces the remaining ``output_len - 1`` tokens, so
+
+      ``tpot_s = decode_avg_s / (output_len - 1)``   (decode-only, exact)
+      ``otps   = batch_size * (output_len - 1) / decode_avg_s`` = batch_size / tpot_s
+
+    No prefill-subtraction is needed — the decode time is measured directly.
+
+    Falls back to GROSS end-to-end throughput from ``avg_s`` (prefill + decode)
+    when decode timing is unavailable (older vLLM without ``RequestOutput.metrics``,
+    beam-search Tier-C fallback). In that case ``tpot_s`` is omitted (prefill and
+    decode cannot be separated from a single E2E number) and ``otps`` is the gross
+    ``batch_size * output_len / avg_s``. ``throughput_method`` records which path
+    was taken. Defensive — returns ``{}`` rather than raising on bad inputs.
+
+    Only numeric keys are returned, so a legacy/failed row produces no keys.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    out: Dict[str, float] = {}
+    decode_avg_s = entry.get("decode_avg_s")
+    if (
+        isinstance(decode_avg_s, (int, float))
+        and decode_avg_s > 0
+        and isinstance(output_len, int)
+        and output_len > 1
+    ):
+        decode_tokens = output_len - 1
+        out["tpot_s"] = decode_avg_s / decode_tokens
+        out["otps"] = batch_size * decode_tokens / decode_avg_s
+        out["throughput_method"] = "decode_metrics"
+        return out
+    # Fallback: gross E2E throughput (cannot isolate decode → no TPOT).
+    avg_s = entry.get("avg_s")
+    if (
+        isinstance(avg_s, (int, float))
+        and avg_s > 0
+        and isinstance(output_len, int)
+        and output_len > 0
+    ):
+        out["otps"] = batch_size * output_len / avg_s
+        out["throughput_method"] = "gross_e2e"
+    return out
+
+
+def _aggregate_launches(launches: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Aggregate per-launch avg_latency across measured (non-warmup) launches.
+
+    Returns ``None`` when there is no measured launch (empty, all-warmup, or
+    all-missing). Otherwise returns a dict with mean/stddev/p50/p90/p99 and
+    ``num_measured_launches`` (count of contributing launches).
+
+    ``stddev_cross_launch`` uses population-stddev (pstdev) so a single
+    measured launch deterministically yields 0.0 rather than raising.
+
+    When launches carry ``prefill_avg_s`` / ``decode_avg_s`` (spec §3.1),
+    the aggregate also surfaces their cross-launch mean and recomputes
+    ``decode_share_of_e2e`` from the aggregated values.
+    """
+    import math
+
+    measured_values: List[float] = []
+    prefill_values: List[float] = []
+    decode_values: List[float] = []
+    for entry in launches or []:
+        if entry.get("warmup"):
+            continue
+        val = entry.get("avg_latency")
+        if isinstance(val, (int, float)):
+            measured_values.append(float(val))
+        pf = entry.get("prefill_avg_s")
+        if isinstance(pf, (int, float)):
+            prefill_values.append(float(pf))
+        dc = entry.get("decode_avg_s")
+        if isinstance(dc, (int, float)):
+            decode_values.append(float(dc))
+
+    n = len(measured_values)
+    if n == 0:
+        return None
+
+    mean_latency = sum(measured_values) / n
+    if n == 1:
+        stddev = 0.0
+    else:
+        # Population stddev — bias-consistent with the fixed number of launches.
+        variance = sum((x - mean_latency) ** 2 for x in measured_values) / n
+        stddev = math.sqrt(variance)
+
+    def _pctile(sorted_vals: List[float], q: float) -> float:
+        if not sorted_vals:
+            return float("nan")
+        if len(sorted_vals) == 1:
+            return sorted_vals[0]
+        # Linear interpolation between closest ranks (matches numpy default).
+        k = (len(sorted_vals) - 1) * q
+        f = int(k)
+        c = min(f + 1, len(sorted_vals) - 1)
+        if f == c:
+            return sorted_vals[f]
+        return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
+
+    sorted_vals = sorted(measured_values)
+    out: Dict[str, Any] = {
+        "mean_latency": mean_latency,
+        "stddev_cross_launch": stddev,
+        "p50": _pctile(sorted_vals, 0.50),
+        "p90": _pctile(sorted_vals, 0.90),
+        "p99": _pctile(sorted_vals, 0.99),
+        "num_measured_launches": n,
+    }
+    if prefill_values:
+        out["prefill_avg_s"] = sum(prefill_values) / len(prefill_values)
+    if decode_values:
+        out["decode_avg_s"] = sum(decode_values) / len(decode_values)
+    p_avg = out.get("prefill_avg_s")
+    d_avg = out.get("decode_avg_s")
+    if isinstance(p_avg, (int, float)) and isinstance(d_avg, (int, float)):
+        total = p_avg + d_avg
+        if total > 0:
+            out["decode_share_of_e2e"] = d_avg / total
+    return out
+
+
+def _compute_noise_flag(
+    baseline_mean: float,
+    baseline_stddev: float,
+    opt_mean: float,
+    opt_stddev: float,
+) -> bool:
+    """Return True when |baseline_mean - opt_mean| < 2 * max(stddev_baseline, stddev_opt).
+
+    The factor of 2 matches the DA-approved v3.1 noise gate: a delta smaller
+    than two cross-launch stddevs is indistinguishable from run-to-run noise.
+    When both stddevs are 0 and means are equal, treat as noise (True); when
+    both are 0 and means differ, treat as non-noise (False).
+    """
+    delta = abs(baseline_mean - opt_mean)
+    threshold = 2.0 * max(baseline_stddev, opt_stddev)
+    if threshold == 0.0:
+        return delta == 0.0
+    return delta < threshold
+
+
+def _build_label_result_entry(
+    *,
+    cmd: List[str],
+    env_overrides: Dict[str, str],
+    metrics: Dict[str, float],
+    log_rel: str,
+    output_json_rel: str,
+    runner_json_rel: str,
+    ok: Any,
+    returncode: int,
+    evidence_status: str,
+    evidence: Dict[str, Any],
+    timing: Dict[str, Any],
+    launches: Optional[List[Dict[str, Any]]] = None,
+    aggregate: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Assemble a label result dict for the sweep JSON output.
+
+    When ``launches`` / ``aggregate`` are None (default, num_launches=1),
+    the returned dict omits those keys — preserving the pre-multi-launch
+    schema byte-for-byte.
+    """
+    entry: Dict[str, Any] = {
+        "ok": ok,
+        "returncode": returncode,
+        "cmd": cmd,
+        "env_overrides": env_overrides,
+        "metrics": metrics,
+        "avg_s": metrics.get("avg_s") if isinstance(metrics, dict) else None,
+        "fastpath_evidence": {
+            **evidence,
+            "status": evidence_status,
+        },
+        "log": log_rel,
+        "output_json": output_json_rel,
+        "runner_json": runner_json_rel,
+        "timing": timing,
+    }
+    # Per spec §3.1 step 6, prefill/decode timing is workload-property —
+    # surface as top-of-row siblings so the consolidated row reads cleanly
+    # without diving into ``metrics``. Only emit keys that are actually
+    # numeric (back-compat: legacy raw JSON without these fields produces
+    # the original schema).
+    if isinstance(metrics, dict):
+        for key in (
+            "prefill_avg_s",
+            "decode_avg_s",
+            "prefill_p50_s",
+            "decode_p50_s",
+            "decode_share_of_e2e",
+        ):
+            v = metrics.get(key)
+            if isinstance(v, (int, float)):
+                entry[key] = float(v)
+    if launches is not None:
+        entry["launches"] = launches
+    if aggregate is not None:
+        entry["aggregate"] = aggregate
+        # Keep avg_s aligned with aggregate.mean_latency so downstream
+        # speedup/gate code works transparently.
+        if isinstance(aggregate.get("mean_latency"), (int, float)):
+            entry["avg_s"] = float(aggregate["mean_latency"])
+        # Multi-launch aggregate prefill/decode override the single-launch
+        # values surfaced above (spec §3.1 step 7).
+        for key in ("prefill_avg_s", "decode_avg_s", "decode_share_of_e2e"):
+            v = aggregate.get(key)
+            if isinstance(v, (int, float)):
+                entry[key] = float(v)
+    return entry
+
+
+def _sanitize_vllm_op_env(
+    env: Dict[str, str],
+    preserve_keys: "frozenset[str] | set[str]" = frozenset(),
+) -> Dict[str, str]:
+    """Strip stale ``VLLM_*`` env vars from *env* to prevent cross-track contamination.
+
+    After the Track A6 baseline-promotion flow, a shipped round's ``opt_env`` keys
+    get merged into ``target.json:bench.baseline_env`` so subsequent rounds treat
+    them as the new baseline. The sanitizer therefore needs to remove ALL stale
+    ``VLLM_*`` vars (not just ``VLLM_OP\\d+``), because the set of live "optimization
+    flags" now includes campaign-defined names like ``VLLM_MOE_TRITON_ROUTER`` that
+    don't match the numeric op-ID pattern.
+
+    *preserve_keys* lists the names that MUST survive sanitization — typically
+    the union of ``baseline_env.keys()`` (promoted flags the current run needs)
+    and ``opt_env.keys()`` (the current round's experimental flag). Anything
+    else matching ``^VLLM_`` is dropped because it was inherited from the shell
+    or a prior process and would silently contaminate the measurement.
+
+    Non-``VLLM_`` vars pass through untouched.
     """
     import re as _re
-    _vllm_op_re = _re.compile(r"^VLLM_OP\d+$")
-    return {k: v for k, v in env.items() if not _vllm_op_re.match(k)}
+    _vllm_prefix_re = _re.compile(r"^VLLM_")
+    preserve = set(preserve_keys)
+    return {
+        k: v
+        for k, v in env.items()
+        if not _vllm_prefix_re.match(k) or k in preserve
+    }
+
+
+# ---------------------------------------------------------------------------
+# DP/EP parallelism parsing (§4.2 of the MoE DP/EP parallelism-controls spec)
+# ---------------------------------------------------------------------------
+
+
+def _parse_parallelism_from_args(args_list: List[str]) -> Dict[str, Any]:
+    """Parse tp/pp/dp/prefill_cp/distributed-executor-backend/beam_search from argv.
+
+    Uses a standalone argparse.ArgumentParser so the helper runs in environments
+    without vLLM installed (unit tests). Flags mirror vLLM's canonical names.
+    Unknown flags are ignored (parse_known_args).
+
+    Returns a dict: {tp, pp, dp, prefill_cp, distributed_backend, use_beam_search}.
+    No validation — caller validates.
+    """
+    p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    p.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
+    p.add_argument("--pipeline-parallel-size", "-pp", type=int, default=1)
+    p.add_argument("--data-parallel-size", "-dp", type=int, default=1)
+    p.add_argument("--prefill-context-parallel-size", type=int, default=1)
+    p.add_argument("--distributed-executor-backend", type=str, default=None)
+    p.add_argument("--use-beam-search", action="store_true", default=False)
+    ns, _unknown = p.parse_known_args(args_list)
+    return {
+        "tp": int(ns.tensor_parallel_size),
+        "pp": int(ns.pipeline_parallel_size),
+        "dp": int(ns.data_parallel_size),
+        "prefill_cp": int(ns.prefill_context_parallel_size),
+        "distributed_backend": ns.distributed_executor_backend,
+        "use_beam_search": bool(ns.use_beam_search),
+    }
+
+
+def _parse_positions_per_step(args_list: List[str]) -> int:
+    """positions advanced per decode worker-step = 1 + num_speculative_tokens.
+
+    Under vanilla decode every worker-step emits exactly one output token per request,
+    so positions_per_step == 1. Under vLLM speculative decoding each target-verification
+    worker-step instead advances the bonus token plus ``num_speculative_tokens`` draft
+    positions, i.e. positions_per_step == 1 + num_speculative_tokens. The marker's
+    ``num_generation_tokens`` sums num_scheduled_tokens over generation reqs (not accepted
+    tokens), so this count is method-agnostic (eagle/mtp/ngram/draft) and acceptance-
+    independent.
+
+    Uses a standalone argparse.ArgumentParser (like ``_parse_parallelism_from_args``) so the
+    helper runs without vLLM imported. Returns 1 when no ``--speculative-config``/``-sc`` is
+    present (vanilla decode) OR when the count cannot be recovered statically (conservative;
+    never raises — a wrong-low fallback is caught loudly downstream by the arm-reachability
+    assertion and the rename-undercount escalation rather than silently mislabeling reps).
+    """
+    p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    p.add_argument("--speculative-config", "-sc", type=str, default=None)
+    ns, _unknown = p.parse_known_args(args_list)
+    if ns.speculative_config is None:
+        return 1
+    try:
+        cfg = json.loads(ns.speculative_config)
+    except (ValueError, TypeError):
+        # Non-inline JSON (e.g. -sc @file.json or a bare path). We cannot recover the count
+        # statically; fall back to vanilla (loud downstream if it under-arms/over-rejects).
+        print(
+            "WARNING: --speculative-config value is not inline JSON; positions_per_step=1 "
+            "(spec-decode nsys capture may under-arm/over-reject).",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(cfg, dict):
+        return 1
+    n = cfg.get("num_speculative_tokens")
+    if n is None:
+        # Spec config present but count missing (e.g. method derives it from the draft).
+        print(
+            "WARNING: --speculative-config present but num_speculative_tokens absent; "
+            "positions_per_step=1 (spec-decode nsys capture may under-arm).",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        return 1 + int(n)
+    except (ValueError, TypeError):
+        print(
+            "WARNING: num_speculative_tokens not int-coercible; positions_per_step=1.",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _resolve_parallelism_and_backend(
+    extra_args: List[str],
+    baseline_extra_args: List[str],
+    opt_extra_args: List[str],
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Resolve effective parallelism across both labels, validate, auto-inject.
+
+    Flow (spec §4.2):
+      1. Parse `extra_args + baseline_extra_args` → baseline_parse.
+      2. Parse `extra_args + opt_extra_args` → opt_parse.
+      3. Assert tp/pp/dp agree between the two labels (raise on divergence).
+      4. Assert prefill_cp == 1 (raise otherwise — unsupported in this flow).
+      5. If dp > 1 and either label sets `--distributed-executor-backend`
+         to anything other than `external_launcher` → raise.
+      6. If dp > 1 and neither label sets the backend → auto-inject
+         `--distributed-executor-backend external_launcher` into `extra_args`.
+      7. If dp > 1 and either label requests `--use-beam-search` → raise
+         (beam-search + DP semantics undefined under external_launcher).
+
+    Returns:
+      (augmented_extra_args, {"tp","pp","dp","prefill_cp","nproc"})
+    """
+    baseline_parse = _parse_parallelism_from_args(extra_args + baseline_extra_args)
+    opt_parse = _parse_parallelism_from_args(extra_args + opt_extra_args)
+
+    for key in ("tp", "pp", "dp"):
+        if baseline_parse[key] != opt_parse[key]:
+            raise SystemExit(
+                f"per-label parallelism mismatch: baseline has {key}={baseline_parse[key]}, "
+                f"opt has {key}={opt_parse[key]}. Parallelism flags must live in "
+                f"bench.extra_args (shared) or both label-local lists must agree."
+            )
+
+    tp = baseline_parse["tp"]
+    pp = baseline_parse["pp"]
+    dp = baseline_parse["dp"]
+
+    if baseline_parse["prefill_cp"] != 1 or opt_parse["prefill_cp"] != 1:
+        raise SystemExit(
+            f"prefill_context_parallel_size must be 1 (unsupported by this sweep flow); "
+            f"got baseline={baseline_parse['prefill_cp']}, opt={opt_parse['prefill_cp']}."
+        )
+
+    # Backend coupling check (only when DP > 1).
+    if dp > 1:
+        for label, parsed in (("baseline", baseline_parse), ("opt", opt_parse)):
+            backend = parsed["distributed_backend"]
+            if backend is not None and backend != "external_launcher":
+                raise SystemExit(
+                    f"--data-parallel-size > 1 requires "
+                    f"--distributed-executor-backend external_launcher; "
+                    f"label {label!r} has backend={backend!r}. "
+                    f"Remove it or let the sweep auto-inject external_launcher."
+                )
+        # Beam-search incompatibility.
+        if baseline_parse["use_beam_search"] or opt_parse["use_beam_search"]:
+            raise SystemExit(
+                "beam-search + data-parallel-size > 1 is unsupported "
+                "(undefined semantics under external_launcher). "
+                "Drop --use-beam-search or set --data-parallel-size 1."
+            )
+
+    # Auto-inject backend when dp > 1 and neither label set it.
+    augmented = list(extra_args)
+    if (
+        dp > 1
+        and baseline_parse["distributed_backend"] is None
+        and opt_parse["distributed_backend"] is None
+    ):
+        augmented = augmented + ["--distributed-executor-backend", "external_launcher"]
+
+    nproc = max(1, tp) * max(1, pp) * max(1, dp)
+    return (
+        augmented,
+        {"tp": tp, "pp": pp, "dp": dp, "prefill_cp": 1, "nproc": nproc},
+    )
+
+
+def _build_child_cmd(
+    *,
+    python_exe: str,
+    script_path: Path,
+    run_label: str,
+    artifact_dir: Path,
+    target_path: Path,
+    timeout_s: int,
+    out_name: str,
+    out_root: Path,
+    dp: int,
+    nproc: int,
+    extra_child_flags: List[str],
+) -> List[str]:
+    """Build the child command with torchrun dual-path selection (spec §4.2).
+
+    When ``dp == 1``: produces ``[python, script.py, ...args]`` — the existing
+    in-process child path.
+
+    When ``dp > 1``: wraps with ``torch.distributed.run``:
+        ``[python, -m, torch.distributed.run, --standalone, --nnodes=1,
+           --nproc-per-node, N, script.py, ...args]``
+    where ``nproc`` = tp * pp * dp.
+
+    ``extra_child_flags`` are appended verbatim (nsys overrides, correctness
+    flags, torch-profile flag, etc.). Ordering: forwarded-to-child flags come
+    after the core script args and before torchrun's consumption of stderr.
+    """
+    # Note: --out-name is NOT passed to children. The resolved absolute path
+    # is forwarded via --_out-root only. (`out_name` parameter is retained
+    # in this function signature for back-compat with existing callers but is
+    # not threaded into the child command.)
+    _ = out_name  # explicit: out_name is no longer forwarded to children
+    base_script_args: List[str] = [
+        "--artifact-dir", str(artifact_dir),
+        "--target-json", str(target_path),
+        "--timeout-s", str(timeout_s),
+        "--_out-root", str(out_root),
+        "--_child-label", run_label,
+    ] + list(extra_child_flags)
+
+    if dp > 1:
+        return [
+            python_exe, "-m", "torch.distributed.run",
+            "--standalone", "--nnodes=1",
+            "--nproc-per-node", str(nproc),
+            str(script_path),
+        ] + base_script_args
+    return [python_exe, str(script_path)] + base_script_args
+
+
+def _should_skip_bucket(batch_size: int, dp_size: int) -> bool:
+    """Skip a bucket when batch_size cannot be partitioned across all DP ranks.
+
+    vLLM requires each DP rank to participate in the collective generate()
+    call; if ``batch_size < dp_size`` at least one rank has no prompt of its
+    own, and feeding it a placeholder biases latency upward — the spec chooses
+    to skip such buckets rather than contaminate the measurement.
+    """
+    return dp_size > 1 and batch_size < dp_size
+
+
+def _partition_prompts(
+    all_prompts: List[Any],
+    *,
+    dp_size: int,
+    dp_rank: int,
+    input_len: int,
+) -> List[Any]:
+    """Return this rank's share of ``all_prompts`` using ``i % dp_size`` striping.
+
+    Contract:
+      * ``dp_size == 1``: returns ``all_prompts`` unchanged (identity).
+      * ``dp_size > 1``: returns prompts at indices ``i`` with
+        ``i % dp_size == dp_rank`` (canonical stride-based partition).
+      * If a rank's share is empty (e.g. ``len(all_prompts) < dp_size``),
+        returns ``[{"prompt_token_ids": [1] * input_len}]`` as a placeholder
+        so vLLM's collective ``generate()`` does not hang on an empty list.
+
+    Callers guard the ``batch_size < dp_size`` case via ``_should_skip_bucket``;
+    the placeholder branch is a safety net for GSM8K / uneven correctness
+    partitions where all ranks must participate.
+    """
+    if dp_size == 1:
+        return all_prompts
+    my_prompts = [p for i, p in enumerate(all_prompts) if i % dp_size == dp_rank]
+    if not my_prompts:
+        return [{"prompt_token_ids": [1] * input_len}]
+    return my_prompts
+
+
+def _nsys_start_if_rank0(torch_mod: Any) -> None:
+    """Start nsys cudaProfiler capture (rank-0 only); sync on all ranks.
+
+    torch.cuda.synchronize() must run on ALL ranks so the nsys capture-range
+    boundary is aligned across DP siblings — nsys follows the rank-0
+    cudaProfilerStart() globally via ``--capture-range=cudaProfilerApi``
+    combined with ``--trace-fork-before-exec=true``, but per-rank streams are
+    only in the same epoch if every rank has drained its device queue at the
+    same wall-clock point.
+    """
+    torch_mod.cuda.synchronize()
+    if _IS_RANK0:
+        torch_mod.cuda.cudart().cudaProfilerStart()
+
+
+def _nsys_stop_if_rank0(torch_mod: Any) -> None:
+    """Stop nsys cudaProfiler capture (rank-0 only); sync on all ranks.
+
+    Mirror of ``_nsys_start_if_rank0``. Must be called even on exception —
+    leaving the capture range open corrupts the repeat:N counter and nsys
+    hangs waiting for the matching stop.
+    """
+    torch_mod.cuda.synchronize()
+    if _IS_RANK0:
+        torch_mod.cuda.cudart().cudaProfilerStop()
+
+
+def _check_correctness_dp_precondition(num_questions: int, dp_size: int) -> None:
+    """Reject GSM8K runs where num_questions < dp_size (spec §4.4).
+
+    Under DP>1 each rank must receive at least one real prompt — otherwise
+    the all_gather_object at the end yields a rank with an empty list, which
+    then gets mapped via _stitch_gathered to ``None`` entries, breaking
+    ``_score_gsm8k_predictions``. Fail loud at the start of the correctness
+    phase instead of deep inside the gather.
+    """
+    if dp_size > 1 and num_questions < dp_size:
+        raise ValueError(
+            f"correctness_num_questions={num_questions} < dp_size={dp_size}; "
+            "every DP rank must receive at least one prompt. Increase "
+            "--correctness-num-questions or run with --data-parallel-size 1."
+        )
+
+
+def _verdict_to_code(verdict: Dict[str, Any]) -> int:
+    """Map a correctness verdict dict to an exit-code integer for DP broadcast.
+
+    Codes: 0=PASS, 3=FAIL, 4=infrastructure error (or malformed verdict).
+    ``infrastructure_error=True`` always maps to 4 regardless of the verdict
+    string — the collector should treat infra issues as highest-severity.
+    """
+    if not isinstance(verdict, dict) or "verdict" not in verdict:
+        return 4
+    if verdict.get("infrastructure_error"):
+        return 4
+    return 0 if verdict.get("verdict") == "PASS" else 3
+
+
+def _stitch_gathered(
+    gathered: List[List[Any]],
+    n_total: int,
+    dp_size: int,
+) -> List[Any]:
+    """Reassemble per-rank outputs into canonical prompt order.
+
+    Inverse of ``_partition_prompts``: for index ``i`` in ``[0, n_total)``,
+    the owning rank is ``i % dp_size`` and the within-rank offset is
+    ``i // dp_size``. Returns a list of length ``n_total`` in canonical order.
+    """
+    if dp_size == 1:
+        # gathered is [[out0, out1, ...]] — flatten.
+        return list(gathered[0])[:n_total]
+    stitched: List[Any] = [None] * n_total
+    for i in range(n_total):
+        r = i % dp_size
+        off = i // dp_size
+        stitched[i] = gathered[r][off]
+    return stitched
 
 
 def _require(obj: Dict[str, Any], key: str, ctx: str) -> Any:
@@ -259,6 +973,641 @@ def _validate_buckets_model_len(buckets: List[Dict[str, int]], max_model_len: in
             )
 
 
+def _parse_nsys_capture_output_steps(raw: Optional[str], output_len: int) -> List[int]:
+    """Parse comma-separated nsys OL capture steps against ``output_len``.
+
+    Example: ``"2,50%,100%"`` with ``output_len=512`` resolves to
+    ``[2, 256, 512]``. Percentages use the profiling horizon, which is either
+    the workload output length or ``--nsys-output-len`` when supplied.
+    """
+    if raw is None or not raw.strip():
+        return []
+    if output_len <= 0:
+        raise SystemExit(f"output_len must be positive, got {output_len}")
+
+    out: List[int] = []
+    seen: set[int] = set()
+    for item in raw.split(","):
+        token = item.strip()
+        if not token:
+            raise SystemExit("--nsys-capture-output-steps contains an empty item")
+        if token.endswith("%"):
+            pct_raw = token[:-1].strip()
+            try:
+                pct = float(pct_raw)
+            except ValueError:
+                raise SystemExit(f"Invalid percentage in --nsys-capture-output-steps: {token!r}")
+            if pct <= 0.0 or pct > 100.0:
+                raise SystemExit(
+                    f"--nsys-capture-output-steps percentage must be in (0,100], got {token!r}"
+                )
+            step = max(1, int(round(output_len * pct / 100.0)))
+        else:
+            if not re.fullmatch(r"\d+", token):
+                raise SystemExit(f"Invalid integer in --nsys-capture-output-steps: {token!r}")
+            step = int(token)
+        if step <= 0:
+            raise SystemExit(f"--nsys-capture-output-steps values must be positive, got {step}")
+        if step > output_len:
+            raise SystemExit(
+                f"--nsys-capture-output-steps value {step} exceeds profiling output_len {output_len}"
+            )
+        if step not in seen:
+            out.append(step)
+            seen.add(step)
+    return out
+
+
+# vLLM pins the chunked-prefill token budget per device: 16384 for >=70 GiB non-A100
+# LLM_CLASS engines (B200/B300/H100/H200), 8192 for A100 and smaller
+# (vllm/engine/arg_utils.py:2053-2068). For a selected-step DECODE capture we PIN this
+# value into the profiling child (see _apply_selected_step_profiler_config) so the number
+# of chunked-prefill worker-steps is deterministic and matches the arithmetic below. A
+# decode step's shape (m == batch_size, KV depth) is independent of the prefill chunk size
+# (confirmed: vLLM cudagraph dispatch / _is_uniform_decode key only on the current batch),
+# so pinning is parity-safe for the capture AND A100-safe — we force the value rather than
+# trusting the device default.
+_PROFILING_CHUNK_TOKENS = 16384
+
+# Extra decode worker-steps the capture arms PAST the last prefill chunk, so the captured
+# step is steady-state (clear of cold-cache transients) — matching the headroom the
+# Nemotron campaign used. 1 step covers the (provably <1-step) prefill-drain undercount;
+# the remaining ~5 clear transients.
+_SELECTED_STEP_DECODE_MARGIN = 6
+
+
+def _n_prefill_worker_steps(input_len: int, batch_size: int, chunk_tokens: int) -> int:
+    """Chunked-prefill worker-steps needed to drain ``input_len * batch_size`` tokens.
+
+    vLLM's v1 scheduler shares ONE ``chunk_tokens`` token budget across the whole batch per
+    worker step, so a long prompt is consumed over ``ceil(total_tokens / chunk_tokens)``
+    prefill worker-steps before any pure decode step runs.
+    """
+    import math
+    if chunk_tokens <= 0:
+        raise SystemExit(f"Invalid profiling chunk_tokens: {chunk_tokens}")
+    total_prefill_tokens = int(input_len) * int(batch_size)
+    return max(1, math.ceil(total_prefill_tokens / int(chunk_tokens)))
+
+
+def _selected_step_effective_window(
+    buckets: List[Dict[str, int]],
+    *,
+    requested_window: int,
+    nsys_output_len: Optional[int],
+    nsys_capture_output_steps: str,
+    chunk_tokens: int = _PROFILING_CHUNK_TOKENS,
+    margin: int = _SELECTED_STEP_DECODE_MARGIN,
+) -> int:
+    """Child-wide capture window that clears chunked prefill for EVERY capture point.
+
+    The selected-step mechanism shifts ``input_len`` so the captured (final) decode token
+    of a short ``output_len == window`` generation sits at the requested decode depth: for
+    a target step ``k`` it runs ``input_len_eff = src_il + k - window``. The capture arms on
+    worker-step ``window`` (``delay_iterations == window``); that step is a clean full-batch
+    decode iff ``window`` exceeds the chunked-prefill worker-steps
+    ``n_prefill(input_len_eff, bs)``. The OLD code armed at ``window == 2`` and captured a
+    prefill chunk on long-context workloads.
+
+    ``n_prefill`` is non-increasing in ``window`` (a larger window means a smaller
+    ``input_len_eff``), so evaluating it at the smallest plausible window
+    (``requested_window``) over-estimates the prefill steps. The window returned therefore
+    provably satisfies ``window > n_prefill(input_len_eff, bs)`` for every capture point in
+    ONE pass — no fixed-point iteration. A single child-wide window keeps the existing
+    one-window-per-child architecture, and the captured decode depth (``src_il + k``) is
+    invariant under the window, so flooring it never distorts the requested depth.
+    """
+    floor = int(requested_window)
+    for bucket in buckets:
+        horizon = int(nsys_output_len) if nsys_output_len is not None else int(bucket["output_len"])
+        for step in _parse_nsys_capture_output_steps(nsys_capture_output_steps, horizon):
+            # Largest possible input_len_eff (smallest window) => largest n_prefill.
+            il_eff_max = int(bucket["input_len"]) + int(step) - int(requested_window)
+            n_prefill = _n_prefill_worker_steps(
+                il_eff_max, int(bucket["batch_size"]), chunk_tokens
+            )
+            floor = max(floor, n_prefill + int(margin))
+    return floor
+
+
+def _expand_nsys_profile_buckets(
+    buckets: List[Dict[str, int]],
+    *,
+    nsys_output_len: Optional[int] = None,
+    nsys_capture_window_output_len: Optional[int] = None,
+    nsys_capture_output_steps: Optional[str] = None,
+    positions_per_step: int = 1,
+) -> List[Dict[str, int]]:
+    """Return the bucket list the nsys child should actually profile.
+
+    ``--nsys-capture-output-steps`` creates shape-equivalent selected-step captures. For
+    target output step ``k`` and capture window ``w``, the child runs a short generation and
+    uses vLLM's CUDA profiler delay (``delay_iterations == w``, a WORKER-STEP count) to
+    capture only the final worker step in that short window — landing the capture at decode
+    depth ``input_len + k`` (invariant under ``w``).
+
+    ``w`` is floored child-wide (``_selected_step_effective_window``) so the capture arms
+    PAST all chunked-prefill worker-steps and lands on a genuine full-batch decode step
+    rather than a prefill chunk. The user-supplied ``--nsys-capture-window-output-len`` is a
+    lower bound on this floor, never an override below it.
+
+    ``positions_per_step`` (= 1 + num_speculative_tokens; 1 for vanilla decode) decouples
+    the WORKER-STEP arm threshold ``w`` from the OUTPUT-TOKEN count of the short generation.
+    The profiler counts worker-steps, but each spec-decode worker-step advances
+    ``positions_per_step`` output tokens, so a generation of ``output_len`` tokens completes
+    in only ``n_prefill + ceil(output_len / positions_per_step)`` worker-steps. To guarantee
+    the arm threshold ``w`` is reached for EVERY batch size, the generation output_len is
+    sized ``w * positions_per_step`` (uniform), giving exactly ``w`` decode worker-steps
+    (total ``n_prefill + w >= w``). At ``positions_per_step == 1`` this is ``output_len == w``,
+    byte-for-byte the original behavior. ``delay_iterations`` / the capture-window floor
+    stay UNCHANGED (still worker-step counts that clear prefill).
+    """
+    ppt = max(1, int(positions_per_step))
+    expanded: List[Dict[str, int]] = []
+    effective_window: Optional[int] = None
+    if nsys_capture_output_steps:
+        requested_window = (
+            int(nsys_capture_window_output_len)
+            if nsys_capture_window_output_len is not None
+            else 2
+        )
+        if requested_window <= 0:
+            raise SystemExit(
+                f"--nsys-capture-window-output-len must be positive, got {requested_window}"
+            )
+        effective_window = _selected_step_effective_window(
+            buckets,
+            requested_window=requested_window,
+            nsys_output_len=nsys_output_len,
+            nsys_capture_output_steps=nsys_capture_output_steps,
+        )
+    for bucket in buckets:
+        horizon = int(nsys_output_len) if nsys_output_len is not None else int(bucket["output_len"])
+        if nsys_capture_output_steps:
+            window = int(effective_window)
+            for step in _parse_nsys_capture_output_steps(nsys_capture_output_steps, horizon):
+                input_len_eff = int(bucket["input_len"]) + int(step) - window
+                if input_len_eff < 1:
+                    # The only sub-floor corner: context too short to host a steady-state
+                    # full-batch decode at this window. Drop with a loud warning rather than
+                    # emit a degenerate/prefill capture. Such a tiny context has no chunked
+                    # prefill to clear anyway, so it is not the contamination class we fix.
+                    print(
+                        "WARNING: dropping selected-step capture "
+                        f"(input_len={bucket['input_len']}, batch_size={bucket['batch_size']}, "
+                        f"step={step}): effective capture window {window} >= input_len+step "
+                        f"({int(bucket['input_len']) + int(step)}), leaving no room for a "
+                        "decode-shaped capture. Use a larger input_len or a shallower step.",
+                        file=sys.stderr,
+                    )
+                    continue
+                expanded.append({
+                    **bucket,
+                    "input_len": input_len_eff,
+                    # output_len sized window*ppt so the short generation runs exactly
+                    # `window` decode worker-steps (ceil(window*ppt/ppt)==window) and the
+                    # CUDA profiler arm threshold (delay_iterations==window) is reached for
+                    # EVERY batch size under spec-decode. ppt==1 -> output_len==window
+                    # (unchanged). delay_iterations stays == window (a worker-step count).
+                    "output_len": window * ppt,
+                    "nsys_source_input_len": int(bucket["input_len"]),
+                    "nsys_source_output_len": int(bucket["output_len"]),
+                    "nsys_capture_output_step": int(step),
+                    "nsys_capture_window_output_len": window,
+                    "nsys_capture_positions_per_step": ppt,
+                    "nsys_capture_target_output_len": int(horizon),
+                })
+        elif nsys_output_len is not None:
+            expanded.append({
+                **bucket,
+                "output_len": int(nsys_output_len),
+                "nsys_source_output_len": int(bucket["output_len"]),
+                "nsys_capture_target_output_len": int(nsys_output_len),
+                "nsys_capture_positions_per_step": ppt,
+            })
+        else:
+            expanded.append({
+                **bucket,
+                "nsys_capture_positions_per_step": ppt,
+            })
+    return expanded
+
+
+def _dedupe_nsys_profile_buckets(
+    buckets: List[Dict[str, int]],
+) -> Tuple[List[Dict[str, int]], List[Dict[str, int]]]:
+    """Drop duplicate effective nsys shapes while preserving first occurrence."""
+    deduped: List[Dict[str, int]] = []
+    skipped: List[Dict[str, int]] = []
+    seen: set[Tuple[int, int, int]] = set()
+    for bucket in buckets:
+        key = (
+            int(bucket["input_len"]),
+            int(bucket["output_len"]),
+            int(bucket["batch_size"]),
+        )
+        if key in seen:
+            skipped.append(dict(bucket))
+            continue
+        seen.add(key)
+        deduped.append(bucket)
+    return deduped, skipped
+
+
+def _format_nsys_deduped_buckets(skipped: List[Dict[str, int]], limit: int = 8) -> str:
+    """Human-readable summary for duplicate effective nsys shapes."""
+    shown = []
+    for bucket in skipped[:limit]:
+        shown.append(
+            "il={il},ol={ol},bs={bs},source_ol={source_ol}".format(
+                il=bucket["input_len"],
+                ol=bucket["output_len"],
+                bs=bucket["batch_size"],
+                source_ol=bucket.get("nsys_source_output_len", bucket["output_len"]),
+            )
+        )
+    more = "" if len(skipped) <= limit else f" (+{len(skipped) - limit} more)"
+    return ", ".join(shown) + more
+
+
+def _nsys_tag_buckets_for_dp(
+    buckets: List[Dict[str, int]],
+    dp_size: int,
+    *,
+    nsys_output_len: Optional[int] = None,
+    nsys_capture_window_output_len: Optional[int] = None,
+    nsys_capture_output_steps: Optional[str] = None,
+    positions_per_step: int = 1,
+) -> List[Dict[str, int]]:
+    """Profile buckets expected to emit nsys reports after DP skip filtering."""
+    expanded = _expand_nsys_profile_buckets(
+        buckets,
+        nsys_output_len=nsys_output_len,
+        nsys_capture_window_output_len=nsys_capture_window_output_len,
+        nsys_capture_output_steps=nsys_capture_output_steps,
+        positions_per_step=positions_per_step,
+    )
+    filtered = [b for b in expanded if not _should_skip_bucket(int(b["batch_size"]), dp_size)]
+    deduped, _ = _dedupe_nsys_profile_buckets(filtered)
+    return deduped
+
+
+def _is_nsys_selected_step_bucket(bucket: Dict[str, int]) -> bool:
+    return "nsys_capture_output_step" in bucket
+
+
+def _compute_nsys_cudagraph_capture_sizes(buckets: List[Dict[str, int]]) -> List[int]:
+    """Bound nsys CUDA graph capture sizes to profiled nominal/effective shapes."""
+    sizes: set[int] = set()
+    for bucket in buckets:
+        batch_size = int(bucket["batch_size"])
+        sizes.add(batch_size)
+        if "nsys_capture_positions_per_step" in bucket:
+            positions_per_step = max(1, int(bucket["nsys_capture_positions_per_step"]))
+            sizes.add(batch_size * positions_per_step)
+    return sorted(sizes)
+
+
+def _apply_selected_step_profiler_config(
+    ea_dict: Dict[str, Any],
+    bucket: Dict[str, int],
+) -> None:
+    """Configure vLLM's built-in CUDA profiler for selected-step nsys capture.
+
+    ``WorkerProfiler.step()`` (vllm/profiler/wrapper.py) increments a counter on EVERY
+    worker step and arms the profiler when the counter == ``delay_iterations``;
+    ``gpu_worker.annotate_profile()`` calls it once per scheduler iteration. The capture
+    window stored on the bucket was floored child-wide (``_selected_step_effective_window``)
+    to exceed the chunked-prefill worker-step count, so arming at ``delay == window`` lands
+    on a steady-state full-batch decode step rather than a prefill chunk.
+
+    ``delay_iterations`` is a WORKER-STEP count and stays == ``window``. Under spec-decode the
+    short generation produces only ``n_prefill + ceil(output_len / positions_per_step)``
+    worker-steps; ``_expand_nsys_profile_buckets`` sizes ``output_len = window *
+    positions_per_step`` so that total is ``n_prefill + window >= window`` for every bucket and
+    the profiler always arms. We re-derive that count here and fail LOUD (SystemExit) if the
+    generation is too short to reach the threshold — converting a silent never-arm (the
+    BS8/BS32-never-emitted bug) into an explicit error. At ``positions_per_step == 1`` the
+    available worker-steps are ``n_prefill + window``, so this assertion never fires for
+    vanilla decode.
+
+    We also PIN ``max_num_batched_tokens`` to the chunk size used in that floor arithmetic
+    so the engine's prefill-step count matches ours deterministically (A100-safe: forced,
+    not read from the device default). The pin affects only this profiling child; a decode
+    step's shape is independent of the prefill chunk size.
+    """
+    import math
+
+    window = int(bucket["nsys_capture_window_output_len"])
+    if window <= 0:
+        raise SystemExit(f"Invalid selected-step capture window: {window}")
+    prior = ea_dict.get("max_num_batched_tokens")
+    if prior is not None and int(prior) != _PROFILING_CHUNK_TOKENS:
+        print(
+            "WARNING: pinning max_num_batched_tokens="
+            f"{_PROFILING_CHUNK_TOKENS} for selected-step decode capture "
+            f"(was {prior}); this profiling child's prefill-step count must match the "
+            "capture-window arithmetic. Perf-measurement children are unaffected.",
+            file=sys.stderr,
+        )
+    ea_dict["max_num_batched_tokens"] = _PROFILING_CHUNK_TOKENS
+    n_prefill = _n_prefill_worker_steps(
+        int(bucket["input_len"]), int(bucket["batch_size"]), _PROFILING_CHUNK_TOKENS
+    )
+    if window <= n_prefill:
+        # Defensive: the child-wide floor guarantees window > n_prefill for every bucket.
+        # If this fires, the window was set without going through
+        # _selected_step_effective_window — fail loud rather than capture prefill.
+        raise SystemExit(
+            f"Selected-step capture window {window} does not clear the "
+            f"{n_prefill} chunked-prefill worker-step(s) for bucket "
+            f"(input_len={bucket['input_len']}, batch_size={bucket['batch_size']}); "
+            "the capture would land on a prefill chunk. This indicates the window was "
+            "not floored via _selected_step_effective_window."
+        )
+    # Arm-reachability assertion (spec-decode-aware): the profiler arms only when the
+    # worker-step counter reaches delay_iterations==window. The short generation runs
+    # n_prefill + ceil(output_len/ppt) worker-steps; if that is below window the profiler
+    # NEVER arms (the silent BS8/BS32-no-rep failure under spec-decode). After the
+    # _expand_nsys_profile_buckets sizing (output_len=window*ppt) this is always
+    # n_prefill+window >= window; this guard makes any residual mis-sizing fail loud.
+    ppt = max(1, int(bucket.get("nsys_capture_positions_per_step", 1)))
+    out_len = int(bucket.get("output_len", window))
+    available_ws = n_prefill + math.ceil(out_len / ppt)
+    if available_ws < window:
+        raise SystemExit(
+            f"Selected-step generation (output_len={out_len}, positions_per_step={ppt}) runs "
+            f"only {available_ws} worker-step(s) for bucket "
+            f"(input_len={bucket['input_len']}, batch_size={bucket['batch_size']}), below "
+            f"delay_iterations={window}; the CUDA profiler would never arm. output_len must "
+            "be sized window*positions_per_step via _expand_nsys_profile_buckets."
+        )
+    ea_dict["profiler_config"] = {
+        "profiler": "cuda",
+        "delay_iterations": window,
+        "max_iterations": 1,
+    }
+
+
+# Marker format (vllm/v1/worker/gpu_worker.py):
+#   context_{num_ctx_requests}({num_ctx_tokens})_generation_{num_gen_requests}({num_gen_tokens})
+# ctx captures num_ctx_TOKENS (>0 only during prefill); gen captures num_generation_TOKENS;
+# the new gen_reqs group captures num_generation_REQUESTS (the active-request count, which
+# under continuous batching can differ from the nominal --batch-size). Under spec-decode
+# num_generation_tokens == num_generation_requests * positions_per_step.
+_NVTX_DECODE_MARKER_RE = re.compile(
+    r"context_\d+\((?P<ctx>\d+)\)_generation_(?P<gen_reqs>\d+)\((?P<gen>\d+)\)"
+)
+
+
+def evaluate_decode_shape(
+    *,
+    nvtx_marker: Optional[str],
+    rmsnorm_grid_x: Optional[int],
+    paged_kv_attn_total_us: Optional[float],
+    prefill_flash_attn_total_us: Optional[float],
+    batch_size: int,
+    positions_per_step: int = 1,
+) -> Tuple[bool, str]:
+    """Pure decode-vs-prefill classifier for a captured nsys forward pass.
+
+    Returns ``(is_decode, reason)``. A genuine steady-state decode step shows: the forward
+    NVTX marker is ``context_R(0)_generation_R(N)`` with no prefill context tokens
+    (num_ctx_tokens == 0); token-count-driven kernels run at a grid sized to the per-step
+    token count (RMSNorm gridX small, not thousands); and decode paged-KV attention dominates
+    prefill-flash attention. A chunked-prefill forward shows the inverse. This is the guard
+    that prevents a prefill-shaped capture from being mined as decode (the contamination class
+    documented in INVESTIGATION_prefill_contamination.md).
+
+    ``positions_per_step`` (= 1 + num_speculative_tokens; 1 for vanilla decode) makes the
+    classifier spec-decode-aware:
+
+      * Vanilla (ppt <= 1): the EXACT original predicate — decode iff num_ctx_tokens == 0 AND
+        num_generation_tokens == batch_size — and the gridX vote with threshold batch_size*4.
+      * Spec-decode (ppt > 1): each decode worker-step schedules ``ppt`` tokens per active
+        request, so num_generation_tokens == num_generation_REQUESTS * ppt. We accept
+        num_ctx_tokens == 0 AND gen > 0 AND gen % ppt == 0 AND gen_reqs >= 1 AND
+        gen == gen_reqs * ppt. The active-request count R = gen // ppt is NOT compared to the
+        nominal batch_size: continuous batching legitimately runs more/fewer concurrent
+        requests than the bench --batch-size (the real artifact shows gen_reqs=10 at nominal
+        bs in [1,32]). When the marker confirms decode under spec-decode, the RMSNorm gridX
+        vote is DEMOTED to non-scoring: fused multi-block RMSNorm reports a gridX (e.g. 800)
+        far above even gen_reqs*ppt, so scoring it would false-reject a genuine decode step.
+        num_ctx_tokens == 0 remains the dispositive prefill discriminator.
+
+    Evidence is combined conservatively: the NVTX marker is dispositive when present;
+    otherwise any one prefill-shaped signal fails the check. Signals whose kernel symbols are
+    absent (e.g. Blackwell-only attention names on a different GPU) are SKIPPED, not failed,
+    so the classifier degrades gracefully across architectures.
+    """
+    ppt = max(1, int(positions_per_step))
+    reasons: List[str] = []
+    decode_signals = 0
+    prefill_signals = 0
+    marker_confirmed_decode = False
+
+    if nvtx_marker:
+        m = _NVTX_DECODE_MARKER_RE.search(nvtx_marker)
+        if m:
+            ctx = int(m.group("ctx"))
+            gen = int(m.group("gen"))
+            gr = m.groupdict().get("gen_reqs")
+            gen_reqs = int(gr) if gr is not None else None
+            if ppt <= 1 or gen_reqs is None:
+                # Vanilla decode (or pre-gen_reqs marker): EXACT original predicate.
+                decode_ok = ctx == 0 and gen == batch_size
+                expected = f"context=0 generation={batch_size}"
+            else:
+                # Spec-decode: num_generation_tokens == active_requests * positions_per_step.
+                # active_requests (=gen//ppt) is NOT capped at the nominal batch_size.
+                decode_ok = (
+                    ctx == 0
+                    and gen > 0
+                    and gen % ppt == 0
+                    and gen_reqs >= 1
+                    and gen == gen_reqs * ppt
+                )
+                expected = f"context=0 generation==gen_reqs*{ppt}"
+            if decode_ok:
+                decode_signals += 1
+                # Mark the marker dispositive only under spec-decode, where the gridX vote is
+                # unreliable (fused multi-block RMSNorm) and must be demoted below.
+                marker_confirmed_decode = ppt > 1
+                reasons.append(
+                    "NVTX marker decode-shaped "
+                    f"(context_*(0)_generation_{gen_reqs}({gen}), ppt={ppt})"
+                )
+            else:
+                prefill_signals += 1
+                reasons.append(
+                    f"NVTX marker PREFILL-shaped (context={ctx}, gen_reqs={gen_reqs}, "
+                    f"generation={gen}, expected {expected})"
+                )
+        else:
+            reasons.append(f"NVTX marker unrecognized ({nvtx_marker!r})")
+
+    if rmsnorm_grid_x is not None:
+        if marker_confirmed_decode:
+            # Spec-decode + marker-confirmed decode: the fused RMSNorm gridX is not a reliable
+            # per-token-count proxy (it can fuse multiple blocks into one launch), so do NOT
+            # vote on it — the num_ctx_tokens==0 marker already settled the question.
+            reasons.append(
+                f"RMSNorm gridX={rmsnorm_grid_x} (not scored; NVTX marker dispositive "
+                "under spec-decode)"
+            )
+        elif rmsnorm_grid_x <= max(1, batch_size) * ppt * 4:
+            decode_signals += 1
+            reasons.append(f"RMSNorm gridX={rmsnorm_grid_x} ~= batch_size*ppt")
+        else:
+            prefill_signals += 1
+            reasons.append(
+                f"RMSNorm gridX={rmsnorm_grid_x} >> batch_size*ppt="
+                f"{max(1, batch_size) * ppt} (prefill token count)"
+            )
+
+    if (
+        paged_kv_attn_total_us is not None
+        and prefill_flash_attn_total_us is not None
+    ):
+        if paged_kv_attn_total_us >= prefill_flash_attn_total_us:
+            decode_signals += 1
+            reasons.append(
+                f"paged-KV attn ({paged_kv_attn_total_us:.1f}us) >= "
+                f"prefill-flash ({prefill_flash_attn_total_us:.1f}us)"
+            )
+        else:
+            prefill_signals += 1
+            reasons.append(
+                f"prefill-flash attn ({prefill_flash_attn_total_us:.1f}us) > "
+                f"paged-KV ({paged_kv_attn_total_us:.1f}us) (prefill-dominated)"
+            )
+
+    summary = "; ".join(reasons) if reasons else "no decode-shape signals available"
+    if prefill_signals > 0:
+        return False, f"PREFILL-contaminated capture: {summary}"
+    if decode_signals == 0:
+        return False, f"could not confirm decode shape: {summary}"
+    return True, f"decode-shaped capture confirmed: {summary}"
+
+
+def _extract_decode_shape_signals(sqlite_path: str, batch_size: int) -> Dict[str, Any]:
+    """Extract the decode-shape signals from a captured nsys sqlite export."""
+    import sqlite3
+    con = sqlite3.connect(sqlite_path)
+    try:
+        cur = con.cursor()
+        tables = {
+            r[0]
+            for r in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        nvtx_marker = None
+        if "NVTX_EVENTS" in tables:
+            row = cur.execute(
+                "SELECT text FROM NVTX_EVENTS WHERE text LIKE '%context_%generation_%' "
+                "ORDER BY (end-start) DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                nvtx_marker = row[0]
+
+        rmsnorm_grid_x = None
+        paged = None
+        flash = None
+        if "CUPTI_ACTIVITY_KIND_KERNEL" in tables and "StringIds" in tables:
+            r = cur.execute(
+                "SELECT k.gridX FROM CUPTI_ACTIVITY_KIND_KERNEL k "
+                "JOIN StringIds s ON k.demangledName=s.id "
+                "WHERE s.value LIKE '%rms_norm%' ORDER BY k.gridX DESC LIMIT 1"
+            ).fetchone()
+            if r:
+                rmsnorm_grid_x = int(r[0])
+
+            def _attn_total(like: str):
+                rr = cur.execute(
+                    "SELECT SUM(k.end-k.start)/1000.0 FROM CUPTI_ACTIVITY_KIND_KERNEL k "
+                    "JOIN StringIds s ON k.demangledName=s.id WHERE s.value LIKE ?",
+                    (like,),
+                ).fetchone()
+                return float(rr[0]) if rr and rr[0] is not None else None
+            paged = _attn_total("%fmhaSm100%PagedKv%")
+            flash = _attn_total("%flash_fwd_sm100%")
+
+        return {
+            "nvtx_marker": nvtx_marker,
+            "rmsnorm_grid_x": rmsnorm_grid_x,
+            "paged_kv_attn_total_us": paged,
+            "prefill_flash_attn_total_us": flash,
+        }
+    finally:
+        con.close()
+
+
+def assert_decode_shaped_capture(
+    sqlite_path: str, batch_size: int, positions_per_step: int = 1
+) -> None:
+    """Hard guard: SystemExit if a selected-step nsys capture is prefill-shaped.
+
+    Run on each selected-step sqlite before mining derives any 'decode-graph' component
+    shares. Prevents the prefill-as-decode contamination class
+    (INVESTIGATION_prefill_contamination.md) from silently recurring.
+
+    ``positions_per_step`` (= 1 + num_speculative_tokens) makes the underlying classifier
+    spec-decode-aware so a genuine spec-decode bulk-decode step (num_generation_tokens ==
+    active_requests * positions_per_step) is accepted rather than false-rejected.
+    """
+    signals = _extract_decode_shape_signals(sqlite_path, batch_size)
+    is_decode, reason = evaluate_decode_shape(
+        batch_size=batch_size, positions_per_step=positions_per_step, **signals
+    )
+    if not is_decode:
+        raise SystemExit(
+            f"ERROR: nsys capture {sqlite_path} is NOT a steady-state decode step.\n"
+            f"  {reason}\n\n"
+            "The selected-step profiler armed on a non-decode forward (typically a "
+            "chunked-prefill chunk on a long-context workload). Mining this trace as "
+            "'decode-graph %' produces a prefill-weighted bottleneck ranking that is wrong "
+            "for a decode-dominated workload.\n"
+            "Fix: ensure the capture window clears all prefill worker-steps "
+            "(_selected_step_effective_window) and that the profiling child pins "
+            "max_num_batched_tokens. Re-profile before mining."
+        )
+
+
+def _export_nsys_sqlite(nsys_rep: Path) -> Optional[Path]:
+    """Export an ``.nsys-rep`` to a sibling ``.sqlite`` for the decode-shape guard.
+
+    Returns the sqlite path on success, or ``None`` if ``nsys`` is unavailable or the export
+    fails (the caller treats that as "guard could not run" rather than a hard error, since a
+    missing exporter is an environment issue, not a contaminated capture).
+    """
+    sqlite_path = nsys_rep.with_suffix(".sqlite")
+    if sqlite_path.exists():
+        return sqlite_path
+    nsys_bin = shutil.which("nsys")
+    if not nsys_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                nsys_bin, "export",
+                "--type", "sqlite",
+                "--force-overwrite=true",
+                "--output", str(sqlite_path),
+                str(nsys_rep),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=600,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not sqlite_path.exists():
+        return None
+    return sqlite_path
+
+
 def _bench_exe_tokens(vllm_cmd: Any) -> List[str]:
     if isinstance(vllm_cmd, list):
         if not all(isinstance(x, str) for x in vllm_cmd):
@@ -349,6 +1698,41 @@ def _write_json_atomic(path: Path, obj: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+# Rank-0-gated write/log helpers (see §4.3 header block near _NullFile).
+# Under DP=1 (RANK unset → _IS_RANK0=True) these are straight delegates.
+
+def _rank0_write_json(path: Path, obj: Dict[str, Any]) -> None:
+    if _IS_RANK0:
+        _write_json(path, obj)
+
+
+def _rank0_write_json_atomic(path: Path, obj: Dict[str, Any]) -> None:
+    if _IS_RANK0:
+        _write_json_atomic(path, obj)
+
+
+def _rank0_write_text(path: Path, text: str) -> None:
+    if _IS_RANK0:
+        _write_text(path, text)
+
+
+def _rank0_log(msg: str) -> None:
+    """Rank-0-only stdout log. Silent on non-rank-0 to keep parent stdout clean."""
+    if _IS_RANK0:
+        print(msg, flush=True)
+
+
+def _rank0_open_log(path: Path, mode: str) -> Any:
+    """Open a log file on rank 0; return a _NullFile sink on other ranks.
+
+    Keeps shared bucket-loop code paths free of per-site ``if _IS_RANK0`` guards.
+    """
+    if _IS_RANK0:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return open(path, mode, encoding="utf-8", buffering=1)
+    return _NullFile()
+
+
 def _read_json(path: Path) -> Dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -363,6 +1747,14 @@ def _metrics_from_vllm_latency_json(obj: Dict[str, Any]) -> Dict[str, float]:
 
     vLLM JSON schema (as of vllm/benchmarks/latency.py):
       {"avg_latency": float, "latencies": [...], "percentiles": {"10": float, ...}}
+
+    Per spec §3.1, the AMMO sweep additionally emits per-bucket prefill/decode
+    timing harvested from ``RequestOutput.metrics``:
+      ``prefill_avg_s``, ``decode_avg_s``, ``prefill_p50_s``, ``decode_p50_s``,
+      ``decode_share_of_e2e``.
+    These propagate into the metrics dict so downstream consumers
+    (``_build_label_result_entry`` and ``e2e_latency_results.json``) can
+    surface them as top-of-row siblings to ``batch_size`` / ``improvement_pct``.
     """
     out: Dict[str, float] = {}
     avg = obj.get("avg_latency")
@@ -373,6 +1765,17 @@ def _metrics_from_vllm_latency_json(obj: Dict[str, Any]) -> Dict[str, float]:
         for k, v in percentiles.items():
             if isinstance(k, str) and k.isdigit() and isinstance(v, (int, float)):
                 out[f"p{k}_s"] = float(v)
+    # New: pass-through prefill/decode timing fields when present + numeric.
+    for key in (
+        "prefill_avg_s",
+        "decode_avg_s",
+        "prefill_p50_s",
+        "decode_p50_s",
+        "decode_share_of_e2e",
+    ):
+        v = obj.get(key)
+        if isinstance(v, (int, float)):
+            out[key] = float(v)
     return out
 
 
@@ -397,12 +1800,99 @@ def _pick_archive_path(path: Path, run_id: str) -> Path:
     raise SystemExit(f"Failed to pick unique archive name for {path}")
 
 
+# ---------------------------------------------------------------------------
+# Layout v2: round-scoped path resolution
+# ---------------------------------------------------------------------------
+#
+# Spec: docs/superpowers/specs/2026-05-12-ammo-artifact-layout-design.md
+# Reference: ai_cli_session/.claude/skills/ammo/references/artifact-layout.md
+#
+# v2 layout is detected by filesystem presence of `rounds/` under
+# {artifact_dir}. When v2: sweep output goes to rounds/{N}/sweeps/{slot}/,
+# and archive moves to rounds/{N}/_archive/{slot}_{ts}/.
+# When NOT v2 (old campaigns): legacy --out-name fallback applies.
+
+def _is_v2_layout(artifact_dir: Path) -> bool:
+    """Return True iff `{artifact_dir}/rounds/` exists (filesystem-only check).
+
+    No coupling to state.json["schema_version"]. Layout is purely structural.
+    """
+    return (artifact_dir / "rounds").is_dir()
+
+
+def _read_current_round_from_state(artifact_dir: Path) -> int:
+    """Read `campaign.current_round` from state.json. Defaults to 1 if missing."""
+    state_path = artifact_dir / "state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        return int(state["campaign"]["current_round"])
+    except (FileNotFoundError, KeyError, json.JSONDecodeError, TypeError, ValueError):
+        return 1
+
+
+def _resolve_sweep_out_name(args, artifact_dir: Path) -> str:
+    """Resolve the sweep `out_name` (relative to artifact_dir) per spec §Path Resolution.
+
+    Resolution logic (in order):
+      1. `--round N --slot SLOT`            -> "rounds/{N}/sweeps/{SLOT}"
+      2. `--round N` only                   -> SystemExit (slot required)
+      3. `--slot SLOT` only (no --round)    -> read current_round from state.json
+      4. `--_out-root` set (child run)      -> bypass entirely (caller uses _out_root)
+      5. `--out-name` explicitly set on a v2 layout (no --round/--slot) ->
+         hard error pointing to --round/--slot
+      6. v1 (legacy) layout                 -> return args.out_name unchanged
+
+    Returns a path string relative to artifact_dir.
+    """
+    # Child run: caller passes --_out-root directly; no resolution needed.
+    if getattr(args, "_out_root", None):
+        return getattr(args, "out_name", "e2e_latency")
+
+    round_ = getattr(args, "round", None)
+    slot = getattr(args, "slot", None)
+
+    if round_ is not None and slot is not None:
+        return f"rounds/{round_}/sweeps/{slot}"
+    if round_ is not None and slot is None:
+        raise SystemExit(
+            "ERROR: --round requires --slot. Pass --slot baseline | profiling | opt/{op_id} | "
+            "integration | golden_capture (see references/artifact-layout.md)."
+        )
+    if slot is not None:
+        # No --round given: derive from state.json.
+        if not _is_v2_layout(artifact_dir):
+            raise SystemExit(
+                f"ERROR: --slot was passed but {artifact_dir}/rounds/ does not exist. "
+                "Either run new_target.py to scaffold v2, or omit --slot for legacy mode."
+            )
+        n = _read_current_round_from_state(artifact_dir)
+        return f"rounds/{n}/sweeps/{slot}"
+
+    # Neither --round nor --slot given.
+    out_name = getattr(args, "out_name", "e2e_latency")
+    if _is_v2_layout(artifact_dir) and out_name != "e2e_latency":
+        # v2 layout + non-default --out-name => caller is using the removed flag.
+        raise SystemExit(
+            f"ERROR: --out-name is removed for v2 layouts. "
+            f"Use --round N --slot <baseline|profiling|opt/{{op_id}}|integration|golden_capture> instead. "
+            f"See references/artifact-layout.md for path resolution rules."
+        )
+    # Legacy (v1) artifact dir: default out_name fallback applies.
+    return out_name
+
+
 def _prepare_out_root(
     *,
     artifact_dir: Path,
     out_name: str,
     overwrite: bool,
 ) -> Path:
+    """Create/clean the sweep output root.
+
+    For v2 paths (`out_name` matches "rounds/{N}/sweeps/{slot}..."), existing
+    contents are archived to `rounds/{N}/_archive/{slot}_{ts}/`. For legacy
+    out_names, archive is colocated with the original (legacy behavior).
+    """
     out_root = artifact_dir / out_name
     if out_root.exists() and any(out_root.iterdir()):
         if overwrite:
@@ -410,11 +1900,287 @@ def _prepare_out_root(
             shutil.rmtree(out_root, ignore_errors=True)
         else:
             run_id = _utc_run_id()
-            archived = _pick_archive_path(out_root, run_id)
+            archived = _pick_v2_archive_path(artifact_dir, out_name, run_id)
+            if archived is None:
+                # Legacy fallback: colocated archive with timestamp suffix.
+                archived = _pick_archive_path(out_root, run_id)
             print(f"Archiving existing output dir: {out_root} -> {archived}")
+            archived.parent.mkdir(parents=True, exist_ok=True)
             out_root.replace(archived)
     out_root.mkdir(parents=True, exist_ok=True)
     return out_root
+
+
+def _v2_profiling_dir(out_root: Path, kind: str) -> Path:
+    """Return the v2 sibling profiling path for `kind`.
+
+    For v2 sweep paths (`{artifact}/rounds/{N}/sweeps/{slot}/...`) returns
+    `{artifact}/rounds/{N}/profiling/{kind}/`. For legacy out_roots (no
+    `rounds/{N}/sweeps/` ancestors) falls back to `out_root / kind`. New AMMO
+    campaigns use `nsys` and targeted `ncu`; other kinds are compatibility or
+    manual fallback paths.
+    """
+    parts = out_root.parts
+    # Find a "rounds/{N}/sweeps" segment in the path so we can hop to the
+    # round-scoped profiling sibling.
+    for i in range(len(parts) - 2):
+        if parts[i] == "rounds" and parts[i + 2] == "sweeps":
+            round_num = parts[i + 1]
+            # Reconstruct the artifact root = parts[:i].
+            artifact_root = Path(*parts[:i]) if i > 0 else Path(parts[0])
+            return artifact_root / "rounds" / round_num / "profiling" / kind
+    # Legacy fallback: colocate inside the sweep output.
+    return out_root / kind
+
+
+def _pick_v2_archive_path(artifact_dir: Path, out_name: str, run_id: str):
+    """If `out_name` is a v2 sweep path, return rounds/{N}/_archive/{slot}_{run_id}/.
+
+    Returns None for legacy paths so the caller falls back to colocated archive.
+    `out_name` shape: "rounds/{N}/sweeps/{slot...}".
+    """
+    parts = Path(out_name).parts
+    if len(parts) >= 4 and parts[0] == "rounds" and parts[2] == "sweeps":
+        round_num = parts[1]
+        # slot may be multi-segment (e.g. opt/op007); flatten to a single name.
+        slot_segments = parts[3:]
+        slot_name = "_".join(slot_segments) if slot_segments else "unknown"
+        archive_dir = artifact_dir / "rounds" / round_num / "_archive"
+        base = archive_dir / f"{slot_name}_{run_id}"
+        if not base.exists():
+            return base
+        for i in range(1, 1000):
+            cand = archive_dir / f"{slot_name}_{run_id}:{i}"
+            if not cand.exists():
+                return cand
+        raise SystemExit(f"Failed to pick unique v2 archive name under {archive_dir}")
+    return None
+
+
+def _hang_stale_limit_s(
+    *, input_len: int, output_len: int, batch_size: int, base_s: int
+) -> int:
+    """Phase-gated staleness threshold (seconds) for the hang watchdog.
+
+    The child rewrites its status file every ~5s DURING warmup/benchmark, but the
+    genuine in-engine hang wedges inside a single ``generate()`` that never
+    returns — so the status freezes and stays frozen. The threshold must exceed
+    the longest LEGITIMATE single-iteration time for the bucket (one warmup or
+    timed generate) with margin, so a slow-but-healthy heavy bucket is not
+    false-killed. Heavy prefill / large batch make one iteration take many
+    seconds, so widen for those; the real hang sits frozen for minutes, far past
+    any of these. Mirrors the values validated live on the bs64/long-prefill
+    shapes during the PR #45717 sweep.
+    """
+    s = int(base_s)
+    if input_len >= 100000:
+        s = max(s, 360)
+    if batch_size >= 64:
+        s = max(s, 360)
+    if output_len >= 512:
+        s += 60
+    return s
+
+
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """Best-effort: SIGTERM then SIGKILL the child's whole process group.
+
+    The child is launched with ``start_new_session=True`` so it leads its own
+    process group (PGID == child PID); vLLM's EngineCore subprocesses inherit
+    that group, so killing the group reaps them too — no kill-by-name (which
+    would be unsafe in a shared host) and no per-PID hunting. Falls back to a
+    plain proc kill if the group signal is unavailable.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        pgid = None
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if proc.poll() is not None:
+            return
+        try:
+            if pgid is not None:
+                os.killpg(pgid, sig)
+            else:
+                proc.send_signal(sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.wait(timeout=10)
+            return
+        except Exception:
+            continue
+
+
+def _run_cmd_streaming_watchdog(
+    cmd: List[str],
+    *,
+    env: Dict[str, str],
+    cwd: Optional[Path],
+    timeout_s: int,
+    log_path: Path,
+    heartbeat_s: int,
+    status_path: Path,
+    bucket_meta: Dict[str, Dict[str, int]],
+    base_stale_s: int,
+) -> Dict[str, Any]:
+    """Like ``_run_cmd_streaming`` but kills the child's process GROUP when its
+    status file goes stale past the phase-gated threshold while it is wedged
+    inside ``generate()`` (the per-bucket deadline cannot catch that — it is only
+    checked BETWEEN generate() calls).
+
+    Returns the same dict as ``_run_cmd_streaming`` plus ``hung`` (bool) and
+    ``wedged_tag`` (the bucket tag that was frozen when we killed, or ""). Only
+    used when ``--hang-watchdog`` is set; the model-load phase (status frozen on
+    a NON warmup/benchmark phase, or no status yet) uses a generous grace so a
+    legitimately long load is never mistaken for a hang.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    start = datetime.now(timezone.utc)
+    hung = False
+    wedged_tag = ""
+    # Grace for the model-load / import phase, where the status legitimately does
+    # not tick (one big blocking LLM() construction). Generous on purpose.
+    load_grace_s = max(900, int(timeout_s) if timeout_s and timeout_s > 0 else 0)
+
+    with open(log_path, "w", encoding="utf-8", buffering=1) as log_f:
+        log_f.write(f"=== cmd ===\n{_format_cmd_for_md(cmd, {})}\n")
+        log_f.write(f"=== start (hang-watchdog) ===\n{start.isoformat()}\n")
+        log_f.flush()
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,  # own process group: killpg reaps EngineCore too
+        )
+
+        sel = selectors.DefaultSelector()
+        if proc.stdout is not None:
+            sel.register(proc.stdout, selectors.EVENT_READ)
+
+        last_output_t = time.time()
+        last_status_mono = time.time()      # wall-clock when status last advanced
+        last_status_update = None           # the status file's own last_update string
+        while True:
+            if proc.poll() is not None:
+                break
+
+            now = time.time()
+            if timeout_s > 0 and (now - start.timestamp()) > timeout_s:
+                _kill_process_group(proc)
+                break
+
+            # --- staleness watchdog (the reason this variant exists) ---
+            phase = None
+            cur_tag = ""
+            st = None
+            stale_for = now - last_status_mono
+            try:
+                if status_path.exists():
+                    st = _read_json(status_path)
+                    upd = st.get("last_update")
+                    if upd != last_status_update:
+                        last_status_update = upd
+                        last_status_mono = now
+                        stale_for = 0.0
+                    phase = st.get("phase")
+                    il = int(st.get("input_len") or 0)
+                    ol = int(st.get("output_len") or 0)
+                    bs = int(st.get("batch_size") or 0)
+                    cur_tag = st.get("tag") or _meta_tag(bucket_meta, il, ol, bs)
+            except Exception:
+                phase = None  # unreadable status: fall through to load grace
+            # Only phases where the child SHOULD be ticking get the tight limit;
+            # everything else (model load, import, correctness) gets load grace.
+            if phase in ("warmup", "benchmark", "bucket_start"):
+                limit = _hang_stale_limit_s(
+                    input_len=int((st or {}).get("input_len") or 0),
+                    output_len=int((st or {}).get("output_len") or 0),
+                    batch_size=int((st or {}).get("batch_size") or 0),
+                    base_s=base_stale_s,
+                )
+            else:
+                limit = load_grace_s
+            if stale_for >= limit and limit > 0:
+                hung = True
+                wedged_tag = cur_tag
+                msg = (
+                    f"[hang-watchdog] status frozen {stale_for:.0f}s >= {limit}s "
+                    f"(phase={phase}, bucket={wedged_tag or '?'}) — killing child process group\n"
+                )
+                sys.stdout.write(msg)
+                sys.stdout.flush()
+                log_f.write(msg)
+                log_f.flush()
+                _kill_process_group(proc)
+                break
+
+            events = sel.select(timeout=0.25)
+            if events:
+                for key, _mask in events:
+                    stream = key.fileobj
+                    line = stream.readline()
+                    if not line:
+                        continue
+                    last_output_t = time.time()
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    log_f.write(line)
+                    log_f.flush()
+
+            now = time.time()
+            if heartbeat_s > 0 and (now - last_output_t) >= heartbeat_s:
+                hb = (
+                    f"[heartbeat] still running; elapsed={(now - start.timestamp()):.0f}s; "
+                    f"status_stale={stale_for:.0f}s phase={phase}\n"
+                )
+                sys.stdout.write(hb)
+                sys.stdout.flush()
+                log_f.write(hb)
+                log_f.flush()
+                last_output_t = now
+
+        try:
+            sel.close()
+        except Exception:
+            pass
+
+        try:
+            rc = proc.wait(timeout=10)
+        except Exception:
+            rc = proc.returncode if proc.returncode is not None else -9
+        end = datetime.now(timezone.utc)
+        log_f.write(
+            f"\n=== end (hang-watchdog) ===\n{end.isoformat()}\n"
+            f"returncode={rc} hung={hung} wedged_tag={wedged_tag}\n"
+        )
+        log_f.flush()
+
+    return {
+        "ok": (rc == 0) and not hung,
+        "returncode": rc,
+        "hung": hung,
+        "wedged_tag": wedged_tag,
+        "start_time": start.isoformat(),
+        "end_time": end.isoformat(),
+        "duration_s": (end - start).total_seconds(),
+    }
+
+
+def _meta_tag(bucket_meta: Dict[str, Dict[str, int]], il: int, ol: int, bs: int) -> str:
+    """Reverse-lookup a bucket tag from (il, ol, bs) using the parent's planned
+    map, so the watchdog can name the wedged bucket even if the child status
+    omits an explicit tag. Returns "" if no match."""
+    for tag, m in (bucket_meta or {}).items():
+        if int(m.get("input_len", -1)) == il and int(m.get("output_len", -1)) == ol \
+                and int(m.get("batch_size", -1)) == bs:
+            return tag
+    return ""
 
 
 def _run_cmd_streaming(
@@ -595,43 +2361,45 @@ def _build_cli_equivalent_args_for_inproc(
 # ---- GSM8K helpers (adapted from tests/evals/gsm8k/gsm8k_eval.py) ----
 
 _GSM8K_SUBSET_PATH = Path(__file__).parent.parent / "data" / "gsm8k_subset.json"
+_GSM8K_FULL_PATH = Path(__file__).parent.parent / "data" / "gsm8k_full.json"
 _INVALID_ANSWER = -9999999
 
 
-def _download_and_cache_file(url: str, filename: str | None = None) -> str:
-    import requests as _requests_mod  # Lazy: only needed for >200 question fallback
-    if filename is None:
-        filename = os.path.join("/tmp", url.split("/")[-1])
-    if os.path.exists(filename):
-        return filename
-    print(f"Downloading from {url} to {filename}")
-    response = _requests_mod.get(url, stream=True)
-    response.raise_for_status()
-    with open(filename, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024):
-            f.write(chunk)
-    return filename
-
-
-def _read_jsonl(filename: str):
-    with open(filename) as fin:
-        for line in fin:
-            if not line.startswith("#"):
-                yield json.loads(line)
-
-
 def _load_gsm8k_data(num_questions: int) -> Tuple[List[dict], List[dict]]:
-    """Load GSM8K data — bundled subset first, GitHub fallback if needed."""
+    """Load bundled GSM8K data — fail-loud if the requested split is missing.
+
+    Two-tier lookup:
+      * ``num_questions <= 200``: prefer ``gsm8k_subset.json`` (200 test items).
+      * Otherwise: require ``gsm8k_full.json`` (1319 test items). No GitHub
+        download fallback — AMMO sessions run in a sandbox with no outbound
+        network access, so a silent fallback is structurally broken.
+
+    Raises:
+        FileNotFoundError: when the bundled file needed for ``num_questions``
+            does not exist. The message names the expected path so the fix is
+            obvious (re-bundle the file).
+    """
     if num_questions <= 200 and _GSM8K_SUBSET_PATH.exists():
         with open(_GSM8K_SUBSET_PATH) as f:
             data = json.load(f)
         return data["train"], data["test"][:num_questions]
-    # Fallback to full download
-    train_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl"
-    test_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
-    train_file = _download_and_cache_file(train_url)
-    test_file = _download_and_cache_file(test_url)
-    return list(_read_jsonl(train_file)), list(_read_jsonl(test_file))
+    if _GSM8K_FULL_PATH.exists():
+        with open(_GSM8K_FULL_PATH) as f:
+            data = json.load(f)
+        test = data["test"]
+        if num_questions > len(test):
+            raise FileNotFoundError(
+                f"Requested {num_questions} GSM8K questions but bundled "
+                f"{_GSM8K_FULL_PATH} only contains {len(test)} test items. "
+                "Re-bundle the dataset or reduce --correctness-num-questions."
+            )
+        return data["train"], test[:num_questions]
+    raise FileNotFoundError(
+        f"No bundled GSM8K data covers {num_questions} questions. "
+        f"Expected {_GSM8K_FULL_PATH} (for num_questions>200) or "
+        f"{_GSM8K_SUBSET_PATH} (for num_questions<=200). "
+        "AMMO sessions cannot download from GitHub — re-bundle the file."
+    )
 
 
 def _get_answer_value(answer_str: str) -> int:
@@ -699,6 +2467,54 @@ def _score_gsm8k_predictions(outputs, labels: List[int]) -> Tuple[List[int], flo
     return preds, accuracy
 
 
+def _build_correctness_child_flags(
+    *,
+    capture: bool,
+    verify: bool,
+    num_questions: int,
+    tolerance_pct: float,
+) -> List[str]:
+    """Build the hidden child-only correctness flags for parent→child dispatch.
+
+    Returns an empty list when neither capture nor verify is requested. When
+    at least one is set, includes both ``--_correctness-num-questions`` and
+    ``--_correctness-tolerance-pct`` flag/value pairs with their stringified
+    arguments adjacent (preserves the order _build_child_cmd expects). This
+    is a pure function so tests can exercise it without touching main().
+    """
+    if not (capture or verify):
+        return []
+    return [
+        "--_correctness-num-questions", str(num_questions),
+        "--_correctness-tolerance-pct", str(tolerance_pct),
+    ]
+
+
+def _format_correctness_message(
+    verdict: str,
+    *,
+    opt_acc: float,
+    opt_correct_count: int,
+    n: int,
+    threshold: float,
+    baseline_acc: float,
+    tolerance_pct: float,
+) -> str:
+    """Build the human-readable PASS/FAIL verdict message for Gate 5.1b.
+
+    Matches the format parsed by eval/scripts/parse_artifacts.py Pattern 0:
+      "{PASS|FAIL}: opt_accuracy X% (A/B) {>=|<} threshold Y% "
+      "(baseline Z% - Tpp tolerance)"
+    """
+    op = ">=" if verdict == "PASS" else "<"
+    return (
+        f"{verdict}: opt_accuracy {opt_acc * 100:.1f}% "
+        f"({opt_correct_count}/{n}) {op} threshold {threshold * 100:.1f}% "
+        f"(baseline {baseline_acc * 100:.1f}% - "
+        f"{tolerance_pct:.1f}pp tolerance)"
+    )
+
+
 def _compare_correctness(
     *,
     golden_refs: List[Dict[str, Any]],
@@ -706,12 +2522,16 @@ def _compare_correctness(
     labels: Optional[List[int]],
     baseline_preds: Optional[List[int]],
     opt_preds: Optional[List[int]],
+    tolerance_pct: float = 1.0,
 ) -> Dict[str, Any]:
     """Compare optimized outputs against golden references (Gate 5.1b v2).
 
-    Single accuracy gate: ``opt_accuracy >= baseline_accuracy``.
+    Verdict: ``opt_accuracy >= baseline_accuracy - tolerance_pct/100``.
+    ``tolerance_pct=0.0`` recovers the legacy strict behavior; the default
+    ``1.0`` pp allows ~1% drift (e.g. ~13 questions at N=1319) before FAIL.
     Token-level data is computed as diagnostics only (never affects verdict).
     """
+    tolerance_pct = float(tolerance_pct)
     num_questions = min(len(golden_refs), len(opt_outputs))
 
     # ---- Edge case: empty question set ----
@@ -723,6 +2543,9 @@ def _compare_correctness(
             "accuracy_delta": 0.0,
             "baseline_correct_count": 0, "optimized_correct_count": 0,
             "questions_lost": [], "questions_gained": [],
+            "tolerance_pct": tolerance_pct,
+            "threshold": 0.0,
+            "message": "FAIL: no questions to compare (num_questions=0)",
             "diagnostics": {
                 "divergent_questions": 0,
                 "first_divergence_positions_p50": -1,
@@ -741,6 +2564,9 @@ def _compare_correctness(
             "accuracy_delta": 0.0,
             "baseline_correct_count": 0, "optimized_correct_count": 0,
             "questions_lost": [], "questions_gained": [],
+            "tolerance_pct": tolerance_pct,
+            "threshold": 0.0,
+            "message": "FAIL: accuracy gate requires labels, baseline_preds, and opt_preds",
             "diagnostics": {
                 "divergent_questions": 0,
                 "first_divergence_positions_p50": -1,
@@ -775,6 +2601,9 @@ def _compare_correctness(
             "baseline_correct_count": 0,
             "optimized_correct_count": len(opt_correct),
             "questions_lost": [], "questions_gained": questions_gained,
+            "tolerance_pct": tolerance_pct,
+            "threshold": 0.0,
+            "message": "FAIL: baseline accuracy is 0% (infrastructure error)",
             "infrastructure_error": True,
             "infrastructure_message": "Baseline accuracy is 0% — model cannot solve any GSM8K questions; environment suspect.",
             "diagnostics": {
@@ -786,8 +2615,9 @@ def _compare_correctness(
             },
         }
 
-    # ---- Verdict: opt_accuracy >= baseline_accuracy ----
-    verdict = "PASS" if opt_acc >= baseline_acc else "FAIL"
+    # ---- Verdict: opt_accuracy >= baseline_accuracy - tolerance_pct/100 ----
+    threshold = baseline_acc - (tolerance_pct / 100.0)
+    verdict = "PASS" if opt_acc >= threshold else "FAIL"
 
     # ---- Token-level diagnostics (informational only) ----
     first_divergence_positions: List[int] = []
@@ -824,6 +2654,16 @@ def _compare_correctness(
 
     churn_rate = round((len(questions_lost) + len(questions_gained)) / n, 4) if n else 0.0
 
+    message = _format_correctness_message(
+        verdict,
+        opt_acc=opt_acc,
+        opt_correct_count=len(opt_correct),
+        n=n,
+        threshold=threshold,
+        baseline_acc=baseline_acc,
+        tolerance_pct=tolerance_pct,
+    )
+
     return {
         "gate": "5.1b",
         "verdict": verdict,
@@ -835,6 +2675,9 @@ def _compare_correctness(
         "optimized_correct_count": len(opt_correct),
         "questions_lost": questions_lost,
         "questions_gained": questions_gained,
+        "tolerance_pct": tolerance_pct,
+        "threshold": round(threshold, 4),
+        "message": message,
         "diagnostics": {
             "divergent_questions": divergent_questions,
             "first_divergence_positions_p50": fdp_p50,
@@ -861,7 +2704,11 @@ def _run_inproc_latency_sweep_child(
     torch_profile: bool = False,
     capture_golden_refs: bool = False,
     verify_correctness: bool = False,
-    correctness_num_questions: int = 200,
+    correctness_num_questions: int = 1319,
+    correctness_tolerance_pct: float = 1.0,
+    launch_id: int = 1,
+    total_launches: int = 1,
+    skip_tags: "frozenset[str] | set[str] | None" = None,
 ) -> int:
     """Child-mode runner: load model once, benchmark all buckets.
 
@@ -884,6 +2731,9 @@ def _run_inproc_latency_sweep_child(
     child_log_path = logs_dir / f"{label}_child.log"
 
     def _update_status(phase: str, *, batch_size: Optional[int] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+        # Rank-0-gated: non-rank-0 SPMD ranks must not race on status JSON writes.
+        if not _IS_RANK0:
+            return
         payload: Dict[str, Any] = {
             "label": label,
             "phase": phase,
@@ -891,6 +2741,10 @@ def _run_inproc_latency_sweep_child(
             "pid": os.getpid(),
             "host": socket.gethostname(),
             "last_update": datetime.now(timezone.utc).isoformat(),
+            # Per-launch progress (AMMO UI reads these):
+            "launch_id": launch_id,
+            "total_launches": total_launches,
+            "is_warmup": (total_launches >= 2 and launch_id == 1),
         }
         if extra:
             payload.update(extra)
@@ -898,7 +2752,7 @@ def _run_inproc_latency_sweep_child(
 
     # Emit status/logs *before* heavy imports so supervisors can tell we're alive.
     _update_status("starting_import", extra={"model_id": model_id})
-    with open(child_log_path, "a", encoding="utf-8", buffering=1) as child_log:
+    with _rank0_open_log(child_log_path, "a") as child_log:
         child_log.write(f"=== child start ({label}) ===\n{datetime.now(timezone.utc).isoformat()}\n")
         child_log.write(f"model_id={model_id} tp={tp} max_model_len={max_model_len}\n")
         child_log.flush()
@@ -920,8 +2774,8 @@ def _run_inproc_latency_sweep_child(
         # Import errors are common when not running under the vLLM venv; make it explicit.
         err = f"Failed to import vLLM benchmark deps in child runner: {e}"
         _update_status("import_failed", extra={"error": err})
-        _write_text(out_root / f"child_{label}_import_error.log", err + "\n" + traceback.format_exc())
-        with open(child_log_path, "a", encoding="utf-8", buffering=1) as child_log:
+        _rank0_write_text(out_root / f"child_{label}_import_error.log", err + "\n" + traceback.format_exc())
+        with _rank0_open_log(child_log_path, "a") as child_log:
             child_log.write(err + "\n")
             child_log.write(traceback.format_exc() + "\n")
         return 2
@@ -951,7 +2805,7 @@ def _run_inproc_latency_sweep_child(
     if getattr(args, "profile", False) and not nsys_profile and not torch_profile:
         # vllm bench latency --profile is a single-run action; sweeping doesn't make sense.
         # (When nsys_profile or torch_profile is active, we handle profiler start/stop per-bucket ourselves.)
-        _write_text(out_root / f"child_{label}_error.log", "Refusing to sweep with --profile enabled.\n")
+        _rank0_write_text(out_root / f"child_{label}_error.log", "Refusing to sweep with --profile enabled.\n")
         _update_status("error", extra={"error": "Refusing to sweep with --profile enabled."})
         return 2
 
@@ -981,14 +2835,58 @@ def _run_inproc_latency_sweep_child(
             ea_dict[_cfg_key] = _strip_none_recursive(ea_dict[_cfg_key])
     # Configure torch profiler on the engine when --torch-profile is active.
     if torch_profile:
-        torch_profile_base = str(out_root / "torch_profile")
+        # v2 layout: traces go to rounds/{N}/profiling/torch_profile/, sibling
+        # to the sweep output. Legacy: out_root / torch_profile/.
+        torch_profile_base = str(_v2_profiling_dir(out_root, "torch_profile"))
         Path(torch_profile_base).mkdir(parents=True, exist_ok=True)
         ea_dict["profiler_config"] = {
             "profiler": "torch",
             "torch_profiler_dir": torch_profile_base,
         }
+    selected_step_buckets = [b for b in buckets if _is_nsys_selected_step_bucket(b)]
+    if selected_step_buckets:
+        # _expand_nsys_profile_buckets floors ONE child-wide capture window across all
+        # selected-step buckets, so this is a cheap invariant rather than a constraint:
+        # a single delay_iterations serves every capture point (the floor clears prefill
+        # for the deepest-prefill bucket, and a larger-than-needed window only helps).
+        windows = {int(b["nsys_capture_window_output_len"]) for b in selected_step_buckets}
+        if len(windows) != 1:
+            raise SystemExit(
+                "Selected-step nsys capture requires one capture window per child; "
+                f"got windows={sorted(windows)} (expected a single child-wide window from "
+                "_selected_step_effective_window)"
+            )
+        _apply_selected_step_profiler_config(ea_dict, selected_step_buckets[0])
+    # Per spec §3.1 step 1, force `disable_log_stats=False` so vLLM v1 wires
+    # `RequestOutput.metrics` (prefill/decode timestamps) into outputs. The
+    # default in `LLM(...)` is True, which would silently hide the per-request
+    # timing we need for f_e2e computation.
+    ea_dict["disable_log_stats"] = False
     llm = LLM(**ea_dict)
     _update_status("model_loaded")
+
+    # SPMD parallelism context (spec §4.3). Under DP=1 this is a no-op path:
+    # dp_size=1, dp_rank=0, error_flag is None and no dist.barrier() calls.
+    dp_size = int(getattr(args, "data_parallel_size", 1))
+    tp_size = int(getattr(args, "tensor_parallel_size", 1))
+    pp_size = int(getattr(args, "pipeline_parallel_size", 1))
+    dp_rank = _GLOBAL_RANK // max(1, tp_size * pp_size)
+    dist = None  # type: ignore[assignment]
+    error_flag = None
+    if dp_size > 1:
+        import torch as _torch
+        import torch.distributed as dist  # type: ignore[no-redef]
+        error_flag = _torch.tensor([0], dtype=_torch.int32, device="cuda")
+        # Rank-layout drift check: if vLLM reorders ranks (tp x pp x dp vs
+        # dp x pp x tp) our partitioning assumptions break. Fail loud now.
+        try:
+            vllm_dp_rank = int(llm.vllm_config.parallel_config.data_parallel_rank)
+        except Exception:
+            vllm_dp_rank = dp_rank  # vLLM version without this attribute
+        assert vllm_dp_rank == dp_rank, (
+            f"rank-layout convention drift: computed dp_rank={dp_rank} "
+            f"!= vllm.parallel_config.data_parallel_rank={vllm_dp_rank}"
+        )
 
     # ---- Phase 1: Correctness (GSM8K greedy decode) ----
     if capture_golden_refs or verify_correctness:
@@ -997,6 +2895,16 @@ def _run_inproc_latency_sweep_child(
         _update_status("correctness_phase_start")
         json_dir = out_root / "json"
         json_dir.mkdir(parents=True, exist_ok=True)
+
+        # DP precondition: every rank needs at least one real prompt.
+        _check_correctness_dp_precondition(correctness_num_questions, dp_size)
+
+        # verdict_code is broadcast at the end of this block so all ranks
+        # return together: 0=PASS, 3=FAIL, 4=infra error.
+        verdict_code_tensor: Optional[Any] = None
+        if dp_size > 1:
+            verdict_code_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
+
         try:
             prompts, gsm8k_labels = _build_gsm8k_prompts(num_questions=correctness_num_questions)
             correctness_sp = _CorrectnessSP(
@@ -1004,29 +2912,64 @@ def _run_inproc_latency_sweep_child(
                 stop=["Question", "Assistant:", "<|separator|>"],
                 seed=42, logprobs=5,
             )
-            print(f"[correctness] Running GSM8K greedy decode: {len(prompts)} questions")
+
+            # Partition prompts across DP ranks — each rank generates only
+            # its own share. The final gather + stitch reassembles canonical
+            # order on all ranks (but only rank 0 scores/writes).
+            if dp_size > 1:
+                my_prompts = _partition_prompts(
+                    prompts, dp_size=dp_size, dp_rank=dp_rank, input_len=1,
+                )
+                _rank0_log(
+                    f"[correctness] Running GSM8K greedy decode: "
+                    f"{len(prompts)} questions partitioned across dp={dp_size}"
+                )
+            else:
+                my_prompts = prompts
+                print(f"[correctness] Running GSM8K greedy decode: {len(prompts)} questions")
+
             t0 = time.time()
-            outputs = llm.generate(prompts, sampling_params=correctness_sp, use_tqdm=False)
+            my_outputs = llm.generate(my_prompts, sampling_params=correctness_sp, use_tqdm=False)
             duration = time.time() - t0
-            print(f"[correctness] Generation done in {duration:.1f}s")
+            _rank0_log(f"[correctness] Generation done in {duration:.1f}s")
+
+            # Gather per-rank outputs → canonical order on every rank.
+            if dp_size > 1:
+                import torch.distributed as _dist_cp
+                from vllm.distributed.parallel_state import get_world_group  # type: ignore
+                cpu_group = get_world_group().cpu_group
+                gathered: List[Any] = [None] * dp_size
+                _dist_cp.all_gather_object(gathered, my_outputs, group=cpu_group)
+                outputs = _stitch_gathered(gathered, len(prompts), dp_size)
+            else:
+                outputs = my_outputs
 
             serialized = _serialize_correctness_outputs(outputs)
             preds, accuracy = _score_gsm8k_predictions(outputs, gsm8k_labels)
             gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"
 
-            if capture_golden_refs:
-                # Self-consistency check: run prompts a second time
-                print("[correctness] Running self-consistency check...")
-                outputs2 = llm.generate(prompts, sampling_params=correctness_sp, use_tqdm=False)
-                serialized2 = _serialize_correctness_outputs(outputs2)
-                deterministic = all(
-                    s1["token_ids"] == s2["token_ids"]
-                    for s1, s2 in zip(serialized, serialized2)
-                )
-                if not deterministic:
-                    print("[correctness] WARNING: Self-consistency check FAILED — environment is non-deterministic.")
+            # Rank 0 writes golden/opt artifacts + runs the comparator.
+            if _IS_RANK0 and capture_golden_refs:
+                # Self-consistency check is only meaningful under DP=1.
+                # Under DP>1, running llm.generate(prompts) on rank 0 alone
+                # deadlocks — other ranks have already moved on. Skip it
+                # and record deterministic=True (we already partitioned and
+                # gathered deterministically on the first pass).
+                if dp_size == 1:
+                    print("[correctness] Running self-consistency check...")
+                    outputs2 = llm.generate(prompts, sampling_params=correctness_sp, use_tqdm=False)
+                    serialized2 = _serialize_correctness_outputs(outputs2)
+                    deterministic = all(
+                        s1["token_ids"] == s2["token_ids"]
+                        for s1, s2 in zip(serialized, serialized2)
+                    )
+                    if not deterministic:
+                        print("[correctness] WARNING: Self-consistency check FAILED — environment is non-deterministic.")
+                    else:
+                        print("[correctness] Self-consistency check PASSED — greedy decode is deterministic.")
                 else:
-                    print("[correctness] Self-consistency check PASSED — greedy decode is deterministic.")
+                    print("[correctness] Self-consistency check skipped under DP>1 (requires all-ranks re-run).")
+                    deterministic = True
 
                 golden_data = {
                     "metadata": {
@@ -1035,92 +2978,183 @@ def _run_inproc_latency_sweep_child(
                         "capture_duration_s": round(duration, 2), "gpu_name": gpu_name,
                         "deterministic": deterministic,
                         "baseline_preds": preds, "labels": gsm8k_labels,
+                        "dp_size": dp_size,
+                        # Informational only: tolerance is NOT enforced in the
+                        # metadata-mismatch check on resume — agents may tune
+                        # it per-campaign without re-capturing golden refs.
+                        "tolerance_pct": float(correctness_tolerance_pct),
                     },
                     "outputs": serialized,
                 }
                 golden_path = json_dir / "golden_refs.json"
-                _write_json(golden_path, golden_data)
+                _rank0_write_json(golden_path, golden_data)
                 print(f"[correctness] Golden refs saved to {golden_path}")
                 _update_status("correctness_done", extra={"accuracy": accuracy, "deterministic": deterministic})
 
             if verify_correctness:
-                golden_path = json_dir / "golden_refs.json"
-                if not golden_path.exists():
-                    print(f"[correctness] ERROR: golden_refs.json not found at {golden_path}")
-                    _update_status("correctness_error", extra={"error": "golden_refs.json not found"})
-                    return 4
-                golden_data = json.loads(golden_path.read_text(encoding="utf-8"))
-                golden_refs = golden_data["outputs"]
-                golden_meta = golden_data.get("metadata", {})
-                baseline_preds = golden_meta.get("baseline_preds")
-                golden_labels = golden_meta.get("labels")
+                # Verdict code starts at 0 (PASS). Non-rank-0 keeps 0 and
+                # receives the authoritative code from the MAX-reduce.
+                local_code = 0
+                if _IS_RANK0:
+                    golden_path = json_dir / "golden_refs.json"
+                    if not golden_path.exists():
+                        print(f"[correctness] ERROR: golden_refs.json not found at {golden_path}")
+                        _update_status("correctness_error", extra={"error": "golden_refs.json not found"})
+                        local_code = 4
+                    else:
+                        golden_data = json.loads(golden_path.read_text(encoding="utf-8"))
+                        golden_refs = golden_data["outputs"]
+                        golden_meta = golden_data.get("metadata", {})
+                        baseline_preds = golden_meta.get("baseline_preds")
+                        golden_labels = golden_meta.get("labels")
 
-                # Metadata mismatch detection (exit code 4)
-                golden_nq = golden_meta.get("num_questions")
-                if golden_nq is not None and golden_nq != correctness_num_questions:
-                    msg = (f"[correctness] ERROR: golden refs num_questions={golden_nq} "
-                           f"!= current num_questions={correctness_num_questions}. "
-                           "Re-capture golden refs with matching --correctness-num-questions.")
-                    print(msg)
-                    _update_status("correctness_error", extra={"error": msg})
-                    return 4
-                golden_mt = golden_meta.get("max_tokens")
-                if golden_mt is not None and golden_mt != 1024:
-                    msg = (f"[correctness] ERROR: golden refs max_tokens={golden_mt} "
-                           f"!= current max_tokens=1024. "
-                           "Re-capture golden refs with v2 settings.")
-                    print(msg)
-                    _update_status("correctness_error", extra={"error": msg})
-                    return 4
+                        # Metadata mismatch detection (exit code 4)
+                        golden_nq = golden_meta.get("num_questions")
+                        if golden_nq is not None and golden_nq != correctness_num_questions:
+                            msg = (f"[correctness] ERROR: golden refs num_questions={golden_nq} "
+                                   f"!= current num_questions={correctness_num_questions}. "
+                                   "Re-capture golden refs with matching --correctness-num-questions.")
+                            print(msg)
+                            _update_status("correctness_error", extra={"error": msg})
+                            local_code = 4
+                        else:
+                            golden_mt = golden_meta.get("max_tokens")
+                            if golden_mt is not None and golden_mt != 1024:
+                                msg = (f"[correctness] ERROR: golden refs max_tokens={golden_mt} "
+                                       f"!= current max_tokens=1024. "
+                                       "Re-capture golden refs with v2 settings.")
+                                print(msg)
+                                _update_status("correctness_error", extra={"error": msg})
+                                local_code = 4
+                            else:
+                                # GPU name mismatch warning
+                                golden_gpu = golden_meta.get("gpu_name", "")
+                                if golden_gpu and golden_gpu != gpu_name:
+                                    print(f"[correctness] WARNING: GPU mismatch — golden refs captured on '{golden_gpu}', current GPU is '{gpu_name}'")
 
-                # GPU name mismatch warning
-                golden_gpu = golden_meta.get("gpu_name", "")
-                if golden_gpu and golden_gpu != gpu_name:
-                    print(f"[correctness] WARNING: GPU mismatch — golden refs captured on '{golden_gpu}', current GPU is '{gpu_name}'")
+                                # Save opt outputs
+                                opt_path = json_dir / "opt_outputs.json"
+                                _rank0_write_json(opt_path, {"outputs": serialized})
 
-                # Save opt outputs
-                opt_path = json_dir / "opt_outputs.json"
-                _write_json(opt_path, {"outputs": serialized})
+                                # Run comparator
+                                verdict = _compare_correctness(
+                                    golden_refs=golden_refs, opt_outputs=serialized,
+                                    labels=golden_labels, baseline_preds=baseline_preds, opt_preds=preds,
+                                    tolerance_pct=correctness_tolerance_pct,
+                                )
+                                verdict["duration_s"] = round(duration, 2)
 
-                # Run comparator
-                verdict = _compare_correctness(
-                    golden_refs=golden_refs, opt_outputs=serialized,
-                    labels=golden_labels, baseline_preds=baseline_preds, opt_preds=preds,
-                )
-                verdict["duration_s"] = round(duration, 2)
+                                verdict_path = json_dir / "correctness_verdict.json"
+                                _rank0_write_json(verdict_path, verdict)
+                                print(f"[correctness] Verdict: {verdict['verdict']}")
+                                print(f"[correctness] Written to {verdict_path}")
 
-                verdict_path = json_dir / "correctness_verdict.json"
-                _write_json(verdict_path, verdict)
-                print(f"[correctness] Verdict: {verdict['verdict']}")
-                print(f"[correctness] Written to {verdict_path}")
+                                local_code = _verdict_to_code(verdict)
+                                if verdict.get("infrastructure_error"):
+                                    print(f"[correctness] {verdict.get('infrastructure_message', 'Infrastructure error')}")
+                                    _update_status("correctness_error", extra=verdict)
+                                elif local_code != 0:
+                                    _update_status("correctness_failed", extra=verdict)
+                                else:
+                                    _update_status("correctness_done", extra=verdict)
 
-                # Infrastructure error (baseline_accuracy=0) → exit code 4
-                if verdict.get("infrastructure_error"):
-                    print(f"[correctness] {verdict.get('infrastructure_message', 'Infrastructure error')}")
-                    _update_status("correctness_error", extra=verdict)
-                    return 4
+                # Broadcast the verdict code: all ranks return the same exit
+                # code so torchrun reports a unified result.
+                if dp_size > 1:
+                    assert verdict_code_tensor is not None
+                    verdict_code_tensor[0] = local_code
+                    import torch.distributed as _dist_vc
+                    _dist_vc.all_reduce(verdict_code_tensor, op=_dist_vc.ReduceOp.MAX)
+                    final_code = int(verdict_code_tensor.item())
+                else:
+                    final_code = local_code
 
-                if verdict["verdict"] != "PASS":
-                    _update_status("correctness_failed", extra=verdict)
-                    return 3  # Correctness FAIL — don't proceed to latency
-                _update_status("correctness_done", extra=verdict)
+                if final_code != 0:
+                    return final_code
 
         except Exception as e:
-            print(f"[correctness] ERROR: {type(e).__name__}: {e}")
-            traceback.print_exc()
+            _rank0_log(f"[correctness] ERROR: {type(e).__name__}: {e}")
+            if _IS_RANK0:
+                traceback.print_exc()
             _update_status("correctness_error", extra={"error": str(e)})
+            # Broadcast exception outcome so peer ranks also abort.
+            if dp_size > 1:
+                assert verdict_code_tensor is not None
+                verdict_code_tensor[0] = 4
+                import torch.distributed as _dist_exc
+                _dist_exc.all_reduce(verdict_code_tensor, op=_dist_exc.ReduceOp.MAX)
             return 4  # Infrastructure error
     # ---- End Phase 1 ----
 
+    _skip_tags = set(skip_tags or ())
     for bucket in buckets:
         b_input_len = bucket["input_len"]
         b_output_len = bucket["output_len"]
         bs = bucket["batch_size"]
         tag = _bucket_file_tag(bucket, buckets)
 
+        # Hang-watchdog resume: skip buckets the parent has already collected
+        # from a prior launch, plus any bucket that wedged the engine on a prior
+        # launch. The parent passes these via --_skip-tags so a relaunch does not
+        # redo completed work or re-trigger the same hang. A bucket that already
+        # has a valid raw JSON on disk needs no marker; for a wedged bucket with
+        # no JSON we drop a `skipped` runner.json so the parent's collection step
+        # stays deterministic (the row is reported as not-run, never fabricated).
+        if tag in _skip_tags:
+            if _IS_RANK0:
+                print(f"SKIP bucket {tag}: in --_skip-tags (done or wedged on a prior launch)", flush=True)
+                runner_json = json_dir / f"{label}_{tag}.runner.json"
+                raw_json = json_dir / f"{label}_{tag}.json"
+                if not raw_json.exists():
+                    _rank0_write_json(runner_json, {
+                        "ok": False,
+                        "skipped": True,
+                        "reason": "hang-watchdog: bucket skipped on relaunch (completed earlier or wedged the engine)",
+                        "label": label,
+                        "batch_size": bs,
+                        "input_len": b_input_len,
+                        "output_len": b_output_len,
+                    })
+            if dist is not None:
+                dist.barrier()
+            continue
+
+        # Skip buckets whose batch_size cannot be partitioned across all DP
+        # ranks (spec §4.3). Rank 0 writes a skip marker; all ranks call
+        # dist.barrier() to stay in lockstep before continuing.
+        if _should_skip_bucket(bs, dp_size):
+            skip_raw_json = json_dir / f"{label}_{tag}.json"
+            skip_runner_json = json_dir / f"{label}_{tag}.runner.json"
+            if _IS_RANK0:
+                print(
+                    f"SKIP bucket bs={bs}: batch_size < dp_size={dp_size} "
+                    f"(il={b_input_len}, ol={b_output_len})",
+                    flush=True,
+                )
+                _rank0_write_json(skip_raw_json, {
+                    "skipped": True,
+                    "reason": "batch_size < data_parallel_size",
+                    "batch_size": bs,
+                    "dp_size": dp_size,
+                    "input_len": b_input_len,
+                    "output_len": b_output_len,
+                })
+                _rank0_write_json(skip_runner_json, {
+                    "ok": True,
+                    "skipped": True,
+                    "label": label,
+                    "batch_size": bs,
+                    "input_len": b_input_len,
+                    "output_len": b_output_len,
+                    "reason": "batch_size < data_parallel_size",
+                })
+            if dist is not None:
+                dist.barrier()
+            continue
+
         # Validate per-bucket model len constraint.
         if llm.llm_engine.model_config.max_model_len < (b_input_len + b_output_len):
-            _write_text(
+            _rank0_write_text(
                 out_root / f"child_{label}_error.log",
                 f"max_model_len is smaller than input_len + output_len for bucket {tag}; adjust target.json.\n",
             )
@@ -1156,10 +3190,12 @@ def _run_inproc_latency_sweep_child(
             "input_len": b_input_len,
             "output_len": b_output_len,
             "start_time": start.isoformat(),
+            "nsys_profile": bool(nsys_profile),
+            "torch_profile": bool(torch_profile),
         }
 
-        with open(log_path, "w", encoding="utf-8", buffering=1) as bucket_log, open(
-            child_log_path, "a", encoding="utf-8", buffering=1
+        with _rank0_open_log(log_path, "w") as bucket_log, _rank0_open_log(
+            child_log_path, "a"
         ) as child_log:
 
             def _log(msg: str) -> None:
@@ -1167,7 +3203,8 @@ def _run_inproc_latency_sweep_child(
                 bucket_log.flush()
                 child_log.write(msg + "\n")
                 child_log.flush()
-                print(msg, flush=True)
+                if _IS_RANK0:
+                    print(msg, flush=True)
 
             try:
                 _update_status("bucket_start", batch_size=bs)
@@ -1190,14 +3227,38 @@ def _run_inproc_latency_sweep_child(
                     )
                 )
 
+                # Deterministic prompt sharding across DP ranks: each rank
+                # gets the same seed, generates the full bs x input_len tensor,
+                # then partitions stride-wise via _partition_prompts so the
+                # union of ranks covers the original batch exactly once.
                 dummy_prompt_token_ids = np.random.randint(10000, size=(bs, b_input_len))
-                dummy_prompts: list[PromptType] = [
+                all_dummy_prompts: list[PromptType] = [
                     {"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()
                 ]
+                if dp_size > 1:
+                    dummy_prompts = _partition_prompts(
+                        all_dummy_prompts,
+                        dp_size=dp_size,
+                        dp_rank=dp_rank,
+                        input_len=b_input_len,
+                    )
+                else:
+                    dummy_prompts = all_dummy_prompts
 
-                def llm_generate() -> None:
+                # `llm_generate` returns the captured outputs from the
+                # non-beam-search branch so the timing loop can harvest
+                # `RequestOutput.metrics` (spec §3.1 step 2). The beam-search
+                # branch deliberately discards — beam_search() does not emit
+                # the v1 metrics payload — and the bucket falls back to
+                # Tier-C (`OL/(IL+OL)`) downstream.
+                def llm_generate() -> Any:
                     if not bool(getattr(args, "use_beam_search", False)):
-                        llm.generate(dummy_prompts, sampling_params=sampling_params, use_tqdm=False)
+                        outputs = llm.generate(
+                            dummy_prompts,
+                            sampling_params=sampling_params,
+                            use_tqdm=False,
+                        )
+                        return outputs
                     else:
                         llm.beam_search(
                             dummy_prompts,
@@ -1207,12 +3268,40 @@ def _run_inproc_latency_sweep_child(
                                 ignore_eos=True,
                             ),
                         )
+                        return None
 
-                def run_to_completion() -> float:
-                    t0 = _time.perf_counter()
-                    llm_generate()
-                    t1 = _time.perf_counter()
-                    return t1 - t0
+                # Always import torch for the per-step cuda.synchronize() —
+                # spec §3.1 step 8: DP=1 path needs cuda.sync before t1 for
+                # wall-time accuracy (llm.generate returns when host queues
+                # drain; device work may still be in flight).
+                import torch as _torch_sync
+
+                if dp_size > 1:
+                    # DP timing: rendezvous before start, CUDA-sync + rendezvous
+                    # after — the bucket latency is the wall time of the slowest
+                    # rank's generate(), which is what an external client would
+                    # observe. torch.cuda.synchronize() is essential because
+                    # llm.generate() returns as soon as host queues are drained;
+                    # device work may still be in flight.
+
+                    def run_to_completion() -> Tuple[float, Any]:
+                        dist.barrier()
+                        t0 = _time.perf_counter()
+                        outputs = llm_generate()
+                        _torch_sync.cuda.synchronize()
+                        dist.barrier()
+                        t1 = _time.perf_counter()
+                        return (t1 - t0), outputs
+                else:
+                    def run_to_completion() -> Tuple[float, Any]:
+                        t0 = _time.perf_counter()
+                        outputs = llm_generate()
+                        # Spec §3.1 step 8: cuda.sync BEFORE t1 for wall-time
+                        # accuracy on DP=1 path (fixes prior bug where t1 was
+                        # captured before async device work completed).
+                        _torch_sync.cuda.synchronize()
+                        t1 = _time.perf_counter()
+                        return (t1 - t0), outputs
 
                 warmup = int(getattr(args, "num_iters_warmup", 10))
                 deadline = _time.monotonic() + float(timeout_s_per_bucket)
@@ -1234,48 +3323,91 @@ def _run_inproc_latency_sweep_child(
                 num_iters_eff = int(getattr(args, "num_iters", 30))
 
                 # Start nsys capture for this bucket (if enabled).
-                # NOTE: We call cudaProfilerStart/Stop directly instead of
-                # llm.start_profile() because the latter injects --profile
-                # semantics (single-iteration capture) and propagates via
-                # vLLM's executor RPC.  Direct cudaProfilerStart() works with
-                # nsys because nsys's --capture-range=cudaProfilerApi captures
-                # ALL traced processes (including TP workers followed via
-                # --trace-fork-before-exec) when ANY process triggers the
-                # capture range — this is an nsys-level mechanism, not CUDA
-                # profiler propagation.
+                # Selected-step nsys uses vLLM's CUDA profiler on every rank so
+                # each external-launcher DP rank arms its local worker profiler.
+                # Plain nsys buckets use direct cudaProfilerStart/Stop helpers,
+                # which are rank-0-gated while synchronizing CUDA on every rank.
                 _torch_prof = None
-                if nsys_profile:
+                selected_step_nsys = bool(nsys_profile and _is_nsys_selected_step_bucket(bucket))
+                if selected_step_nsys:
+                    llm.start_profile()
+                    _log(
+                        "[nsys] vLLM CUDA profiler armed for selected step "
+                        f"{bucket['nsys_capture_output_step']} "
+                        f"(window={bucket['nsys_capture_window_output_len']})"
+                    )
+                elif nsys_profile:
                     import torch as _torch_prof
-                    _torch_prof.cuda.synchronize()
-                    _torch_prof.cuda.cudart().cudaProfilerStart()
+                    _nsys_start_if_rank0(_torch_prof)
                     _log(f"[nsys] cudaProfilerStart for {tag}")
 
                 # Start torch profiler capture for this bucket (if enabled).
-                if torch_profile:
-                    bucket_profile_dir = str(out_root / "torch_profile" / f"{label}_{tag}")
+                # Under DP>1, torch_profile is rank-0-only: a DP-aware
+                # merge of multiple profiler traces is out of scope for this
+                # script, so rank 0's trace is the representative artifact.
+                if torch_profile and _IS_RANK0:
+                    bucket_profile_dir = str(_v2_profiling_dir(out_root, "torch_profile") / f"{label}_{tag}")
                     Path(bucket_profile_dir).mkdir(parents=True, exist_ok=True)
                     if hasattr(llm, 'llm_engine') and hasattr(llm.llm_engine, 'vllm_config'):
                         llm.llm_engine.vllm_config.profiler_config.torch_profiler_dir = bucket_profile_dir
                     llm.start_profile()
                     _log(f"[torch_profile] started for {tag} -> {bucket_profile_dir}")
 
+                # Per-request prefill/decode timing accumulators (spec §3.1).
+                # Pool per-request deltas across ALL measured iterations so the
+                # bucket-level mean/p50 is robust to per-iteration jitter.
+                # Beam-search branch returns None and is skipped (Tier-C
+                # fallback is applied downstream when these stay empty).
+                prefills_local: List[float] = []
+                decodes_local: List[float] = []
+
                 try:
                     for i in range(num_iters_eff):
                         if _time.monotonic() > deadline:
                             raise TimeoutError(f"Bucket timeout exceeded ({timeout_s_per_bucket}s)")
-                        latencies.append(run_to_completion())
+                        wall_s, iter_outputs = run_to_completion()
+                        latencies.append(wall_s)
+                        # Defensive harvest — never break the timing loop on a
+                        # metrics extraction failure.
+                        if iter_outputs:
+                            try:
+                                for _out in iter_outputs:
+                                    _m = getattr(_out, "metrics", None)
+                                    if _m is None:
+                                        continue
+                                    _sched = getattr(_m, "scheduled_ts", None)
+                                    _first = getattr(_m, "first_token_ts", None)
+                                    _last = getattr(_m, "last_token_ts", None)
+                                    if not isinstance(_sched, (int, float)):
+                                        continue
+                                    if not isinstance(_first, (int, float)):
+                                        continue
+                                    if not isinstance(_last, (int, float)):
+                                        continue
+                                    prefills_local.append(float(_first) - float(_sched))
+                                    decodes_local.append(float(_last) - float(_first))
+                            except Exception:
+                                # Don't let metric harvest derail the bench.
+                                pass
                         if (_time.monotonic() - last_status_t) > 5.0:
                             _update_status("benchmark", batch_size=bs, extra={"iter": i + 1})
                             last_status_t = _time.monotonic()
                 finally:
                     # Stop nsys capture for this bucket. Must happen even on
                     # exception to avoid corrupting the repeat:N capture count
-                    # and leaving nsys waiting indefinitely.
-                    if nsys_profile and _torch_prof is not None:
-                        _torch_prof.cuda.synchronize()
-                        _torch_prof.cuda.cudart().cudaProfilerStop()
+                    # and leaving nsys waiting indefinitely. Under DP the
+                    # rank-0-only cudaProfilerStop still ends the global
+                    # capture range (nsys-level mechanism).
+                    if selected_step_nsys:
+                        llm.stop_profile()
+                        _log(
+                            "[nsys] vLLM CUDA profiler stopped for selected step "
+                            f"{bucket['nsys_capture_output_step']}"
+                        )
+                    elif nsys_profile and _torch_prof is not None:
+                        _nsys_stop_if_rank0(_torch_prof)
                         _log(f"[nsys] cudaProfilerStop for {tag}")
-                    if torch_profile:
+                    if torch_profile and _IS_RANK0:
                         llm.stop_profile()
                         _log(f"[torch_profile] stopped for {tag}")
 
@@ -1294,14 +3426,30 @@ def _run_inproc_latency_sweep_child(
                     "latencies": [float(x) for x in latencies],
                     "percentiles": {str(k): float(v) for k, v in zip(percentages, percentiles)},
                 }
-                _write_json(raw_json, raw)
+                # Spec §3.1 step 4: emit per-bucket prefill/decode aggregates
+                # harvested from RequestOutput.metrics. Beam-search and
+                # legacy vLLM builds leave these unset (consumer falls back
+                # to Tier-C: OL/(IL+OL)).
+                if prefills_local and decodes_local:
+                    _pf_avg = sum(prefills_local) / len(prefills_local)
+                    _dc_avg = sum(decodes_local) / len(decodes_local)
+                    raw["prefill_avg_s"] = float(_pf_avg)
+                    raw["decode_avg_s"] = float(_dc_avg)
+                    raw["prefill_p50_s"] = float(np.median(np.array(prefills_local, dtype=np.float64)))
+                    raw["decode_p50_s"] = float(np.median(np.array(decodes_local, dtype=np.float64)))
+                    _total = _pf_avg + _dc_avg
+                    if _total > 0:
+                        raw["decode_share_of_e2e"] = float(_dc_avg / _total)
+                    raw["num_request_metric_samples"] = int(len(prefills_local))
+                _rank0_write_json(raw_json, raw)
 
                 # Optional: keep parity with vLLM bench output sidecar format.
-                try:
-                    vllm_latency.save_to_pytorch_benchmark_format(args, raw)
-                except Exception:
-                    _log("WARNING: failed to write pytorch benchmark sidecar JSON.")
-                    _log(traceback.format_exc())
+                if _IS_RANK0:
+                    try:
+                        vllm_latency.save_to_pytorch_benchmark_format(args, raw)
+                    except Exception:
+                        _log("WARNING: failed to write pytorch benchmark sidecar JSON.")
+                        _log(traceback.format_exc())
 
                 end = datetime.now(timezone.utc)
                 status.update({
@@ -1321,10 +3469,29 @@ def _run_inproc_latency_sweep_child(
                 })
                 _update_status("bucket_failed", batch_size=bs, extra={"ok": False, "error": status.get("error")})
                 # Ensure the raw JSON exists even on failure (helps parent remain deterministic).
-                if not raw_json.exists():
-                    _write_json(raw_json, {"error": status["error"]})
+                if _IS_RANK0 and not raw_json.exists():
+                    _rank0_write_json(raw_json, {"error": status["error"]})
 
-            _write_json(runner_json, status)
+            _rank0_write_json(runner_json, status)
+
+        # DP>1 collective error barrier (outside the try/except and the log
+        # context mgr): any rank that failed locally triggers all ranks to
+        # abort the sweep — otherwise a rank whose generate() raised leaves
+        # surviving ranks waiting forever on the next dist.barrier().
+        if dp_size > 1:
+            assert dist is not None and error_flag is not None
+            error_flag.zero_()
+            if not status.get("ok"):
+                error_flag[0] = 1
+            dist.all_reduce(error_flag, op=dist.ReduceOp.MAX)
+            if int(error_flag.item()) > 0:
+                if _IS_RANK0:
+                    detail = f" (local error: {status.get('error', 'ok on this rank')})"
+                    print(
+                        f"ERROR in bucket {tag}: rank failure detected — all ranks aborting{detail}",
+                        flush=True,
+                    )
+                break
 
     return 0
 
@@ -1339,12 +3506,22 @@ def _render_md_table(rows: List[Dict[str, Any]], baseline_label: str, opt_label:
             il_ol_set.add((il, ol))
     heterogeneous = len(il_ol_set) > 1
 
+    # OTPS/TPOT columns are shown only when at least one row carries the
+    # derived throughput data, so legacy runs render the original table.
+    has_throughput = any(
+        isinstance(r.get(opt_label, {}).get("otps"), (int, float))
+        or isinstance(r.get("otps_gain_pct"), (int, float))
+        for r in rows
+    )
+    tput_hdr = f" {opt_label} OTPS (tok/s) | OTPS Δ | {opt_label} TPOT (ms) | TPOT Δ |" if has_throughput else ""
+    tput_sep = "---:|---:|---:|---:|" if has_throughput else ""
+
     if heterogeneous:
-        header = f"| Input Len | Output Len | Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
-        sep = "|---:|---:|---:|---:|---:|---:|---:|---|"
+        header = f"| Input Len | Output Len | Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement |{tput_hdr} Fast-path evidence |"
+        sep = f"|---:|---:|---:|---:|---:|---:|---:|{tput_sep}---|"
     else:
-        header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement | Fast-path evidence |"
-        sep = "|---:|---:|---:|---:|---:|---|"
+        header = f"| Batch Size | {baseline_label} avg (s) | {opt_label} avg (s) | Speedup | Improvement |{tput_hdr} Fast-path evidence |"
+        sep = f"|---:|---:|---:|---:|---:|{tput_sep}---|"
 
     lines = [header, sep]
     for r in rows:
@@ -1364,15 +3541,25 @@ def _render_md_table(rows: List[Dict[str, Any]], baseline_label: str, opt_label:
                 return f"{x:.6g}"
             return str(x)
 
+        # Throughput cells: opt OTPS (tok/s), OTPS gain %, opt TPOT (ms), TPOT improvement %.
+        tput_cells = ""
+        if has_throughput:
+            o_otps = o.get("otps")
+            o_tpot_s = o.get("tpot_s")
+            o_tpot_ms = o_tpot_s * 1000.0 if isinstance(o_tpot_s, (int, float)) else None
+            otps_gain = r.get("otps_gain_pct")
+            tpot_improve = r.get("tpot_improvement_pct")
+            tput_cells = f" {fmt(o_otps)} | {fmt(otps_gain)}% | {fmt(o_tpot_ms)} | {fmt(tpot_improve)}% |"
+
         if heterogeneous:
             il = r.get("input_len", "")
             ol = r.get("output_len", "")
             lines.append(
-                f"| {il} | {ol} | {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
+                f"| {il} | {ol} | {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% |{tput_cells} {evidence} |"
             )
         else:
             lines.append(
-                f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% | {evidence} |"
+                f"| {bs} | {fmt(b_avg)} | {fmt(o_avg)} | {fmt(speedup)}x | {fmt(improve)}% |{tput_cells} {evidence} |"
             )
     return "\n".join(lines) + "\n"
 
@@ -1381,7 +3568,19 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--artifact-dir", type=str, required=True)
     p.add_argument("--target-json", type=str, default=None, help="Path to target.json (default: {artifact_dir}/target.json)")
-    p.add_argument("--out-name", type=str, default="e2e_latency", help="Output directory name under {artifact_dir}")
+    p.add_argument("--out-name", type=str, default="e2e_latency",
+                   help=("(LEGACY) Output directory name under {artifact_dir}. "
+                         "On v2 layouts (rounds/ exists), this is replaced by --round/--slot "
+                         "and emitting a custom value here is a hard error."))
+    # v2 layout: --round + --slot resolve to rounds/{N}/sweeps/{SLOT}/.
+    # See references/artifact-layout.md.
+    p.add_argument("--round", type=int, default=None,
+                   help=("Campaign round (1-indexed). With --slot, resolves to "
+                         "rounds/{N}/sweeps/{SLOT}/. Reads state.json.campaign.current_round "
+                         "if omitted while --slot is given."))
+    p.add_argument("--slot", type=str, default=None,
+                   help=("Sweep slot under rounds/{N}/sweeps/. One of: "
+                         "baseline | opt/{op_id} | integration | golden_capture."))
     p.add_argument("--timeout-s", type=int, default=1800, help="Timeout per bucket (seconds)")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing output dir instead of archiving it")
     p.add_argument("--require-fastpath", action="store_true", help="Fail if opt fast-path evidence patterns do not pass")
@@ -1410,7 +3609,19 @@ def main() -> None:
         "--nsys-mode",
         choices=["node", "graph"],
         default="node",
-        help="nsys cuda-graph-trace mode. 'node' for Tier 0, 'graph' for Tier 2 enrichment.",
+        help=(
+            "nsys cuda-graph-trace mode. 'node' is the Stage 2 ranking "
+            "default; 'graph' is optional diagnostic enrichment."
+        ),
+    )
+    p.add_argument(
+        "--nsys-trace",
+        choices=["cuda", "cuda-sw"],
+        default="cuda",
+        help=(
+            "CUDA tracing backend for nsys. Always use 'cuda-sw' on Blackwell "
+            "(B200/B300) to avoid hardware-tracing stalls during graph replay."
+        ),
     )
     p.add_argument(
         "--nsys-extra-flags",
@@ -1448,14 +3659,34 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--nsys-capture-output-steps",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated output-depth steps or percentages to profile as "
+            "selected-step, shape-equivalent short captures, e.g. '2,50%%,100%%'. "
+            "Percentages resolve against workload output_len or --nsys-output-len. "
+            "Requires --nsys-profile and --nsys-num-iters 1."
+        ),
+    )
+    p.add_argument(
+        "--nsys-capture-window-output-len",
+        type=int,
+        default=None,
+        help=(
+            "Lower bound on the short generation window used with "
+            "--nsys-capture-output-steps (default: 2). The script shifts input_len so the "
+            "final token in this window has the requested decode-step shape, and "
+            "automatically RAISES the window above this value when needed so the capture "
+            "clears all chunked-prefill worker-steps (avoids capturing a prefill chunk on "
+            "long-context workloads). The captured decode depth is unaffected by the raise."
+        ),
+    )
+    p.add_argument(
         "--torch-profile",
         action="store_true",
         default=False,
-        help=(
-            "Capture torch.profiler Chrome traces per batch size via "
-            "vLLM's built-in profiler. Produces per-bucket trace directories "
-            "in {out}/torch_profile/."
-        ),
+        help=argparse.SUPPRESS,
     )
     p.add_argument(
         "--baseline-from",
@@ -1468,24 +3699,105 @@ def main() -> None:
             "When omitted with '--labels opt', results are flagged with a warning."
         ),
     )
+    p.add_argument(
+        "--num-launches",
+        type=int,
+        default=1,
+        help=(
+            "Number of supervisor launches per label (default: 1). "
+            "When N>=2, launch 1 is treated as warmup and discarded from aggregation; "
+            "cross-launch mean/stddev/p50/p90/p99 are computed from launches 2..N. "
+            "Each launch is a full supervisor process; launches share VLLM_CACHE_ROOT "
+            "by default so launch 2+ hits the warm compile cache."
+        ),
+    )
+    p.add_argument(
+        "--fresh-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Isolate vLLM/Triton compile caches per sweep. First launch pays full "
+            "compile (~5 min for large models). Total wall-clock = compile_time + "
+            "(N-1) * bench_time per label. Cache dir is removed after successful "
+            "sweep. Does NOT disable the compile cache within a single launch."
+        ),
+    )
     p.add_argument("--capture-golden-refs", action="store_true", default=False,
                    help="Stage 1: run GSM8K greedy decode and save golden refs to json/golden_refs.json")
     p.add_argument("--verify-correctness", action="store_true", default=False,
                    help="Stage 5: compare GSM8K outputs against golden refs; exit nonzero on mismatch")
-    p.add_argument("--correctness-num-questions", type=int, default=200,
-                   help="Number of GSM8K questions for correctness phase (default: 200)")
+    p.add_argument("--correctness-num-questions", type=int, default=1319,
+                   help="Number of GSM8K questions for correctness phase (default: 1319 = full test split)")
+    p.add_argument("--correctness-tolerance-pct", type=float, default=1.0,
+                   help=("Allowed accuracy drop in percentage points (default: 1.0 = 1pp). "
+                         "PASS iff opt_accuracy >= baseline_accuracy - tolerance/100. "
+                         "Set to 0.0 for strict opt >= baseline comparison."))
     p.add_argument("--_child-label", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_out-root", type=str, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-profile", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_cudagraph-capture-sizes", nargs="+", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-output-len", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_nsys-num-iters", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_nsys-capture-output-steps", type=str, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_nsys-capture-window-output-len", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--_torch-profile", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_capture-golden-refs", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--_verify-correctness", action="store_true", default=False, help=argparse.SUPPRESS)
-    p.add_argument("--_correctness-num-questions", type=int, default=200, help=argparse.SUPPRESS)
+    p.add_argument("--_correctness-num-questions", type=int, default=1319, help=argparse.SUPPRESS)
+    p.add_argument("--_correctness-tolerance-pct", type=float, default=1.0, help=argparse.SUPPRESS)
+    p.add_argument("--_launch-id", type=int, default=1, help=argparse.SUPPRESS)
+    p.add_argument("--_total-launches", type=int, default=1, help=argparse.SUPPRESS)
+    # ---- Hang watchdog (default OFF; opt-in for callers that hit the
+    # intermittent in-engine GPU-kernel hang under multi-seq chunked prefill).
+    # When ON, the parent launches each child in its OWN process group and, if a
+    # bucket's status file goes stale past the phase-gated threshold while the
+    # child is wedged inside a single generate() call (which the per-bucket
+    # deadline cannot catch, since it is only checked BETWEEN generate() calls),
+    # it killpg()s the whole group (taking vLLM EngineCore subprocesses with it),
+    # then RELAUNCHES skipping the buckets already completed on disk PLUS the
+    # wedged one. Completed buckets are already persisted to json/, so partial
+    # results survive and the sweep reports the buckets that ran. Default-OFF
+    # keeps every existing caller byte-for-byte unchanged. ----
+    p.add_argument("--hang-watchdog", action="store_true", default=False,
+                   help=("Detect an in-engine kernel hang (status file frozen while "
+                         "the child is wedged inside generate()), kill the child's "
+                         "process group, and relaunch skipping done+wedged buckets. "
+                         "Partial results are preserved. Default OFF."))
+    p.add_argument("--hang-stale-warmup-s", type=int, default=130,
+                   help=("Hang watchdog: max seconds a bucket's status may stay frozen "
+                         "in the warmup/benchmark phase before it is treated as hung "
+                         "(default 130). Auto-widened for heavy buckets (long prefill / "
+                         "large batch). Ignored unless --hang-watchdog."))
+    p.add_argument("--hang-max-relaunch", type=int, default=8,
+                   help=("Hang watchdog: cap on total child relaunches across the whole "
+                         "sweep (backstop against a relaunch loop; default 8). Ignored "
+                         "unless --hang-watchdog."))
+    p.add_argument("--_skip-tags", type=str, default=None, help=argparse.SUPPRESS)
 
     args = p.parse_args()
+
+    # Validate --num-launches early.
+    if args.num_launches < 1:
+        raise SystemExit(
+            f"--num-launches must be >= 1, got {args.num_launches}"
+        )
+
+    # --hang-watchdog is incompatible with multi-launch (warmup) mode. The
+    # watchdog resumes after a hang by skipping buckets whose base
+    # json/{label}_{tag}.json already carries "avg_latency". But in multi-launch
+    # mode the warmup launch (launch 1) writes avg_latency into those SAME base
+    # files (only .launch{N} archives are kept separately), so on the measured
+    # launch 2 every bucket would look "done" and be skipped -> the measured
+    # launch produces zero real data, silently. The two features have opposite
+    # resume semantics (watchdog: never redo a done bucket; warmup: always redo
+    # every bucket each launch), so reject the combination outright.
+    if getattr(args, "hang_watchdog", False) and args.num_launches >= 2:
+        raise SystemExit(
+            "--hang-watchdog cannot be combined with --num-launches >= 2: the "
+            "watchdog's per-bucket resume reuses the base raw-JSON files that the "
+            "warmup launch overwrites, so the measured launch would skip every "
+            "bucket. Use one or the other."
+        )
 
     # Transition safety: warn if old locking system files exist
     old_lock_dir = Path('/tmp/ammo_gpu_locks')
@@ -1502,9 +3814,15 @@ def main() -> None:
             raise SystemExit(
                 "nsys not found on PATH. Install Nsight Systems CLI or remove --nsys-profile."
             )
-    if (args.nsys_output_len is not None or args.nsys_num_iters is not None) and not args.nsys_profile:
+    if (
+        args.nsys_output_len is not None
+        or args.nsys_num_iters is not None
+        or args.nsys_capture_output_steps is not None
+        or args.nsys_capture_window_output_len is not None
+    ) and not args.nsys_profile:
         raise SystemExit(
-            "--nsys-output-len and --nsys-num-iters require --nsys-profile."
+            "--nsys-output-len, --nsys-num-iters, --nsys-capture-output-steps, "
+            "and --nsys-capture-window-output-len all require --nsys-profile."
         )
     if args.nsys_output_len is not None and args.nsys_output_len <= 0:
         raise SystemExit(
@@ -1514,12 +3832,65 @@ def main() -> None:
         raise SystemExit(
             f"--nsys-num-iters must be positive, got {args.nsys_num_iters}"
         )
+    if args.nsys_capture_window_output_len is not None and args.nsys_capture_window_output_len <= 0:
+        raise SystemExit(
+            "--nsys-capture-window-output-len must be positive, got "
+            f"{args.nsys_capture_window_output_len}"
+        )
+    if args.nsys_capture_window_output_len is not None and args.nsys_capture_output_steps is None:
+        raise SystemExit(
+            "--nsys-capture-window-output-len requires --nsys-capture-output-steps."
+        )
+    if args.nsys_capture_output_steps is not None and args.nsys_num_iters not in (None, 1):
+        raise SystemExit(
+            "--nsys-capture-output-steps requires --nsys-num-iters 1 because "
+            "each selected-step profile must capture exactly one short generate()."
+        )
 
     # Validate correctness flag constraints.
     if args.capture_golden_refs and args.verify_correctness:
         raise SystemExit("--capture-golden-refs and --verify-correctness are mutually exclusive")
     if args.verify_correctness and not args.baseline_from:
         raise SystemExit("--verify-correctness requires --baseline-from (to import golden_refs.json)")
+    # Gate 5.1b (correctness) and Gate 5.3a (nsys) MUST be separate invocations.
+    # nsys wraps the entire child process, so its trace buffers grow across the
+    # 1319-question GSM8K correctness pass until the cgroup OOM-kills EngineCore
+    # (return code 137 / SIGKILL, no traceback). --nsys-output-len only bounds
+    # the bench loop, NOT the correctness phase, so retrying with smaller
+    # --nsys-output-len does not help. See references/nsys-profiling-guide.md
+    # §3.14 for the full mechanism and the correct two-invocation workflow.
+    if args.nsys_profile and args.verify_correctness:
+        raise SystemExit(
+            "--nsys-profile and --verify-correctness cannot be combined: nsys "
+            "trace buffers grow across the full GSM8K correctness pass and "
+            "cgroup-OOM EngineCore. Run Gate 5.1b (--verify-correctness) and "
+            "Gate 5.3a (--nsys-profile) as separate sweep invocations. See "
+            "references/nsys-profiling-guide.md §3.14."
+        )
+
+    # Profiling flags are incompatible with --slot baseline: nsys wraps the
+    # entire process (10-30% overhead on ALL iterations regardless of capture
+    # range), and torch.profiler adds CUPTI subscription overhead. The baseline
+    # slot is the authoritative E2E timing source for speedup calculations —
+    # contaminated numbers propagate into every subsequent stage's comparisons.
+    # Run a clean sweep first (--slot baseline), then a separate profiling
+    # invocation (traces route to rounds/{N}/profiling/ automatically).
+    slot = getattr(args, "slot", None)
+    if slot == "baseline" and (args.nsys_profile or args.torch_profile):
+        profiler_flag = "--nsys-profile" if args.nsys_profile else "--torch-profile"
+        raise SystemExit(
+            f"ERROR: {profiler_flag} cannot be combined with --slot baseline. "
+            "Profiling adds overhead that contaminates E2E timing (nsys: 10-30% "
+            "process-wide, torch: CUPTI subscription). The baseline slot is the "
+            "authoritative timing source for speedup calculations.\n\n"
+            "Correct Stage 1 workflow (two invocations):\n"
+            "  1. Clean E2E:  --round N --slot baseline --labels baseline "
+            "--capture-golden-refs\n"
+            "  2. Profiling:  --round N --slot profiling --nsys-profile "
+            "(or --torch-profile)\n"
+            "     (traces route to rounds/{N}/profiling/ regardless of slot)\n\n"
+            "See references/e2e-latency-guide.md for details."
+        )
 
     # Parse and validate --labels.
     selected_labels = {s.strip() for s in args.labels.split(",")}
@@ -1648,17 +4019,36 @@ def main() -> None:
 
     baseline_extra_args = _maybe_list_str(bench, "baseline_extra_args")
     opt_extra_args = _maybe_list_str(bench, "opt_extra_args")
+
+    # DP/EP resolver (spec §4.2): parse effective per-label parallelism flags,
+    # enforce agreement, reject incompatible distributed-executor-backend, gate
+    # beam-search under DP>1, and auto-inject --distributed-executor-backend
+    # external_launcher into the shared extra_args when DP>1 and neither label
+    # set a backend explicitly.
+    extra_args, parallelism = _resolve_parallelism_and_backend(
+        extra_args, baseline_extra_args, opt_extra_args
+    )
+    dp = parallelism["dp"]
+    nproc = parallelism["nproc"]
+
     baseline_args = extra_args + baseline_extra_args
     opt_args = extra_args + opt_extra_args
 
     # Output directory:
-    # - Parent run: choose/create and archive existing outputs unless --overwrite.
+    # - Parent run: resolve out_name via --round/--slot (v2) or --out-name (legacy),
+    #   then choose/create and archive existing outputs unless --overwrite.
     # - Child run: parent passes the resolved out_root explicitly via --_out-root.
     if args._out_root:
         out_root = Path(args._out_root).expanduser().resolve()
         out_root.mkdir(parents=True, exist_ok=True)
+        resolved_out_name = args.out_name  # not used by child after v2; retained for metadata
     else:
-        out_root = _prepare_out_root(artifact_dir=artifact_dir, out_name=args.out_name, overwrite=args.overwrite)
+        resolved_out_name = _resolve_sweep_out_name(args, artifact_dir)
+        out_root = _prepare_out_root(
+            artifact_dir=artifact_dir,
+            out_name=resolved_out_name,
+            overwrite=args.overwrite,
+        )
 
     logs_dir = out_root / "logs"
     json_dir = out_root / "json"
@@ -1670,22 +4060,28 @@ def main() -> None:
     out_json_path = out_root / "e2e_latency_results.json"
     out_md_path = out_root / "e2e_latency_results.md"
 
-    # Prepare envs: start from current env, then strip stale VLLM_OP* vars.
-    # Cross-track contamination fix: prior-round gating flags (VLLM_OP001, etc.)
-    # may be set in the inherited environment. Stripping them ensures each sweep
-    # measures only the target track's optimization.  The target track's env var
-    # is re-added explicitly via baseline_env / opt_env from target.json.
-    base_env = _sanitize_vllm_op_env(dict(os.environ))
+    # Prepare envs: start from current env, then strip stale VLLM_* vars.
+    # Cross-track contamination fix: prior-round gating flags (VLLM_OP001,
+    # VLLM_MOE_TRITON_ROUTER, etc.) may be set in the inherited environment.
+    # Stripping them ensures each sweep measures only the target track's
+    # optimization. The target track's env vars are re-added explicitly via
+    # baseline_env / opt_env from target.json. After Track A6 baseline
+    # promotion, shipped opt_env keys live in baseline_env — preserve_keys
+    # ensures those promoted keys survive sanitization.
+    preserve_for_baseline = set(baseline_env.keys())
+    preserve_for_opt = preserve_for_baseline | set(opt_env.keys())
+    base_env_baseline = _sanitize_vllm_op_env(dict(os.environ), preserve_keys=preserve_for_baseline)
+    base_env_opt = _sanitize_vllm_op_env(dict(os.environ), preserve_keys=preserve_for_opt)
 
     baseline_run = RunSpec(
         label=baseline_label,
-        env={**base_env, **baseline_env},
+        env={**base_env_baseline, **baseline_env},
         require_patterns=baseline_req,
         forbid_patterns=baseline_forb,
     )
     opt_run = RunSpec(
         label=opt_label,
-        env={**base_env, **baseline_env, **opt_env},
+        env={**base_env_opt, **baseline_env, **opt_env},
         require_patterns=opt_req,
         forbid_patterns=opt_forb,
     )
@@ -1701,11 +4097,53 @@ def main() -> None:
 
     # Validate all buckets fit within max_model_len at plan time.
     _validate_buckets_model_len(buckets, max_model_len)
-    if args.nsys_output_len is not None:
-        _validate_buckets_model_len(
-            [{**b, "output_len": args.nsys_output_len} for b in buckets],
-            max_model_len,
+    # Spec-decode-aware nsys capture: positions_per_step = 1 + num_speculative_tokens. The
+    # parent's expected-bucket set (used for repeat:N and the positional rename) must carry the
+    # SAME output_len=window*ppt the child profiles, so we parse ppt from both labels' effective
+    # args and require agreement — the single child-wide window + one repeat:N architecture
+    # cannot represent two different ppt values. For the target workload the spec-config lives in
+    # the shared extra_args and the label-local lists are empty, so both equal 5 (no-op guard).
+    _ppt_baseline = _parse_positions_per_step(baseline_args)
+    _ppt_opt = _parse_positions_per_step(opt_args)
+    if _ppt_baseline != _ppt_opt:
+        raise SystemExit(
+            "baseline/opt spec-decode positions_per_step differ "
+            f"({_ppt_baseline} vs {_ppt_opt}); selected-step nsys capture needs identical "
+            "spec config across labels (single child-wide window + one repeat:N)."
         )
+    _parent_ppt = _ppt_baseline
+    nsys_profile_buckets = _expand_nsys_profile_buckets(
+        buckets,
+        nsys_output_len=args.nsys_output_len,
+        nsys_capture_window_output_len=args.nsys_capture_window_output_len,
+        nsys_capture_output_steps=args.nsys_capture_output_steps,
+        positions_per_step=_parent_ppt,
+    )
+    if args.nsys_profile:
+        _validate_buckets_model_len(nsys_profile_buckets, max_model_len)
+        nsys_filtered_buckets = [
+            b for b in nsys_profile_buckets
+            if not _should_skip_bucket(int(b["batch_size"]), dp)
+        ]
+        nsys_expected_buckets, nsys_deduped_buckets = _dedupe_nsys_profile_buckets(
+            nsys_filtered_buckets
+        )
+        if not nsys_expected_buckets:
+            raise SystemExit(
+                "No nsys profile buckets remain after DP skip filtering. "
+                "Increase batch_sizes or reduce --data-parallel-size."
+            )
+        if nsys_deduped_buckets:
+            print(
+                "WARNING: deduped "
+                f"{len(nsys_deduped_buckets)} duplicate nsys profiling buckets "
+                "after expansion/DP filtering; identical effective shapes are "
+                "profiled once: "
+                f"{_format_nsys_deduped_buckets(nsys_deduped_buckets)}",
+                file=sys.stderr,
+            )
+    else:
+        nsys_expected_buckets = []
 
     print("=== Target ===")
     print(f"artifact_dir: {artifact_dir}")
@@ -1722,19 +4160,46 @@ def main() -> None:
     print(f"baseline_label: {baseline_label}, opt_label: {opt_label}")
     if args.nsys_profile:
         nsys_ol_eff = args.nsys_output_len if args.nsys_output_len is not None else "(workload)"
+        nsys_window_eff = (
+            args.nsys_capture_window_output_len
+            if args.nsys_capture_window_output_len is not None
+            else ("2 (auto)" if args.nsys_capture_output_steps else "(none)")
+        )
         nsys_ni_eff = args.nsys_num_iters
-        if nsys_ni_eff is None and args.nsys_output_len is not None:
+        if nsys_ni_eff is None and (args.nsys_output_len is not None or args.nsys_capture_output_steps is not None):
             nsys_ni_eff = "1 (auto)"
         elif nsys_ni_eff is None:
             nsys_ni_eff = "(workload)"
-        print(f"nsys_profile: enabled, nsys_output_len={nsys_ol_eff}, nsys_num_iters={nsys_ni_eff}")
+        print(
+            f"nsys_profile: enabled, nsys_output_len={nsys_ol_eff}, "
+            f"nsys_num_iters={nsys_ni_eff}, "
+            f"nsys_capture_window_output_len={nsys_window_eff}, "
+            f"nsys_capture_output_steps={args.nsys_capture_output_steps or '(none)'}"
+        )
+        if args.nsys_capture_output_steps:
+            resolved_by_horizon = {
+                int(b["nsys_capture_target_output_len"]): _parse_nsys_capture_output_steps(
+                    args.nsys_capture_output_steps,
+                    int(b["nsys_capture_target_output_len"]),
+                )
+                for b in nsys_profile_buckets
+                if "nsys_capture_target_output_len" in b
+            }
+            print(f"nsys_capture_output_steps_resolved: {resolved_by_horizon}")
         print(
             "WARNING: nsys profiling adds overhead — latency results from this run "
             "should not be used for performance comparison.",
             file=sys.stderr,
         )
+        if dp > 1:
+            print(
+                f"WARNING: nsys + DP>1 (dp={dp}) — nsys wraps torchrun and will emit "
+                f"per-rank profile files. Report files are rank-0 only. Expect larger "
+                f"profile size and higher runtime overhead.",
+                file=sys.stderr,
+            )
     if args.torch_profile:
-        print("torch_profile: enabled (per-bucket Chrome traces in torch_profile/)")
+        print("torch_profile: enabled (manual per-bucket traces in torch_profile/)")
         if not args.nsys_profile:
             print(
                 "WARNING: torch profiler adds overhead — latency results from this run "
@@ -1802,16 +4267,26 @@ def main() -> None:
     # GPU reservation is now managed by PreToolUse/PostToolUse hooks.
     # The hooks auto-reserve when CUDA_VISIBLE_DEVICES=X is in the command
     # and auto-release when the command completes. No in-script locking needed.
+    #
+    # DP note (spec §4.7): the PostToolUse/Bash hook fires once per tool
+    # invocation — for a DP>1 sweep that's the single `torch.distributed.run`
+    # launch, not the per-rank child processes. Rank forks happen inside
+    # torchrun and do NOT re-enter the hook. The hook's lease timer therefore
+    # must cover the full sweep duration (child_timeout, including the
+    # 60*dp padding for NCCL init / torchrun rendezvous added in Task 5).
+    # AMMO_GPU_RES_DIR is session-scoped; per-rank workers inherit it via
+    # environment but do not mutate reservation state.
 
     is_child = bool(args._child_label)
 
     # Record the per-bucket plan deterministically (for stable paths + repro commands).
+    planned_buckets = nsys_expected_buckets if args.nsys_profile else buckets
     planned: List[Dict[str, Any]] = []
-    for bucket in buckets:
+    for bucket in planned_buckets:
         b_input_len = bucket["input_len"]
         b_output_len = bucket["output_len"]
         bs = bucket["batch_size"]
-        tag = _bucket_file_tag(bucket, buckets)
+        tag = _bucket_file_tag(bucket, planned_buckets)
 
         baseline_json_p = json_dir / f"{baseline_label}_{tag}.json"
         opt_json_p = json_dir / f"{opt_label}_{tag}.json"
@@ -1892,10 +4367,15 @@ def main() -> None:
                 )
 
     # Seed status files so supervisors can poll immediately.
+    # Rank-0 gated: under torchrun (DP>1), all ranks execute this path but
+    # only rank 0 owns the status tree. Without the gate, ranks race on the
+    # .tmp→final rename in _write_json_atomic and one gets FileNotFoundError
+    # from os.replace(). Matches the rank-0 guard pattern used elsewhere in
+    # this file (e.g., lines 406, 418, 1238, 1845).
     for label in [l for l in (baseline_label, opt_label)
                   if ("baseline" if l == baseline_label else "opt") in selected_labels]:
         st = status_dir / f"{label}.json"
-        if not st.exists():
+        if _IS_RANK0 and not st.exists():
             _write_json_atomic(
                 st,
                 {
@@ -1926,8 +4406,28 @@ def main() -> None:
         child_num_iters = num_iters
         nsys_ol = getattr(args, "_nsys_output_len", None)
         nsys_ni = getattr(args, "_nsys_num_iters", None)
-        if nsys_ol is not None:
-            child_buckets = [{**b, "output_len": nsys_ol} for b in buckets]
+        nsys_steps = getattr(args, "_nsys_capture_output_steps", None)
+        nsys_window = getattr(args, "_nsys_capture_window_output_len", None)
+        # Size the actually-profiled output_len for THIS label's spec-decode config so the
+        # short generation runs enough worker-steps to arm the CUDA profiler (output_len =
+        # window * positions_per_step). label_args == baseline_args/opt_args selected above.
+        child_ppt = _parse_positions_per_step(label_args)
+        child_buckets = _expand_nsys_profile_buckets(
+            buckets,
+            nsys_output_len=nsys_ol,
+            nsys_capture_window_output_len=nsys_window,
+            nsys_capture_output_steps=nsys_steps,
+            positions_per_step=child_ppt,
+        )
+        if getattr(args, "_nsys_profile", False):
+            child_buckets, child_deduped_buckets = _dedupe_nsys_profile_buckets(child_buckets)
+            if child_deduped_buckets and _IS_RANK0:
+                print(
+                    "WARNING: child deduped "
+                    f"{len(child_deduped_buckets)} duplicate nsys profiling buckets; "
+                    "identical effective shapes are profiled once.",
+                    file=sys.stderr,
+                )
         if nsys_ni is not None:
             child_num_iters = nsys_ni
         returncode = _run_inproc_latency_sweep_child(
@@ -1944,7 +4444,13 @@ def main() -> None:
             torch_profile=getattr(args, "_torch_profile", False),
             capture_golden_refs=getattr(args, "_capture_golden_refs", False),
             verify_correctness=getattr(args, "_verify_correctness", False),
-            correctness_num_questions=getattr(args, "_correctness_num_questions", 200),
+            correctness_num_questions=getattr(args, "_correctness_num_questions", 1319),
+            correctness_tolerance_pct=getattr(args, "_correctness_tolerance_pct", 1.0),
+            launch_id=int(getattr(args, "_launch_id", 1)),
+            total_launches=int(getattr(args, "_total_launches", 1)),
+            skip_tags=frozenset(
+                t for t in (getattr(args, "_skip_tags", None) or "").split(",") if t
+            ),
         )
         raise SystemExit(returncode)
 
@@ -1960,22 +4466,29 @@ def main() -> None:
     script_path = Path(__file__).resolve()
     child_timeout = int(args.timeout_s) * max(1, len(buckets)) + 1800
     if args.nsys_profile:
-        child_timeout = args.nsys_timeout_s * max(1, len(buckets))
+        child_timeout = args.nsys_timeout_s * max(1, len(nsys_expected_buckets))
+    # DP>1 adds torchrun rendezvous + per-rank model-load overhead; pad the
+    # supervisor timeout linearly with DP so warm-ups do not trip spurious kills.
+    if dp > 1:
+        child_timeout += 60 * dp
 
     # Set up nsys output directory if profiling.
+    # v2: traces are written to rounds/{N}/profiling/nsys/ (sibling to sweep
+    # output) so multiple sweep slots in the same round share a single trace
+    # repository rather than nesting nsys/ inside each sweep.
     nsys_dir: Optional[Path] = None
     nsys_capture_sizes: Optional[List[int]] = None
     if args.nsys_profile:
-        nsys_dir = out_root / "nsys"
+        nsys_dir = _v2_profiling_dir(out_root, "nsys")
         nsys_dir.mkdir(parents=True, exist_ok=True)
-        # Restrict CUDA graph capture to only the batch sizes being profiled.
+        # Restrict CUDA graph capture to only the profiled nominal/effective sizes.
         # Default vLLM captures ~50 sizes (~2,142 CUDAGraph objects); restricting
-        # to workload batch sizes reduces this to ~len(buckets), mitigating the
+        # to workload shapes reduces this to a small bounded list, mitigating the
         # memory pressure that causes nsys --cuda-graph-trace=node replay hangs.
-        nsys_capture_sizes = sorted(set(b["batch_size"] for b in buckets))
+        nsys_capture_sizes = _compute_nsys_cudagraph_capture_sizes(nsys_expected_buckets)
         print(
             f"nsys mode: restricting cudagraph_capture_sizes to {nsys_capture_sizes} "
-            f"(from workload batch_sizes)"
+            f"(from workload batch_sizes/effective decode token counts)"
         )
 
     runs_to_execute = []
@@ -1997,130 +4510,373 @@ def main() -> None:
                 f"--baseline-from has none at {golden_src}"
             )
 
-    for run in runs_to_execute:
-        child_cmd = [
-            sys.executable,
-            str(script_path),
-            "--artifact-dir",
-            str(artifact_dir),
-            "--target-json",
-            str(target_path),
-            "--timeout-s",
-            str(args.timeout_s),
-            "--out-name",
-            args.out_name,
-            "--_out-root",
-            str(out_root),
-            "--_child-label",
-            run.label,
-        ]
-        if args.nsys_profile:
-            child_cmd.append("--_nsys-profile")
-            if nsys_capture_sizes:
-                child_cmd.extend(
-                    ["--_cudagraph-capture-sizes"] + [str(bs) for bs in nsys_capture_sizes]
-                )
-            # Pass nsys overrides to child (decouples profiling OL from benchmark OL).
-            nsys_ol = args.nsys_output_len
-            nsys_ni = args.nsys_num_iters
-            if nsys_ni is None and nsys_ol is not None:
-                nsys_ni = 1  # Default to 1 iter when profiling OL is decoupled.
-            if nsys_ol is not None:
-                child_cmd.extend(["--_nsys-output-len", str(nsys_ol)])
-            if nsys_ni is not None:
-                child_cmd.extend(["--_nsys-num-iters", str(nsys_ni)])
-        if args.torch_profile:
-            child_cmd.append("--_torch-profile")
-
-        # Forward correctness flags to child.
-        if args.capture_golden_refs:
-            child_cmd.append("--_capture-golden-refs")
-        if args.verify_correctness:
-            child_cmd.append("--_verify-correctness")
-        if args.capture_golden_refs or args.verify_correctness:
-            child_cmd.extend(["--_correctness-num-questions", str(args.correctness_num_questions)])
-
-        # Prepend nsys wrapper when profiling.
-        child_env = dict(run.env) if run.env else dict(os.environ)
-        child_env = _ensure_worktree_pythonpath(child_env)
-        if args.nsys_profile:
-            assert nsys_dir is not None
-            child_env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-            nsys_prefix = [
-                "nsys", "profile",
-                "--trace=cuda,nvtx",
-                "--sample=none",
-                "--capture-range=cudaProfilerApi",
-                f"--capture-range-end=repeat:{len(buckets)}",
-                f"--cuda-graph-trace={args.nsys_mode}",
-                "--trace-fork-before-exec=true",
-                "--force-overwrite=true",
-                "-o", str(nsys_dir / f"{run.label}_profile"),
-            ]
-            if args.nsys_extra_flags:
-                import shlex as _shlex
-                nsys_prefix.extend(_shlex.split(args.nsys_extra_flags))
-            child_cmd = nsys_prefix + child_cmd
-
-        print(f"\n=== Running inproc sweep for {run.label} ===")
-        print(f"Child cmd: {_format_cmd_for_md(child_cmd, {})}")
-        child_log = logs_dir / f"{run.label}_supervisor.log"
-        child_status = status_dir / f"{run.label}.json"
-        child_res = _run_cmd_streaming(
-            child_cmd,
-            env=child_env,
-            cwd=None,
-            timeout_s=child_timeout,
-            log_path=child_log,
-            heartbeat_s=int(args.heartbeat_s),
-            status_path=child_status,
+    # --fresh-cache: allocate a per-sweep cache root under out_root/cache/{sweep_id}
+    # that will be removed at end of a successful sweep. We pick a stable
+    # sweep_id derived from the out_root basename + a timestamp so concurrent
+    # sweeps don't collide (tests call the injector directly with a path).
+    sweep_cache_root: Optional[Path] = None
+    if args.fresh_cache:
+        sweep_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        sweep_cache_root = out_root / "cache" / sweep_id
+        sweep_cache_root.mkdir(parents=True, exist_ok=True)
+        (sweep_cache_root / "triton_cache").mkdir(parents=True, exist_ok=True)
+        print(
+            f"[fresh-cache] isolating compile caches at {sweep_cache_root} "
+            "(first launch pays full compile; cache is removed after success)"
         )
-        if not child_res.get("ok"):
-            hint = ""
-            if args.nsys_profile and child_res.get("returncode") in (-9, 137, None):
-                hint = (
-                    " This is likely an nsys --cuda-graph-trace=node replay hang. "
-                    "Try adding --nsys-output-len 32 to decouple profiling OL, "
-                    "reducing workload batch_sizes, or increasing --nsys-timeout-s "
-                    f"(current: {args.nsys_timeout_s}s per bucket)."
-                )
-            raise SystemExit(
-                f"Inproc sweep child failed for {run.label}: returncode={child_res.get('returncode')}. "
-                f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
-                f"{hint}"
+
+    total_launches = max(1, int(args.num_launches))
+    # Per-label, per-bucket, per-launch raw avg_latency + latencies. Populated
+    # as launches complete. Outer key: label. Inner key: bucket_tag.
+    per_label_bucket_launches: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+
+    # Hang watchdog plumbing (default OFF). bucket_meta lets the watchdog name the
+    # wedged bucket from the child's (il,ol,bs) status; relaunch_budget caps total
+    # kill+relaunch cycles across the whole sweep; hung_tags accumulates buckets we
+    # gave up on so we never re-trigger the same hang on a later launch/label.
+    hang_watchdog = bool(getattr(args, "hang_watchdog", False))
+    bucket_meta: Dict[str, Dict[str, int]] = {
+        p["tag"]: {
+            "input_len": int(p["input_len"]),
+            "output_len": int(p["output_len"]),
+            "batch_size": int(p["batch_size"]),
+        }
+        for p in planned
+    }
+    relaunch_budget = [max(0, int(getattr(args, "hang_max_relaunch", 8)))]
+    hung_tags: set = set()
+
+    for launch_id in range(1, total_launches + 1):
+        is_warmup = (total_launches >= 2 and launch_id == 1)
+        if total_launches >= 2:
+            print(
+                f"\n=== Launch {launch_id}/{total_launches} "
+                f"({'WARMUP (discarded)' if is_warmup else 'MEASURED'}) ==="
             )
 
-        # Rename nsys output files to match bucket tags.
-        if nsys_dir is not None:
-            # Use nsys-overridden buckets for tags if OL was overridden.
-            nsys_tag_buckets = buckets
-            if args.nsys_output_len is not None:
-                nsys_tag_buckets = [{**b, "output_len": args.nsys_output_len} for b in buckets]
-                # Detect tag collisions: heterogeneous workload_matrix buckets
-                # that differ only in output_len would collide after OL override.
-                tags = [_bucket_file_tag(b, nsys_tag_buckets) for b in nsys_tag_buckets]
-                if len(tags) != len(set(tags)):
-                    dupes = [t for t in tags if tags.count(t) > 1]
-                    print(
-                        f"WARNING: --nsys-output-len creates duplicate file tags {set(dupes)}. "
-                        f"Nsys profiles for colliding buckets will be overwritten. "
-                        f"Consider using distinct batch_sizes or input_lens.",
-                        file=sys.stderr,
+        for run in runs_to_execute:
+            extra_child_flags: List[str] = []
+            if args.nsys_profile:
+                extra_child_flags.append("--_nsys-profile")
+                if nsys_capture_sizes:
+                    extra_child_flags.extend(
+                        ["--_cudagraph-capture-sizes"] + [str(bs) for bs in nsys_capture_sizes]
                     )
-            renamed = 0
-            for i, bucket in enumerate(nsys_tag_buckets, 1):
-                src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
-                tag = _bucket_file_tag(bucket, nsys_tag_buckets)
-                dst = nsys_dir / f"{run.label}_{tag}.nsys-rep"
-                if src.exists():
-                    src.rename(dst)
-                    print(f"  nsys: {src.name} -> {dst.name}")
-                    renamed += 1
-            if renamed < len(buckets):
-                print(
-                    f"  WARNING: nsys produced {renamed} of {len(buckets)} "
-                    f"expected profile files for {run.label}"
+                # Pass nsys overrides to child (decouples profiling OL from benchmark OL).
+                nsys_ol = args.nsys_output_len
+                nsys_ni = args.nsys_num_iters
+                if nsys_ni is None and (nsys_ol is not None or args.nsys_capture_output_steps is not None):
+                    nsys_ni = 1  # Default to 1 iter when profiling OL is decoupled.
+                if nsys_ol is not None:
+                    extra_child_flags.extend(["--_nsys-output-len", str(nsys_ol)])
+                if nsys_ni is not None:
+                    extra_child_flags.extend(["--_nsys-num-iters", str(nsys_ni)])
+                if args.nsys_capture_output_steps is not None:
+                    extra_child_flags.extend([
+                        "--_nsys-capture-output-steps",
+                        args.nsys_capture_output_steps,
+                    ])
+                if args.nsys_capture_window_output_len is not None:
+                    extra_child_flags.extend([
+                        "--_nsys-capture-window-output-len",
+                        str(args.nsys_capture_window_output_len),
+                    ])
+            if args.torch_profile:
+                extra_child_flags.append("--_torch-profile")
+
+            # Forward correctness flags to child.
+            if args.capture_golden_refs:
+                extra_child_flags.append("--_capture-golden-refs")
+            if args.verify_correctness:
+                extra_child_flags.append("--_verify-correctness")
+            extra_child_flags.extend(_build_correctness_child_flags(
+                capture=args.capture_golden_refs,
+                verify=args.verify_correctness,
+                num_questions=args.correctness_num_questions,
+                tolerance_pct=args.correctness_tolerance_pct,
+            ))
+
+            # Surface launch id/total to the child (status payload exposes
+            # this so AMMO UI can render per-launch progress).
+            extra_child_flags.extend([
+                "--_launch-id", str(launch_id),
+                "--_total-launches", str(total_launches),
+            ])
+
+            child_cmd = _build_child_cmd(
+                python_exe=sys.executable,
+                script_path=script_path,
+                run_label=run.label,
+                artifact_dir=artifact_dir,
+                target_path=target_path,
+                timeout_s=args.timeout_s,
+                out_name=args.out_name,
+                out_root=out_root,
+                dp=dp,
+                nproc=nproc,
+                extra_child_flags=extra_child_flags,
+            )
+
+            # Prepend nsys wrapper when profiling.
+            #
+            # Under DP>1, nsys wraps torchrun at the outermost layer and follows
+            # forked rank processes via --trace-fork-before-exec=true (set
+            # below). The child uses rank-0-only cudaProfilerStart/Stop; because
+            # --capture-range=cudaProfilerApi is an nsys-level mechanism, a
+            # single rank's cudaProfilerStart() triggers capture across every
+            # traced process in the world group. Precondition: validate
+            # capture-range propagation across torchrun siblings with a DP=2
+            # sanity run before first production DP profiling (spec §4.5).
+            child_env = dict(run.env) if run.env else dict(os.environ)
+            child_env = _ensure_worktree_pythonpath(child_env)
+            # --fresh-cache: inject per-sweep VLLM_CACHE_ROOT/TRITON_CACHE_DIR
+            # AFTER _ensure_worktree_pythonpath so both the run.env and
+            # os.environ branches receive identical cache overrides.
+            if sweep_cache_root is not None:
+                child_env = _inject_fresh_cache_env(child_env, sweep_cache_root)
+            if args.nsys_profile:
+                child_env = _inject_nsys_execute_timeout_env(
+                    child_env, args.nsys_timeout_s
                 )
+                assert nsys_dir is not None
+                # fork multiproc semantics conflict with torch.distributed.run's
+                # own bootstrapping; only force 'spawn' in the single-process path.
+                if dp == 1:
+                    child_env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+                nsys_prefix = [
+                    "nsys", "profile",
+                    f"--trace={args.nsys_trace},nvtx",
+                    "--sample=none",
+                    "--capture-range=cudaProfilerApi",
+                    f"--capture-range-end=repeat:{len(nsys_expected_buckets)}",
+                    f"--cuda-graph-trace={args.nsys_mode}",
+                    "--trace-fork-before-exec=true",
+                    "--force-overwrite=true",
+                    "-o", str(nsys_dir / f"{run.label}_profile"),
+                ]
+                if args.nsys_extra_flags:
+                    import shlex as _shlex
+                    nsys_prefix.extend(_shlex.split(args.nsys_extra_flags))
+                # nsys wraps the outermost process (torchrun under DP>1, python
+                # under DP=1). --trace-fork-before-exec ensures child ranks are
+                # captured; per-rank .nsys-rep files are emitted.
+                child_cmd = nsys_prefix + child_cmd
+
+            launch_suffix = (
+                f" (launch {launch_id}/{total_launches}"
+                f"{' WARMUP' if is_warmup else ''})"
+                if total_launches >= 2 else ""
+            )
+            print(f"\n=== Running inproc sweep for {run.label}{launch_suffix} ===")
+            print(f"Child cmd: {_format_cmd_for_md(child_cmd, {})}")
+            # Per-launch supervisor log; the N=1 path keeps the legacy name.
+            if total_launches >= 2:
+                child_log = logs_dir / f"{run.label}_launch{launch_id}_supervisor.log"
+            else:
+                child_log = logs_dir / f"{run.label}_supervisor.log"
+            child_status = status_dir / f"{run.label}.json"
+
+            if not hang_watchdog:
+                # ---- Legacy path: single streamed run; fail-fast on non-zero. ----
+                child_res = _run_cmd_streaming(
+                    child_cmd,
+                    env=child_env,
+                    cwd=None,
+                    timeout_s=child_timeout,
+                    log_path=child_log,
+                    heartbeat_s=int(args.heartbeat_s),
+                    status_path=child_status,
+                )
+                if not child_res.get("ok"):
+                    hint = ""
+                    if args.nsys_profile and child_res.get("returncode") in (-9, 137, None):
+                        hint = (
+                            " This is likely an nsys --cuda-graph-trace=node replay hang. "
+                            "Try --nsys-capture-output-steps 2,50%,100% "
+                            "--nsys-num-iters 1 for a bounded selected-step "
+                            "node-mode capture, use --nsys-trace cuda-sw on "
+                            "Blackwell, switch to --nsys-mode graph, reduce workload "
+                            "batch_sizes, or increase --nsys-timeout-s "
+                            f"(current: {args.nsys_timeout_s}s per bucket)."
+                        )
+                    raise SystemExit(
+                        f"Inproc sweep child failed for {run.label}{launch_suffix}: "
+                        f"returncode={child_res.get('returncode')}. "
+                        f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
+                        f"{hint}"
+                    )
+            else:
+                # ---- Hang-watchdog path: detect an in-engine freeze, kill the
+                # child's process group, and relaunch skipping the buckets already
+                # done on disk PLUS the wedged one. Completed buckets are already
+                # persisted (json/{label}_{tag}.json), so partial results survive
+                # a hang and the sweep reports what ran. Buckets carried in
+                # hung_tags (gave up earlier) are skipped from the first attempt. ----
+                this_label_json = (lambda tag: json_dir / f"{run.label}_{tag}.json")
+                attempt = 0
+                while True:
+                    attempt += 1
+                    # Done = buckets with a valid (non-error, non-skipped) raw JSON.
+                    done_tags: set = set()
+                    for tag in bucket_meta:
+                        jp = this_label_json(tag)
+                        if jp.exists():
+                            try:
+                                raw = _read_json(jp)
+                            except Exception:
+                                raw = {}
+                            if isinstance(raw, dict) and "avg_latency" in raw:
+                                done_tags.add(tag)
+                    skip = done_tags | hung_tags
+                    attempt_cmd = list(child_cmd)
+                    if skip:
+                        attempt_cmd += ["--_skip-tags", ",".join(sorted(skip))]
+                    if attempt > 1 or skip:
+                        print(
+                            f"[hang-watchdog] {run.label}: attempt {attempt}; "
+                            f"skipping {len(skip)} bucket(s) already done/wedged "
+                            f"({sorted(skip) if skip else 'none'})",
+                            flush=True,
+                        )
+                    child_res = _run_cmd_streaming_watchdog(
+                        attempt_cmd,
+                        env=child_env,
+                        cwd=None,
+                        timeout_s=child_timeout,
+                        log_path=child_log,
+                        heartbeat_s=int(args.heartbeat_s),
+                        status_path=child_status,
+                        bucket_meta=bucket_meta,
+                        base_stale_s=int(getattr(args, "hang_stale_warmup_s", 130)),
+                    )
+                    if child_res.get("ok"):
+                        break  # child finished all remaining buckets cleanly
+                    if child_res.get("hung"):
+                        wedged = child_res.get("wedged_tag") or ""
+                        if wedged:
+                            hung_tags.add(wedged)
+                        if relaunch_budget[0] <= 0:
+                            print(
+                                f"[hang-watchdog] {run.label}: relaunch budget exhausted "
+                                f"after wedged bucket '{wedged}'. Reporting partial results "
+                                "for the buckets that completed.",
+                                flush=True,
+                            )
+                            break
+                        relaunch_budget[0] -= 1
+                        print(
+                            f"[hang-watchdog] {run.label}: bucket '{wedged or '?'}' wedged the "
+                            f"engine; relaunching (budget left={relaunch_budget[0]}).",
+                            flush=True,
+                        )
+                        continue
+                    # Genuine non-hung failure (crash/OOM/non-zero exit): preserve
+                    # the legacy fail-fast contract.
+                    raise SystemExit(
+                        f"Inproc sweep child failed for {run.label}{launch_suffix}: "
+                        f"returncode={child_res.get('returncode')}. "
+                        f"See {child_log} and {logs_dir / f'{run.label}_child.log'}"
+                    )
+
+            # Capture this launch's per-bucket avg_latency/latencies BEFORE the
+            # next launch overwrites json/{label}_{tag}.json. The legacy layout
+            # (N=1) leaves the files in place — the collection step below reads
+            # them directly.
+            if total_launches >= 2:
+                label_map = per_label_bucket_launches.setdefault(run.label, {})
+                for p in planned:
+                    tag = p["tag"]
+                    src = Path(p["baseline_json"] if run.label == baseline_label else p["opt_json"])
+                    try:
+                        raw = _read_json(src) if src.exists() else {}
+                    except SystemExit:
+                        raw = {}
+                    entry = {
+                        "launch_id": launch_id,
+                        "warmup": is_warmup,
+                        "avg_latency": raw.get("avg_latency") if isinstance(raw, dict) else None,
+                        "latencies": raw.get("latencies") if isinstance(raw, dict) else None,
+                    }
+                    label_map.setdefault(tag, []).append(entry)
+                    # Archive the raw JSON so the last-launch copy doesn't
+                    # mask earlier launches if debugging is needed.
+                    try:
+                        archive = src.with_name(
+                            src.stem + f".launch{launch_id}" + src.suffix
+                        )
+                        if src.exists():
+                            shutil.copy2(str(src), str(archive))
+                    except Exception:
+                        pass
+
+            # Rename nsys output files to match bucket tags.
+            if nsys_dir is not None:
+                # This label's spec-decode positions_per_step (used as the fallback when a
+                # bucket predates the per-bucket stamp). label_args mirrors the child dispatch.
+                label_args = baseline_args if run.label == baseline_label else opt_args
+                run_ppt = _parse_positions_per_step(label_args)
+                nsys_tag_buckets = nsys_expected_buckets
+                renamed = 0
+                renamed_selected_step: List[Tuple[Path, Dict[str, int]]] = []
+                for i, bucket in enumerate(nsys_tag_buckets, 1):
+                    src = nsys_dir / f"{run.label}_profile.{i}.nsys-rep"
+                    tag = _bucket_file_tag(bucket, nsys_tag_buckets)
+                    dst = nsys_dir / f"{run.label}_{tag}.nsys-rep"
+                    if src.exists():
+                        src.rename(dst)
+                        print(f"  nsys: {src.name} -> {dst.name}")
+                        renamed += 1
+                        if _is_nsys_selected_step_bucket(bucket):
+                            renamed_selected_step.append((dst, bucket))
+                if renamed < len(nsys_tag_buckets):
+                    # Selected-step reps are renamed POSITIONALLY (profile.{i} -> bucket[i]).
+                    # If the CUDA profiler failed to arm for some buckets (the spec-decode
+                    # never-arm bug: a generation too short to reach delay_iterations), the
+                    # surviving reps would be silently mislabeled (e.g. an armed bs32 step
+                    # renamed as bs1 — the exact root cause of the failed artifacts). After the
+                    # spec-aware sizing every selected-step bucket arms, so a shortfall now
+                    # means a real capture failure: fail loud rather than mine mislabeled reps.
+                    if any(_is_nsys_selected_step_bucket(b) for b in nsys_tag_buckets):
+                        raise SystemExit(
+                            f"ERROR: nsys produced {renamed} of {len(nsys_tag_buckets)} "
+                            f"selected-step reps for {run.label}; a capture failed to arm. "
+                            "Selected-step reps are renamed POSITIONALLY so a partial emission "
+                            "would silently mislabel captures (e.g. an armed bs32 step renamed "
+                            "as bs1). Re-profile; do not mine these traces."
+                        )
+                    print(
+                        f"  WARNING: nsys produced {renamed} of {len(nsys_tag_buckets)} "
+                        f"expected profile files for {run.label}"
+                    )
+                # Guard each selected-step capture: export to sqlite and assert it is a
+                # genuine steady-state decode step (NOT a chunked-prefill chunk). This is
+                # the wired backstop for the prefill-contamination class — mining must never
+                # consume a prefill-shaped capture as 'decode-graph %'. Fails loud.
+                for dst, bucket in renamed_selected_step:
+                    sqlite_path = _export_nsys_sqlite(dst)
+                    if sqlite_path is None:
+                        print(
+                            f"  WARNING: could not export {dst.name} to sqlite for the "
+                            "decode-shape guard; skipping the automatic check. Run "
+                            "assert_decode_shaped_capture manually before mining.",
+                            file=sys.stderr,
+                        )
+                        continue
+                    # Prefer the per-bucket stamped ppt (matches what was profiled); fall back
+                    # to the label-derived value for buckets that predate the stamp.
+                    bucket_ppt = int(
+                        bucket.get("nsys_capture_positions_per_step", run_ppt)
+                    )
+                    assert_decode_shaped_capture(
+                        str(sqlite_path),
+                        int(bucket["batch_size"]),
+                        positions_per_step=bucket_ppt,
+                    )
+                    print(
+                        f"  decode-shape guard PASSED for {dst.name} "
+                        f"(bs={bucket['batch_size']}, step={bucket['nsys_capture_output_step']}, "
+                        f"positions_per_step={bucket_ppt})"
+                    )
 
     # Import Stage 1 baseline artifacts when --baseline-from is set.
     # This copies baseline JSON + runner JSON into the gate run's json/ dir
@@ -2189,46 +4945,57 @@ def main() -> None:
         baseline_status = _read_json(baseline_runner_json) if baseline_runner_json.exists() else {"ok": None}
         opt_status = _read_json(opt_runner_json) if opt_runner_json.exists() else {"ok": None}
 
-        baseline_entry = {
-            "ok": baseline_status.get("ok"),
-            "returncode": 0 if baseline_status.get("ok") else 1,
-            "cmd": p["baseline_cmd"],
-            "env_overrides": baseline_env,
-            "metrics": baseline_metrics,
-            "avg_s": baseline_metrics.get("avg_s"),
-            "fastpath_evidence": {
-                **baseline_evidence,
-                "status": _status_from_evidence(baseline_evidence, baseline_patterns_configured),
-            },
-            "log": str(baseline_log.relative_to(out_root)),
-            "output_json": str(baseline_json.relative_to(out_root)),
-            "runner_json": str(baseline_runner_json.relative_to(out_root)),
-            "timing": {
+        # Resolve per-launch data (only populated when num_launches >= 2).
+        baseline_launches = None
+        baseline_aggregate = None
+        opt_launches = None
+        opt_aggregate = None
+        if total_launches >= 2:
+            baseline_launches = per_label_bucket_launches.get(baseline_label, {}).get(tag)
+            opt_launches = per_label_bucket_launches.get(opt_label, {}).get(tag)
+            if baseline_launches:
+                baseline_aggregate = _aggregate_launches(baseline_launches)
+            if opt_launches:
+                opt_aggregate = _aggregate_launches(opt_launches)
+
+        baseline_entry = _build_label_result_entry(
+            cmd=p["baseline_cmd"],
+            env_overrides=baseline_env,
+            metrics=baseline_metrics,
+            log_rel=str(baseline_log.relative_to(out_root)),
+            output_json_rel=str(baseline_json.relative_to(out_root)),
+            runner_json_rel=str(baseline_runner_json.relative_to(out_root)),
+            ok=baseline_status.get("ok"),
+            returncode=0 if baseline_status.get("ok") else 1,
+            evidence_status=_status_from_evidence(baseline_evidence, baseline_patterns_configured),
+            evidence=baseline_evidence,
+            timing={
                 "start_time": baseline_status.get("start_time"),
                 "end_time": baseline_status.get("end_time"),
                 "duration_s": baseline_status.get("duration_s"),
             },
-        }
-        opt_entry = {
-            "ok": opt_status.get("ok"),
-            "returncode": 0 if opt_status.get("ok") else 1,
-            "cmd": p["opt_cmd"],
-            "env_overrides": {**baseline_env, **opt_env},
-            "metrics": opt_metrics,
-            "avg_s": opt_metrics.get("avg_s"),
-            "fastpath_evidence": {
-                **opt_evidence,
-                "status": _status_from_evidence(opt_evidence, opt_patterns_configured),
-            },
-            "log": str(opt_log.relative_to(out_root)),
-            "output_json": str(opt_json.relative_to(out_root)),
-            "runner_json": str(opt_runner_json.relative_to(out_root)),
-            "timing": {
+            launches=baseline_launches,
+            aggregate=baseline_aggregate,
+        )
+        opt_entry = _build_label_result_entry(
+            cmd=p["opt_cmd"],
+            env_overrides={**baseline_env, **opt_env},
+            metrics=opt_metrics,
+            log_rel=str(opt_log.relative_to(out_root)),
+            output_json_rel=str(opt_json.relative_to(out_root)),
+            runner_json_rel=str(opt_runner_json.relative_to(out_root)),
+            ok=opt_status.get("ok"),
+            returncode=0 if opt_status.get("ok") else 1,
+            evidence_status=_status_from_evidence(opt_evidence, opt_patterns_configured),
+            evidence=opt_evidence,
+            timing={
                 "start_time": opt_status.get("start_time"),
                 "end_time": opt_status.get("end_time"),
                 "duration_s": opt_status.get("duration_s"),
             },
-        }
+            launches=opt_launches,
+            aggregate=opt_aggregate,
+        )
 
         new_row: Dict[str, Any] = {
             "batch_size": bs,
@@ -2245,6 +5012,34 @@ def main() -> None:
             improvement_pct = (b_avg - o_avg) / b_avg * 100.0 if b_avg != 0 else None
             new_row["speedup"] = speedup
             new_row["improvement_pct"] = improvement_pct
+
+        # OTPS (output tokens/sec) + TPOT (time per output token), derived from
+        # the real decode timing already on each entry (decode_avg_s). Stored on
+        # each label entry; A/B deltas surfaced as row siblings. Higher OTPS and
+        # lower TPOT are better, so otps_gain_pct uses opt-over-baseline and
+        # tpot_improvement_pct uses baseline-over-opt (mirrors improvement_pct).
+        b_tp = _compute_token_throughput(baseline_entry, b_ol, bs)
+        o_tp = _compute_token_throughput(opt_entry, b_ol, bs)
+        baseline_entry.update(b_tp)
+        opt_entry.update(o_tp)
+        b_otps, o_otps = b_tp.get("otps"), o_tp.get("otps")
+        if isinstance(b_otps, (int, float)) and isinstance(o_otps, (int, float)) and b_otps > 0:
+            new_row["otps_gain_pct"] = (o_otps - b_otps) / b_otps * 100.0
+        b_tpot, o_tpot = b_tp.get("tpot_s"), o_tp.get("tpot_s")
+        if isinstance(b_tpot, (int, float)) and isinstance(o_tpot, (int, float)) and b_tpot > 0:
+            new_row["tpot_improvement_pct"] = (b_tpot - o_tpot) / b_tpot * 100.0
+
+        # NOISE flag: |delta| < 2*max(stddev). Only emitted when both
+        # labels have multi-launch aggregate data.
+        if (isinstance(baseline_aggregate, dict) and isinstance(opt_aggregate, dict)
+                and isinstance(baseline_aggregate.get("mean_latency"), (int, float))
+                and isinstance(opt_aggregate.get("mean_latency"), (int, float))):
+            new_row["noise"] = _compute_noise_flag(
+                float(baseline_aggregate["mean_latency"]),
+                float(baseline_aggregate.get("stddev_cross_launch", 0.0)),
+                float(opt_aggregate["mean_latency"]),
+                float(opt_aggregate.get("stddev_cross_launch", 0.0)),
+            )
 
         new_rows.append(new_row)
 
@@ -2289,6 +5084,22 @@ def main() -> None:
 
     print(f"\nWrote: {out_json_path}")
     print(f"Wrote: {out_md_path}")
+
+    # --fresh-cache: remove the per-sweep cache dir after a successful sweep.
+    # We remove the entire out_root/cache/ tree to catch any sibling temp dirs
+    # left behind by prior runs that did not finish cleanly.
+    if args.fresh_cache:
+        cache_parent = out_root / "cache"
+        if cache_parent.exists():
+            try:
+                shutil.rmtree(cache_parent, ignore_errors=True)
+                print(f"[fresh-cache] removed ephemeral cache dir: {cache_parent}")
+            except Exception as e:  # pragma: no cover — best-effort cleanup
+                print(
+                    f"[fresh-cache] WARNING: failed to remove cache dir "
+                    f"{cache_parent}: {type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
 
 
 if __name__ == "__main__":

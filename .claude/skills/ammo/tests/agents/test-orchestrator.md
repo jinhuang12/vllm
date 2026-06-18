@@ -1,6 +1,26 @@
 # Orchestrator (Lead) Conformance Tests
 
-Workflow conformance tests for the AMMO lead orchestrator. Verifies the agent correctly follows the campaign workflow: overlapped debate pipeline, resume after interruption, campaign evaluation, integration decisions, role boundaries, and non-negotiable violation detection.
+Workflow conformance tests for the AMMO lead orchestrator. Verifies the agent correctly follows the campaign workflow: current-round track monitoring, resume after interruption, campaign evaluation, integration decisions, role boundaries, and non-negotiable violation detection.
+
+All state snippets below use the **v2 round-centric shape**
+(`ai_cli_session/.claude/schemas/state.schema.json`, `$id = ammo.campaign.state/v2`).
+Only the fields needed to disambiguate a scenario are shown; every scenario
+also assumes the bootstrap-required fields (`target`, `session_id`,
+`gpu_resources`, `campaign.config`, all stage sub-objects on each round entry)
+are present with canonical defaults.
+
+Key v2 reminders when reading these scenarios:
+
+- Top-level `stage`, `parallel_tracks`, `integration`, `debate`, `summary`, and
+  `stage_timestamps` no longer exist. Stage lives at `campaign.current_stage`;
+  per-round state lives under `campaign.rounds[N-1]`.
+- Track status enum is `{IN_PROGRESS, PASS, GATING_REQUIRED, GATED_PASS, FAIL,
+  GPU_BLOCKED}` (not `PASSED`/`FAILED`). Per-track failure reason is
+  `tracks[op].fail_reason`.
+- Thresholds live under `campaign.config` (e.g.
+  `campaign.config.min_e2e_improvement_pct`).
+
+Claude runtime note: references to a "round team" or `team_name` mean the actual Claude round team managed by TeamCreate/TeamDelete. Debate champions are shut down with `shutdown_request`; the round team persists across debate and implementation until Stage 4-5 tracks are resolved.
 
 ## How to Run
 
@@ -18,7 +38,7 @@ Run the AMMO orchestrator conformance tests. Spawn Sonnet subagents that:
    - "Skill reference:"
 
 Run in 4 parallel batches:
-- Batch A: Scenarios 1a-1e (Overlapped Debate)
+- Batch A: Scenarios 1a-1c (Current-Round Track Monitoring)
 - Batch B: Scenarios 2a-2c (Resume After Interruption)
 - Batch C: Scenarios 3a-3c, 4a-4c (Campaign Eval + Integration)
 - Batch D: Scenarios 5a-5b, 6a-6d (Role Boundaries + Violation Detection)
@@ -28,306 +48,273 @@ Grade each response against the "Expected Behavior" column.
 
 ## Test Scenarios
 
-### Category 1: Overlapped Debate Pipeline
+### Category 1: Current-Round Track Monitoring
 
-**Scenario 1a: Stage 4-5, Round 2, overlapped debate NOT started**
+**Scenario 1a: Stage 4-5, Round 2, tracks still running**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "team_name": "ammo-round-2-llama70b-h100",
-    "selected_winners": ["op001", "op002"],
-    "next_round_overlap": { "active": false, "phase": null, "selected_winners": [], "profiling_basis": null, "f_values_at_proposal": {} }
-  },
-  "parallel_tracks": {
-    "op001": { "status": "in_progress" },
-    "op002": { "status": "in_progress" }
+  "campaign": {
+    "status": "active",
+    "current_round": 2,
+    "current_stage": "4_5_parallel_tracks",
+    "rounds": [
+      { "round_id": 1, "status": "completed", "...": "..." },
+      {
+        "round_id": 2,
+        "status": "IN_PROGRESS",
+        "team_name": "ammo-round-2-llama70b-h100",
+        "debate": {
+          "started_at": "...", "completed_at": "...",
+          "selected_winners": ["op001", "op002"]
+        },
+        "parallel_tracks": {
+          "started_at": "...", "completed_at": null,
+          "tracks": {
+            "op001": { "status": "IN_PROGRESS" },
+            "op002": { "status": "IN_PROGRESS" }
+          }
+        },
+        "integration": { "started_at": null, "completed_at": null, "status": "pending" },
+        "campaign_eval": { "started_at": null, "completed_at": null }
+      }
+    ]
   }
 }
 ```
-Context: Two impl tracks are running (impl-champion agents) in the round team. Existing bottleneck_analysis.md from round 1.
+Context: Two impl tracks are running (impl-champion agents) in the round team.
 
-Expected behavior: Launch overlapped debate IMMEDIATELY. Spawn debate champions into the existing round team. Set `debate.next_round_overlap.active: true`. Monitor both impl tracks and debate. Do NOT stop until all complete.
+Expected behavior: Monitor current-round implementation tracks only. Do not create a round-3 entry or spawn debate champions during Stage 4-5. Advance to Stage 6 only after all current-round tracks are terminal and audit gates allow.
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Immediately launch the overlapped round 3 debate by spawning 2-4 ammo-champion agents into the existing round team (`ammo-round-2-llama70b-h100`). Use the existing `bottleneck_analysis.md` from round 1. Set `debate.next_round_overlap.active: true` and `debate.next_round_overlap.phase: "phase_0"` in `state.json`.
-2. While the overlapped debate runs, actively monitor the two impl tracks (op001 and op002).
-3. Interleave debate moderation with impl monitoring: broadcast debate phase starts, then check for impl track completions, then wait for debate phase completions.
-4. As each impl-champion completes (track complete), run its compilation gate (T9) and update `state.json` `parallel_tracks.{op_id}` (T10).
-5. When debate finishes: score winners, shut down debate champions via `shutdown_request`. Record winners in `debate.next_round_overlap.selected_winners`. Set `debate.next_round_overlap.phase: "selection_complete"`.
-6. Continue monitoring until all impl tracks have returned results AND the overlapped debate has completed.
+1. Continue actively monitoring the two current-round impl tracks (op001 and op002) on `campaign.rounds[1]`.
+2. As each impl-champion returns, run its compilation gate (T9) in the track worktree.
+3. Update `campaign.rounds[1].parallel_tracks.tracks[op_id]` after each track has validated evidence (T10).
+4. Run the Stage 4-5 validation gate report and record the result under the active round.
+5. When all current-round tracks are terminal and audit gates allow, TeamDelete the round team (`ammo-round-2-llama70b-h100`).
+6. Set `campaign.current_stage = "6_integration"` only after there are no non-terminal current-round tracks.
 
 **Must NOT do:**
-- Skip or defer the overlapped debate. It is MANDATORY for round 2+ and must be launched immediately after impl agents are spawned.
-- Create a separate team for the debate — debate champions join the existing round team.
+- Append a future-round entry during Stage 4-5.
+- Spawn debate champions while current-round implementation tracks are active.
 - Implement anything yourself.
-- Send overlapped debate winners to implementation now — they stay in `debate.next_round_overlap.selected_winners` until the next round (subject to lazy invalidation after re-profiling).
-- Go idle/stop while either impl tracks or the debate are still running.
-- Re-profile to generate new bottleneck data — the overlapped debate uses the EXISTING `bottleneck_analysis.md`.
+- Go idle while either current-round impl track is still running.
+- Advance to Stage 6 while any current-round track is `IN_PROGRESS`, `GATING_REQUIRED`, or `GPU_BLOCKED`.
 
 **Skill reference:**
-- `SKILL.md` § Stages 4-5, step 2: "Launch overlapped debate (round 2+ only): If `campaign.current_round >= 2`, spawn 2-4 ammo-champion agents into the same round team."
-- `SKILL.md` § Overlapped Debate: "When to launch: Immediately after spawning all implementation agents for round N."
-- `SKILL.md` § Stages 4-5, step 3: "Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed."
+- `SKILL.md` § Stages 4-5: "Do not advance to Stage 6 until all current-round implementation tracks are terminal."
+- `orchestration/parallel-tracks.md`: `GPU_BLOCKED` is a lead-triage blocker, not terminal Stage 6 accounting.
 </details>
 
 ---
 
-**Scenario 1b: Stage 4-5, Round 1, no overlapped debate**
+**Scenario 1b: Stage 4-5, all current-round tracks terminal**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 1 },
-  "debate": {
-    "team_name": "ammo-round-1-llama70b-h100",
-    "selected_winners": ["op001"],
-    "next_round_overlap": { "active": false, "phase": null, "selected_winners": [], "profiling_basis": null, "f_values_at_proposal": {} }
-  },
-  "parallel_tracks": { "op001": { "status": "in_progress" } }
+  "campaign": {
+    "status": "active",
+    "current_round": 1,
+    "current_stage": "4_5_parallel_tracks",
+    "rounds": [
+      {
+        "round_id": 1,
+        "status": "IN_PROGRESS",
+        "team_name": "ammo-round-1-llama70b-h100",
+        "debate": { "selected_winners": ["op001"] },
+        "parallel_tracks": {
+          "started_at": "...", "completed_at": "...",
+          "tracks": { "op001": { "status": "PASS", "verdict": "PASS", "e2e_speedup": 1.12 } }
+        },
+        "integration": { "status": "pending" }
+      }
+    ]
+  }
 }
 ```
-Context: First round of the campaign. One impl track is running (impl-champion agent). No prior bottleneck data exists beyond the current round's.
+Context: First round of the campaign. The only impl track has returned and passed.
 
-Expected behavior: Do NOT launch overlapped debate (round 1). Monitor impl track only. Gate when it returns.
+Expected behavior: Gate the completed track, close the active round agents/monitors, and proceed to Stage 6.
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Monitor the running impl track (op001) — watch for the impl-champion's return.
-2. When op001's impl-champion returns (track complete), run the compilation gate (T9) in its worktree.
-3. Read `{artifact_dir}/tracks/op001/validation_results.md` and update `state.json` `parallel_tracks.op001` with structured status/metrics (T10).
-4. Proceed to T11 (all tracks have results), then TeamDelete the round team (`ammo-round-1-llama70b-h100`), and advance to Stage 6 integration.
+1. Run or confirm the compilation gate (T9) for op001 in its worktree.
+2. Read `{artifact_dir}/rounds/{CR}/tracks/op001/validation_results.md` and ensure `campaign.rounds[0].parallel_tracks.tracks.op001` carries structured status/metrics (T10).
+3. Run the Stage 4-5 validation gate report.
+4. Satisfy T11 (all tracks terminal), then TeamDelete the round team (`ammo-round-1-llama70b-h100`).
+5. Advance to Stage 6 by setting `campaign.current_stage = "6_integration"`.
 
 **Must NOT do:**
-- Launch an overlapped debate. Round 1 has no prior bottleneck data to debate from — overlapped debate is explicitly skipped for round 1.
-- Go idle while op001 is still running — continue actively monitoring.
+- Start the next round's debate before Stage 6/7 campaign evaluation.
+- Leave active impl-champion/monitor agents open after all current-round tracks are terminal.
 - Implement anything yourself.
 
 **Skill reference:**
-- `SKILL.md` § Stages 4-5, step 2: "For round 1, skip this step."
-- `SKILL.md` § Overlapped Debate: "If round N is round 1: Do NOT launch overlapped debate. Round 1 has no prior profiling data for the next round's debate to use."
+- `SKILL.md` § Stages 4-5: "Proceed to integration only when `overall_status == \"PASS\"`."
+- `SKILL.md` § Stage 6: "Only Stage-5-passing candidates may integrate."
 </details>
 
 ---
 
-**Scenario 1c: Stage 4-5, Round 3, overlapped debate already running**
+**Scenario 1c: Current-round track is GPU_BLOCKED**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 3 },
-  "debate": {
-    "team_name": "ammo-round-3-llama70b-h100",
-    "selected_winners": ["op003", "op004"],
-    "next_round_overlap": { "active": true, "phase": "debating", "selected_winners": [], "profiling_basis": "bottleneck_analysis.md", "f_values_at_proposal": {} }
-  },
-  "parallel_tracks": {
-    "op003": { "status": "in_progress" },
-    "op004": { "status": "in_progress" }
+  "campaign": {
+    "status": "active",
+    "current_round": 3,
+    "current_stage": "4_5_parallel_tracks",
+    "rounds": [
+      { "round_id": 1, "status": "completed", "...": "..." },
+      { "round_id": 2, "status": "completed", "...": "..." },
+      {
+        "round_id": 3,
+        "status": "IN_PROGRESS",
+        "team_name": "ammo-round-3-llama70b-h100",
+        "debate": { "selected_winners": ["op003", "op004"] },
+        "parallel_tracks": {
+          "tracks": {
+            "op003": { "status": "PASS", "verdict": "PASS", "e2e_speedup": 1.06 },
+            "op004": { "status": "GPU_BLOCKED", "verdict": null, "fail_reason": "gpu_unavailable" }
+          }
+        }
+      }
+    ]
   }
 }
 ```
-Context: Impl tracks for round 3 running (impl-champion agents). Overlapped debate for round 4 already active in the round team, currently in debate rounds phase.
+Context: One current-round track passed. The other could not complete because GPUs were unavailable.
 
-Expected behavior: Continue moderating debate. Also gate any completed impl tracks. Do NOT create a second debate. Wait for all to complete before Stage 6.
+Expected behavior: Treat `GPU_BLOCKED` as non-terminal. Perform explicit lead triage before retrying, closing, or marking the round exhausted. Do not advance to Stage 6 yet.
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Continue actively monitoring both running impl tracks (op003 and op004).
-2. As each impl-champion returns (track complete), run its compilation gate (T9) in its respective worktree.
-3. Update `state.json` `parallel_tracks.{op_id}` after each T9 passes (T10).
-4. Concurrently moderate the already-running overlapped debate — interleave debate phase broadcasts with impl completion checks.
-5. When the debate concludes, score winners, shut down debate champions via `shutdown_request`, and record winners in `debate.next_round_overlap.selected_winners`. Set `debate.next_round_overlap.phase: "selection_complete"`.
-6. Do NOT advance to Stage 6 until all impl tracks have returned AND the overlapped debate has completed.
+1. Confirm op003's evidence and gate result are recorded.
+2. Inspect op004's worktree/logs to determine whether the GPU block is transient, retryable, or requires abandoning the track.
+3. If retryable, keep op004 non-terminal and retry under explicit lead control.
+4. If not retryable, write a terminal `FAIL` with evidence and `fail_reason` before Stage 6 accounting.
+5. Run the Stage 4-5 validation gate report only after every current-round track is terminal.
+6. Advance to Stage 6 only after op004 is no longer `GPU_BLOCKED`.
 
 **Must NOT do:**
-- Create a second debate or re-launch the overlapped debate — one is already running (`debate.next_round_overlap.active: true`).
-- Send the overlapped debate's winners to implementation immediately — they stay in `debate.next_round_overlap.selected_winners` for the next round.
-- Stop or go idle while either impl tracks or the debate are still in-flight.
-- Terminate the running debate early even if impl tracks finish first.
+- Count `GPU_BLOCKED` as terminal.
+- Advance to Stage 6 while op004 is `GPU_BLOCKED`.
+- Report candidate success for a track that never produced compliant evidence.
+- Start future-round work before the current round is resolved.
 
 **Skill reference:**
-- `SKILL.md` § Overlapped Debate: "If all implementation tracks complete before debate finishes: Wait for debate to complete before proceeding to Stage 6."
-- `SKILL.md` § Stages 4-5, step 3: "Do NOT stop or go idle until all implementation agents have returned results AND the overlapped debate (if launched) has completed."
-</details>
-
----
-
-**Scenario 1d: All impl tracks done, overlapped debate still running**
-
-State:
-```json
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "team_name": "ammo-round-2-llama70b-h100",
-    "next_round_overlap": { "active": true, "phase": "debating", "selected_winners": [], "profiling_basis": "bottleneck_analysis.md", "f_values_at_proposal": {} }
-  },
-  "parallel_tracks": {
-    "op001": { "status": "PASSED", "result": { "e2e_speedup": 1.12 } },
-    "op002": { "status": "FAILED", "result": { "reason": "correctness" } }
-  }
-}
-```
-Context: Both impl tracks returned. op001 passed, op002 failed. Overlapped debate for round 3 still in debate rounds phase within the round team.
-
-Expected behavior: Wait for overlapped debate to complete. Do NOT advance to Stage 6 yet. Gate impl results while moderating debate.
-
-<details>
-<summary>Reference output</summary>
-
-**Next actions (in order):**
-1. Run the compilation gate (T9) for op001 (passed) in op001's worktree. (op002 failed — mark it `FAILED` in state.json; no gate needed.)
-2. Update `state.json` `parallel_tracks.op001` and `parallel_tracks.op002` with their structured statuses (T10).
-3. Wait for the overlapped debate to finish all debate rounds. Continue moderating it — broadcast phases, receive champion messages.
-4. Once the debate concludes, score winners, shut down debate champions via `shutdown_request`, record winners in `debate.next_round_overlap.selected_winners`, and set `debate.next_round_overlap.phase: "selection_complete"`.
-5. Only after all impl tracks are fully recorded AND the overlapped debate is complete: satisfy T11, TeamDelete the round team (`ammo-round-2-llama70b-h100`), and advance to Stage 6 integration with op001 as the sole passing candidate.
-
-**Must NOT do:**
-- Advance to Stage 6 integration before the overlapped debate finishes.
-- Terminate or abandon the in-progress overlapped debate because the impl tracks are already done.
-- Send overlapped debate winners to implementation during this stage — they stay in `debate.next_round_overlap.selected_winners` for the next round.
-- Skip the T9 compilation gate for op001 because it reported PASSED.
-
-**Skill reference:**
-- `SKILL.md` § Overlapped Debate: "If all implementation tracks complete before debate finishes: Wait for debate to complete before proceeding to Stage 6. Do not terminate the debate."
-- `SKILL.md` § Stages 4-5, step 4: "TeamDelete after all tracks complete: Once all implementation tracks have finished... AND the overlapped debate (if launched) has completed, call TeamDelete on the round team."
-</details>
-
----
-
-**Scenario 1e: Overlapped debate complete, impl tracks still running**
-
-State:
-```json
-{
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "team_name": "ammo-round-2-llama70b-h100",
-    "next_round_overlap": { "active": true, "phase": "selection_complete", "selected_winners": ["op003", "op004"], "profiling_basis": "bottleneck_analysis.md", "f_values_at_proposal": { "op003": 0.12, "op004": 0.08 } }
-  },
-  "parallel_tracks": {
-    "op001": { "status": "in_progress" },
-    "op002": { "status": "PASSED", "result": { "e2e_speedup": 1.08 } }
-  }
-}
-```
-Context: Overlapped debate for round 3 finished — winners op003 and op004 selected and parked. op002 passed and was gated. op001 still running in the round team.
-
-Expected behavior: Continue monitoring impl tracks. Winners are parked in `debate.next_round_overlap.selected_winners`. Do NOT advance to Stage 6 until op001 completes.
-
-<details>
-<summary>Reference output</summary>
-
-**Next actions (in order):**
-1. Continue actively monitoring impl track op001 — wait for the impl-champion to return.
-2. When op001's impl-champion returns (track complete), run the compilation gate (T9) in its worktree.
-3. Update `state.json` `parallel_tracks.op001` with structured status/metrics (T10).
-4. Once all impl tracks have returned: satisfy T11, TeamDelete the round team (`ammo-round-2-llama70b-h100`), and advance to Stage 6 integration.
-5. The overlapped debate winners (`op003`, `op004`) remain parked in `debate.next_round_overlap.selected_winners` — they will be consumed during the next round's campaign evaluation (subject to lazy invalidation after re-profiling).
-
-**Must NOT do:**
-- Stop or go idle while op001 is still running.
-- TeamDelete the round team before op001 completes — the round team persists until ALL tracks are done.
-- Move the overlapped debate winners to implementation now — they are for the next round.
-- Re-launch or restart the overlapped debate — it is already complete (`phase: "selection_complete"`).
-
-**Skill reference:**
-- `SKILL.md` § Overlapped Debate: "If debate finishes before all implementation tracks complete: Record winners. Continue monitoring implementation tracks."
-- `SKILL.md` § Stages 4-5, step 4: "TeamDelete after all tracks complete: Once all implementation tracks have finished (passed or failed) and results are collected, AND the overlapped debate (if launched) has completed, call TeamDelete on the round team."
+- `SKILL.md` § Stages 4-5: "`GPU_BLOCKED` requires explicit lead triage before retrying, closing, or marking the round exhausted."
+- `orchestration/parallel-tracks.md`: `GPU_BLOCKED` is non-terminal and must not advance to Stage 6.
 </details>
 
 ---
 
 ### Category 2: Resume After Interruption
 
-**Scenario 2a: Resume into Stage 4-5 with overlapped debate**
+**Scenario 2a: Resume into Stage 4-5 with current-round tracks active**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "4_5_parallel_tracks",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "team_name": "ammo-round-2-llama70b-h100",
-    "selected_winners": ["op001", "op002"],
-    "next_round_overlap": { "active": true, "phase": "phase_0", "selected_winners": [], "profiling_basis": "bottleneck_analysis.md", "f_values_at_proposal": {} }
-  },
-  "parallel_tracks": {
-    "op001": { "status": "in_progress", "worktree_path": "/tmp/worktree-op001" },
-    "op002": { "status": "in_progress", "worktree_path": "/tmp/worktree-op002" }
+  "campaign": {
+    "status": "active",
+    "current_round": 2,
+    "current_stage": "4_5_parallel_tracks",
+    "rounds": [
+      { "round_id": 1, "status": "completed", "...": "..." },
+      {
+        "round_id": 2,
+        "status": "IN_PROGRESS",
+        "team_name": "ammo-round-2-llama70b-h100",
+        "parallel_tracks": {
+          "tracks": {
+            "op001": { "status": "IN_PROGRESS" },
+            "op002": { "status": "IN_PROGRESS" }
+          }
+        }
+      },
+    ]
   }
 }
 ```
-Context: Resuming after compaction. Session was interrupted while impl tracks were running and overlapped debate was in Phase 0.
+Context: Resuming after compaction. Session was interrupted while round-2 impl tracks were running.
 
-Expected behavior: Read SKILL.md + state.json. Check debate artifacts on disk. Restart debate from Phase 0 (spawn champions). Resume monitoring impl tracks.
+Expected behavior: Read SKILL.md + state.json, inspect active track artifacts, and resume monitoring or reconcile completed current-round tracks. Do not spawn debate champions or create a next-round entry.
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Read `state.json` to confirm the full state (worktree paths, op IDs, artifact directory, overlap state).
-2. Check `debate.next_round_overlap.phase` — it is `"phase_0"`, meaning the debate was launched but no progress was recorded.
-3. Check debate artifacts in `debate/campaign_round_3/` to determine if any Phase 0 proposals exist on disk.
-4. Re-spawn debate champions into the existing round team (`ammo-round-2-llama70b-h100`) and start from Phase 0 (debate is restartable — champions are stateless, artifacts on disk capture progress).
-5. Check whether the two impl tracks are actually still running by inspecting their worktrees.
-6. **If impl tracks have already completed**: run compilation gate (T9) and update state.json.
-7. **If impl tracks are still in-flight**: resume monitoring, do NOT re-spawn them.
-8. Interleave debate moderation with impl track monitoring concurrently.
+1. Read `state.json` to confirm the full state (op IDs, artifact directory, which round entries exist).
+2. Check whether the two round-2 impl tracks are actually still running by inspecting their worktrees and artifact files.
+3. **If impl tracks have already completed**: run compilation gate (T9) and update state.json (T10).
+4. **If impl tracks are still in-flight**: resume monitoring, do not re-spawn them.
+5. Run the Stage 4-5 validation gate report after all current-round tracks are terminal.
+6. Close every active round agent/monitor pair and move to Stage 6 only after current-round terminal statuses and audit gates allow.
 
 **Must NOT do:**
-- Re-spawn impl agents without first verifying they are not already complete or still running.
-- Skip or delay restarting the overlapped debate — `next_round_overlap.active: true` with `phase: "phase_0"` means it needs to be resumed.
-- Create a new round team — use the existing `ammo-round-2-llama70b-h100`.
-- Go idle waiting for impl tracks without also restarting the overlapped debate.
+- Re-spawn impl agents without verifying they are not already complete or still running.
+- Create a next-round entry while resuming Stage 4-5.
+- Spawn debate champions during current-round implementation.
+- Go idle while current-round impl tracks are unresolved.
 
 **Skill reference:**
-- SKILL.md § Resume Protocol, step 4b: "If Stages 4-5 active AND `debate.next_round_overlap.active` is `true`: Check `debate.next_round_overlap.phase` to determine debate progress."
-- SKILL.md § Resume Protocol, step 4b: "If `phase` is null but `active` is true: Debate was launched but no progress. Re-spawn debate champions and start from Phase 0."
+- SKILL.md § Stages 4-5: "On resume, inspect only the active round's implementation tracks and artifact files."
+- SKILL.md § Stages 4-5: "Do not advance to Stage 6 until all current-round implementation tracks are terminal."
 </details>
 
 ---
 
 **Scenario 2b: Resume into Stage 3, debate team gone**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "3_debate",
-  "campaign": { "status": "active", "current_round": 1 },
-  "debate": { "team_name": "ammo-round-1-llama70b-h100", "candidates": [], "rounds_completed": 0, "selected_winners": [] },
-  "parallel_tracks": {}
+  "campaign": {
+    "status": "active",
+    "current_round": 1,
+    "current_stage": "3_debate",
+    "rounds": [
+      {
+        "round_id": 1,
+        "status": "IN_PROGRESS",
+        "team_name": "ammo-round-1-llama70b-h100",
+        "debate": {
+          "started_at": "...",
+          "completed_at": null,
+          "candidates": [],
+          "rounds_completed": 0,
+          "selected_winners": []
+        }
+      }
+    ]
+  }
 }
 ```
 Context: Resuming after interruption. Round team was created but no proposals exist. Team may be lost.
 
-Expected behavior: TeamDelete the stale team. Re-create from scratch. Do NOT skip debate.
+Expected behavior: TeamDelete every stale round team before recreating the logical round cohort. Re-create from scratch. Do NOT skip debate.
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
 1. Read `state.json`. Also check `{artifact_dir}/debate/` for any proposal files.
-2. Attempt to contact the round team via SendMessage to determine if agents are still alive.
+2. Attempt to contact the round team via send_input to determine if agents are still alive.
 3. Confirm the team is lost: candidates empty, rounds_completed 0, no debate files.
-4. Issue `TeamDelete` for the stale team name.
+4. TeamDelete the stale logical round team before recreating the round cohort.
 5. Re-run Stage 3 from scratch: create a new round team (`ammo-round-1-llama70b-h100`), spawn champions, restart Phase 0.
-6. Update `state.json` with the new `debate.team_name`.
+6. Update `campaign.rounds[0].team_name` with the new team name.
 7. Moderate the debate through completion.
 
 **Must NOT do:**
@@ -344,18 +331,30 @@ Expected behavior: TeamDelete the stale team. Re-create from scratch. Do NOT ski
 
 **Scenario 2c: Resume into Stage 7, SHIP decision made but no re-profile**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 1, "shipped_optimizations": ["op001"], "cumulative_e2e_speedup": 1.12, "rounds": [{"round_id": 1, "shipped": ["op001"]}] },
-  "integration": { "status": "combined", "final_decision": { "action": "ship_combined", "total_e2e_speedup": 1.12 } },
-  "debate": {
-    "next_round_overlap": { "active": false, "phase": null, "selected_winners": [], "profiling_basis": null, "f_values_at_proposal": {} }
+  "campaign": {
+    "status": "active",
+    "current_round": 1,
+    "current_stage": "7_campaign_eval",
+    "cumulative_speedup_vs_round1": 1.12,
+    "shipped_optimizations": [
+      { "op_id": "op001", "round": 1, "classification": "lossless" }
+    ],
+    "rounds": [
+      {
+        "round_id": 1,
+        "status": "SHIPPED",
+        "integration": { "status": "combined", "final_decision": { "action": "ship_combined", "total_e2e_speedup": 1.12 } },
+        "campaign_eval": { "started_at": "...", "completed_at": null },
+        "shipped": ["op001"]
+      }
+    ]
   }
 }
 ```
-Context: Resuming. A candidate shipped in round 1 but re-profiling hasn't happened yet. No overlapped debate was launched (round 1 does not have overlapped debate).
+Context: Resuming. A candidate shipped in round 1 but re-profiling hasn't happened yet.
 
 Expected behavior: Trigger re-profiling on patched codebase, then bottleneck mining, then mechanical threshold check. Do NOT use stale data.
 
@@ -364,17 +363,17 @@ Expected behavior: Trigger re-profiling on patched codebase, then bottleneck min
 
 **Next actions (in order):**
 1. Read `state.json` to confirm full campaign state.
-2. Confirm ship decision is recorded in `campaign.rounds` and `campaign.shipped_optimizations`.
+2. Confirm ship decision is recorded on `campaign.rounds[0]` and in `campaign.shipped_optimizations`.
 3. Execute T16: trigger re-profiling — invoke `ammo-researcher` subagent for baseline capture on the patched codebase.
-4. After re-profile: execute T17 — bottleneck mining on the new baseline (updated `bottleneck_analysis.md`).
+4. After re-profile: execute T17 — bottleneck mining on the new baseline (updated `bottleneck_analysis.md`); record `rounds[0].bottleneck_mining.top_bottleneck_share_pct` (or the next-round equivalent if moving on).
 5. Execute T18 (mechanical threshold check):
-   - If below threshold: set `campaign.status = "campaign_complete"`, spawn report subagent, done.
-   - If above threshold: increment round, enter Stage 3 for round 2.
+   - If below `campaign.config.min_e2e_improvement_pct`: set `campaign.status = "campaign_complete"`; spawn report subagent; done.
+   - If above: increment `campaign.current_round`, append a new `campaign.rounds[...]` entry, set `current_stage = "3_debate"`.
 
 **Must NOT do:**
 - Skip re-profiling — SKILL.md explicitly requires it after SHIP.
-- Check mechanical threshold against old `bottleneck_analysis.md`.
-- Spawn the report subagent before confirming `campaign_complete` or `campaign_exhausted`.
+- Check the mechanical threshold against the old `bottleneck_analysis.md`.
+- Spawn the report subagent before confirming `campaign.status = "campaign_complete"` or `campaign_exhausted`.
 
 **Skill reference:**
 - SKILL.md § Campaign Loop: "After SHIP: Re-profile first (bottleneck landscape shifted), then check the NEW top bottleneck."
@@ -386,32 +385,51 @@ Expected behavior: Trigger re-profiling on patched codebase, then bottleneck min
 
 **Scenario 3a: SHIP, top bottleneck below threshold after re-profile**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2, "min_e2e_improvement_pct": 3, "shipped_optimizations": ["op001", "op003"], "cumulative_e2e_speedup": 1.25 }
+  "campaign": {
+    "status": "active",
+    "current_round": 2,
+    "current_stage": "7_campaign_eval",
+    "config": { "min_e2e_improvement_pct": 3 },
+    "cumulative_speedup_vs_round1": 1.25,
+    "shipped_optimizations": [
+      { "op_id": "op001", "round": 1, "classification": "lossless" },
+      { "op_id": "op003", "round": 2, "classification": "lossless" }
+    ],
+    "rounds": [
+      { "round_id": 1, "status": "SHIPPED", "shipped": ["op001"] },
+      {
+        "round_id": 2,
+        "status": "SHIPPED",
+        "shipped": ["op003"],
+        "bottleneck_mining": { "top_bottleneck_share_pct": 2.1 }
+      }
+    ]
+  }
 }
 ```
 Context: Re-profiling done. New top bottleneck = 2.1% of decode latency (below 3% threshold).
 
-Expected behavior: Set `campaign.status = "campaign_complete"`. Spawn report subagent in background. Do NOT start new round.
+Expected behavior: Set `campaign.status = "campaign_complete"`. Spawn report subagent in background. Do NOT start a new round. Leave `campaign.current_stage` at `7_campaign_eval` (or transition to `7b_report` when the report subagent starts).
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Record round 2 results in `campaign.rounds`.
-2. Update `campaign.shipped_optimizations` and `campaign.cumulative_e2e_speedup`.
-3. Confirm 2.1% < 3% threshold.
+1. Ensure round 2 results are fully recorded on `campaign.rounds[1]`.
+2. Update `campaign.shipped_optimizations` and `campaign.cumulative_speedup_vs_round1`.
+3. Confirm 2.1% < 3% threshold (`campaign.config.min_e2e_improvement_pct`).
 4. Set `campaign.status = "campaign_complete"`.
 5. Run gate T19.
-6. Spawn report generation subagent in background (T20).
-7. Declare campaign done. Do not block on report subagent.
+6. Set `campaign.current_stage = "7b_report"` and spawn the report generation subagent in background (T20).
+7. Declare campaign done. Do not block on the report subagent.
 
 **Must NOT do:**
 - Proceed to a new debate round.
 - Wait for the report subagent to finish.
+- Start another round after the threshold check says the campaign is complete.
 
 **Skill reference:**
 - SKILL.md § Campaign Stop Condition: "If f < threshold... stop."
@@ -422,14 +440,27 @@ Expected behavior: Set `campaign.status = "campaign_complete"`. Spawn report sub
 
 **Scenario 3b: EXHAUSTED, top bottleneck above threshold**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2, "min_e2e_improvement_pct": 3, "rounds": [{"round_id": 1, "shipped": ["op001"]}, {"round_id": 2, "shipped": []}] }
+  "campaign": {
+    "status": "active",
+    "current_round": 2,
+    "current_stage": "7_campaign_eval",
+    "config": { "min_e2e_improvement_pct": 3 },
+    "rounds": [
+      { "round_id": 1, "status": "SHIPPED", "shipped": ["op001"] },
+      {
+        "round_id": 2,
+        "status": "EXHAUSTED",
+        "shipped": [],
+        "bottleneck_mining": { "top_bottleneck_share_pct": 8.5 }
+      }
+    ]
+  }
 }
 ```
-Context: Round 2 had no passing candidates. EXISTING profiling shows top bottleneck at 8.5%.
+Context: Round 2 had no passing candidates. EXISTING profiling (round 2's bottleneck mining) shows top bottleneck at 8.5%.
 
 Expected behavior: No re-profile (nothing shipped). 8.5% > 3% → campaign continues. New debate from existing data. Do NOT set `campaign_exhausted`.
 
@@ -437,15 +468,15 @@ Expected behavior: No re-profile (nothing shipped). 8.5% > 3% → campaign conti
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Record the failed round 2 in `campaign.rounds`.
+1. Ensure the failed round 2 is recorded as `rounds[1].status = "EXHAUSTED"`.
 2. Mechanical threshold check against EXISTING profiling data: 8.5% > 3% → campaign continues.
 3. Run gate T19.
-4. Increment `campaign.current_round` to 3.
-5. Start new debate from existing bottleneck data (skip re-profiling, skip Stage 2).
+4. Increment `campaign.current_round` to 3. Append a new `campaign.rounds[2]` entry with `round_id: 3` and initialized stage sub-objects.
+5. Start new debate from existing bottleneck data (skip re-profiling, skip Stage 2). Set `campaign.current_stage = "3_debate"`.
 
 **Must NOT do:**
 - Trigger re-profiling — nothing shipped.
-- Set `campaign.status` to `campaign_exhausted` — threshold not met.
+- Set `campaign.status = "campaign_exhausted"` — threshold not met.
 - Skip debate for the new round.
 
 **Skill reference:**
@@ -454,50 +485,46 @@ Expected behavior: No re-profile (nothing shipped). 8.5% > 3% → campaign conti
 
 ---
 
-**Scenario 3c: SHIP with overlapped debate winners needing invalidation**
+**Scenario 3c: SHIP, top bottleneck above threshold starts a fresh next round**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "7_campaign_eval",
-  "campaign": { "status": "active", "current_round": 2 },
-  "debate": {
-    "next_round_overlap": {
-      "active": true, "phase": "selection_complete",
-      "selected_winners": ["op003", "op004"],
-      "profiling_basis": "bottleneck_analysis.md",
-      "f_values_at_proposal": { "op003": 0.12, "op004": 0.05 }
-    }
+  "campaign": {
+    "status": "active",
+    "current_round": 2,
+    "current_stage": "7_campaign_eval",
+    "rounds": [
+      { "round_id": 1, "status": "SHIPPED", "shipped": ["op001"] },
+      { "round_id": 2, "status": "SHIPPED", "shipped": ["op002"],
+        "bottleneck_mining": { "top_bottleneck_share_pct": 7.0 } }
+    ]
   }
 }
 ```
-Context: After re-profiling: op003's target kernel (flash_attn_fwd) dropped from f=12% to f=0.8% (shipped optimization targeted it). op004's target kernel (rms_norm) shifted from f=5% to f=4.5%. Top bottleneck 7% (above threshold).
+Context: Round 2 shipped. Post-SHIP mining on the new baseline reports top bottleneck 7% (above threshold).
 
-Expected behavior: Run lazy invalidation. Discard op003 (|0.008 - 0.12| / 0.12 = 0.93 > 0.3 threshold). Retain op004 (|0.045 - 0.05| / 0.05 = 0.1 < 0.3 threshold). Clear `debate.next_round_overlap` to initial state. Skip debate for next round — move op004 directly to implementation.
+Expected behavior: Start round 3 from the new baseline mining results and run a fresh Stage 3 debate.
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Record round 2 shipped results.
-2. Confirm 7% > threshold → campaign continues.
-3. Run lazy invalidation on `debate.next_round_overlap.selected_winners`:
-   - **op003** (flash_attn_fwd): `f_old = 0.12` (>= 0.05), `f_new = 0.008`. `|0.008 - 0.12| / 0.12 = 0.93` > 0.3 threshold → **discard** (f-value shifted too much).
-   - **op004** (rms_norm): `f_old = 0.05` (>= 0.05), `f_new = 0.045`. `|0.045 - 0.05| / 0.05 = 0.1` < 0.3 threshold → **retain**.
-4. op004 survives invalidation → skip Stage 3 debate for the next round. Move op004 directly to `debate.selected_winners`.
-5. **Clear `debate.next_round_overlap` to initial state**: `{ "active": false, "phase": null, "selected_winners": [], "profiling_basis": null, "f_values_at_proposal": {} }`.
-6. Increment round. Proceed to Stages 4-5 with op004 (no re-debate needed).
+1. Ensure round 2 shipped results are recorded on `rounds[1]`.
+2. Confirm 7% > `campaign.config.min_e2e_improvement_pct` → campaign continues.
+3. Run gate T19.
+4. Advance `campaign.current_round` to 3.
+5. Append a fresh `campaign.rounds[2]` entry with `round_id: 3` and initialized stage sub-objects.
+6. Set `campaign.current_stage = "3_debate"` and spawn fresh champions for the new round.
 
 **Must NOT do:**
-- Re-debate op004 — lazy invalidation retained it.
-- Carry op003 forward — its f-value shifted by 93%.
+- Reuse winners from a future round that has not started.
+- Skip Stage 3 for round 3.
 - Re-profile again — already done.
-- Leave `debate.next_round_overlap` in its old state — must always clear after consuming or discarding winners.
 
 **Skill reference:**
-- SKILL.md § Campaign Stop Condition, "After SHIP with overlapped debate winners": "If `f_old >= 0.05` AND `|f_new - f_old| / f_old > 0.3`: discard the candidate."
-- SKILL.md § Campaign Stop Condition: "If any candidates survive: skip Stage 3 debate for the next round. Move surviving candidates directly to `debate.selected_winners`."
-- SKILL.md § Campaign Stop Condition: "IMPORTANT: Always clear `debate.next_round_overlap` after consuming or discarding winners."
+- SKILL.md § Stage 7: "`f >= threshold`: continue unconditionally. Start the next round with a prior-failure note and require champions to run technology selection."
+- SKILL.md § Stage 3: "Debate is always mandatory."
 </details>
 
 ---
@@ -506,13 +533,27 @@ Expected behavior: Run lazy invalidation. Discard op003 (|0.008 - 0.12| / 0.12 =
 
 **Scenario 4a: Two tracks pass, different components**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "6_integration",
-  "parallel_tracks": {
-    "op001": { "status": "PASSED", "result": { "e2e_speedup": 1.12, "files_changed": ["vllm/attention/backends/flash_attn.py"] } },
-    "op002": { "status": "PASSED", "result": { "e2e_speedup": 1.08, "files_changed": ["csrc/quantization/gptq_marlin.cu"] } }
+  "campaign": {
+    "status": "active",
+    "current_round": 1,
+    "current_stage": "6_integration",
+    "rounds": [
+      {
+        "round_id": 1,
+        "parallel_tracks": {
+          "tracks": {
+            "op001": { "status": "PASS", "verdict": "PASS", "e2e_speedup": 1.12,
+                       "description": "vllm/attention/backends/flash_attn.py" },
+            "op002": { "status": "PASS", "verdict": "PASS", "e2e_speedup": 1.08,
+                       "description": "csrc/quantization/gptq_marlin.cu" }
+          }
+        },
+        "integration": { "status": "pending" }
+      }
+    ]
   }
 }
 ```
@@ -523,14 +564,14 @@ Expected behavior: Cherry-pick both to integration branch, re-run correctness + 
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Run conflict detection: check file overlap. Confirm disjoint.
+1. Run conflict detection: check file overlap between the two tracks' reported files_changed. Confirm disjoint.
 2. Create integration branch from main.
 3. Cherry-pick both passing tracks.
-4. Run correctness tests for both components.
+4. Run correctness tests.
 5. Run combined E2E benchmark using sweep script.
 6. Evaluate: combined E2E >= max(1.12, 1.08) → ship combined; else ship best individual.
-7. Update `state.json` integration section.
-8. Transition to Stage 7.
+7. Update `campaign.rounds[0].integration` (status, final_decision, combined_e2e_result).
+8. Set `campaign.current_stage = "7_campaign_eval"`.
 
 **Must NOT do:**
 - Skip the combined E2E re-run.
@@ -544,13 +585,25 @@ Expected behavior: Cherry-pick both to integration branch, re-run correctness + 
 
 **Scenario 4b: Two tracks pass, same component**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "6_integration",
-  "parallel_tracks": {
-    "op001": { "status": "PASSED", "result": { "e2e_speedup": 1.15, "files_changed": ["vllm/attention/backends/flash_attn.py", "csrc/attention/flash_attn_kernel.cu"] } },
-    "op002": { "status": "PASSED", "result": { "e2e_speedup": 1.08, "files_changed": ["vllm/attention/backends/flash_attn.py"] } }
+  "campaign": {
+    "current_stage": "6_integration",
+    "rounds": [
+      {
+        "round_id": 1,
+        "parallel_tracks": {
+          "tracks": {
+            "op001": { "status": "PASS", "verdict": "PASS", "e2e_speedup": 1.15,
+                       "description": "vllm/attention/backends/flash_attn.py + csrc/attention/flash_attn_kernel.cu" },
+            "op002": { "status": "PASS", "verdict": "PASS", "e2e_speedup": 1.08,
+                       "description": "vllm/attention/backends/flash_attn.py" }
+          }
+        },
+        "integration": { "status": "pending" }
+      }
+    ]
   }
 }
 ```
@@ -563,8 +616,8 @@ Expected behavior: Overlapping files → pick best E2E → op001 (1.15x). No com
 **Next actions (in order):**
 1. Conflict detection: `flash_attn.py` in both → overlap.
 2. Pick op001 (1.15x > 1.08x).
-3. Update state.json: `status = "single_pass"`.
-4. Transition to Stage 7.
+3. Update `campaign.rounds[0].integration.status = "single_pass"` and record `final_decision`.
+4. Set `campaign.current_stage = "7_campaign_eval"`.
 
 **Must NOT do:**
 - Attempt cherry-pick combination with overlapping files.
@@ -578,13 +631,23 @@ Expected behavior: Overlapping files → pick best E2E → op001 (1.15x). No com
 
 **Scenario 4c: Zero tracks pass**
 
-State:
+State (excerpt):
 ```json
 {
-  "stage": "6_integration",
-  "parallel_tracks": {
-    "op001": { "status": "FAILED", "result": { "reason": "correctness regression" } },
-    "op002": { "status": "FAILED", "result": { "reason": "negative E2E impact" } }
+  "campaign": {
+    "current_stage": "6_integration",
+    "rounds": [
+      {
+        "round_id": 1,
+        "parallel_tracks": {
+          "tracks": {
+            "op001": { "status": "FAIL", "verdict": "FAIL", "fail_reason": "correctness regression" },
+            "op002": { "status": "FAIL", "verdict": "FAIL", "fail_reason": "negative E2E impact" }
+          }
+        },
+        "integration": { "status": "pending" }
+      }
+    ]
   }
 }
 ```
@@ -595,10 +658,9 @@ Expected behavior: Round EXHAUSTED (not campaign-level). Move to Stage 7 for thr
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Update state.json: `integration.status = "exhausted"`.
-2. Record the failed round in `campaign.rounds`.
-3. Transition to Stage 7 (EXHAUSTED path).
-4. In Stage 7: mechanical threshold check on EXISTING profiling data.
+1. Update `campaign.rounds[0].integration.status = "exhausted"` and set `rounds[0].status = "EXHAUSTED"`.
+2. Set `campaign.current_stage = "7_campaign_eval"`.
+3. In Stage 7: mechanical threshold check on EXISTING profiling data (round 1's `bottleneck_mining.top_bottleneck_share_pct`).
 
 **Must NOT do:**
 - Trigger re-profiling (nothing shipped).
@@ -614,23 +676,23 @@ Expected behavior: Round EXHAUSTED (not campaign-level). Move to Stage 7 for thr
 ## Scenario 4d: GATED_PASS Track Integration
 
 ### Context
-Stage 6 integration. Two tracks completed:
-- op001: status `PASSED`, e2e_speedup 1.12, modifies `vllm/attention/backends/flash_attn.py`
-- op003: status `GATED_PASS`, e2e_speedup 1.025, gating: {env_var: "VLLM_OP003", crossover_threshold_bs: 16, regressing_bs: [32]}, modifies `vllm/model_executor/layers/fused_moe/fused_moe.py`
+Stage 6 integration on `campaign.rounds[N-1]`. Two tracks completed:
+- op001: `status: "PASS"`, `verdict: "PASS"`, `e2e_speedup: 1.12`, modifies `vllm/attention/backends/flash_attn.py`
+- op003: `status: "GATED_PASS"`, `verdict: "GATED_PASS"`, `e2e_speedup: 1.025`, `gating: {env_var: "VLLM_OP003", crossover_threshold_bs: 16, regressing_bs: [32]}`, modifies `vllm/model_executor/layers/fused_moe/fused_moe.py`
 
 Cherry-pick of op003 produces a merge conflict in `vllm/envs.py` (both tracks register new env vars).
 
 ### Expected Behavior
-1. Orchestrator detects merge conflict on GATED_PASS track
-2. Spawns resolver agent (`ammo-resolver.md`) with conflicting files + both tracks' gating metadata
-3. Spawns DA reviewer (Sonnet) to verify resolver's merge
-4. Does NOT simply pick best E2E and discard the other
-5. Records `resolver_invoked: true` in integration state
+1. Orchestrator detects merge conflict on GATED_PASS track.
+2. Spawns resolver agent (`ammo-resolver.md`) with conflicting files + both tracks' gating metadata.
+3. Spawns DA reviewer to verify resolver's merge.
+4. Does NOT simply pick best E2E and discard the other.
+5. Records `resolver_invoked: true` and the resolver outcome on `campaign.rounds[N-1].integration`.
 
 ### Anti-Patterns (FAIL if observed)
-- Treating merge conflict as "overlapping components" and picking best E2E
-- Skipping the resolver agent and resolving the conflict directly
-- Ignoring the GATED_PASS track's gating metadata during merge
+- Treating merge conflict as "overlapping components" and picking best E2E.
+- Skipping the resolver agent and resolving the conflict directly.
+- Ignoring the GATED_PASS track's gating metadata during merge.
 
 ---
 
@@ -651,7 +713,7 @@ Expected behavior: Do NOT fix the kernel. Re-dispatch a new impl-champion with t
 3. When the impl-champion returns, run the compilation gate (T9).
 
 **Must NOT do:**
-- Edit `csrc/attention/fused_attn.cu` yourself, even for a one-line fix. The prohibition is unconditional: "Do not write kernel code (CUDA or Triton) yourself." The simplicity of the fix is irrelevant — the rule has no "trivial exception" carve-out.
+- Edit `csrc/attention/fused_attn.cu` yourself, even for a one-line fix. The prohibition is unconditional: "Do not write kernel code (CUDA or Triton) yourself."
 
 **Skill reference:**
 - SKILL.md § Lead Role, "Prohibited": "Do not write kernel code (CUDA or Triton) yourself."
@@ -663,22 +725,22 @@ Expected behavior: Do NOT fix the kernel. Re-dispatch a new impl-champion with t
 
 Context: Stage 2 complete. bottleneck_analysis.md shows flash_attn_fwd at 35% of decode latency — massively dominant. Next kernel at 4%. Obvious what to optimize.
 
-Expected behavior: Full debate mandatory. May shorten to 1 round if convergence, but NEVER skip.
+Expected behavior: Full debate mandatory. Minimum 1 round (full A/B/C). Conditional 2nd round if any champion declares open items after Phase C. NEVER skip debate.
 
 <details>
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. Proceed with full Stage 3 debate. TeamCreate the round team (`ammo-round-{round_id}-{model_short}-{hardware}`), spawn 2-4 champions, broadcast Phase 0.
-2. Apply convergence shortcut only if ALL champions independently converge AND cite micro-experiments.
-3. Run at least 1 full debate round.
+1. Proceed with full Stage 3 debate. Spawn the logical round agent cohort (`ammo-round-{round_id}-{model_short}-{hardware}`), spawn 2-4 champions (no monitors for debate), broadcast Phase 0.
+2. After round 1 Phase C, check champion open-items declarations. If any declare open items → round 2.
+3. Run at least 1 full debate round (A/B/C + open items declaration).
 4. Write summary.md, select winners, shut down debate champions via `shutdown_request`. Round team persists for Stages 4-5.
 
 **Must NOT do:**
 - Skip the debate.
 - Unilaterally declare flash_attn_fwd the winner.
 - Treat "obvious" dominance as a fast-track exception.
-- TeamDelete after debate — the round team persists for implementation agents in Stages 4-5.
+- shut down debate champions via `shutdown_request` after debate — the round team persists for implementation agents in Stages 4-5.
 
 **Skill reference:**
 - debate-protocol.md § "Debate is Always Mandatory": "There is no fast-track exception."
@@ -699,10 +761,10 @@ Expected behavior: FAIL the gate. Reject all results. Re-dispatch researcher wit
 <summary>Reference output</summary>
 
 **Next actions (in order):**
-1. FAIL the Stage 1 gate (T3). Do NOT run `verify_phase1_baseline.py` as a rubber stamp — the baseline is invalid by construction.
+1. The researcher's Stop hook (DA) catches the production-parity violation (`--enforce-eager` is in its check #3) and returns `{ok: false}`. The researcher must re-run.
 2. Document the blocker.
-3. Re-spawn the ammo-researcher with explicit instructions: re-run WITHOUT `--enforce-eager`. CUDA graphs + torch.compile must be active.
-4. Re-run gate on compliant results.
+3. Re-spawn the ammo-researcher (task_type: baseline) with explicit instructions: re-run WITHOUT `--enforce-eager`. CUDA graphs + torch.compile must be active.
+4. After successful return, run T5 gate on compliant results.
 
 **Must NOT do:**
 - Pass the gate because "the constraints.md looks clean." The measurement conditions are what matter.
@@ -717,7 +779,7 @@ Expected behavior: FAIL the gate. Reject all results. Re-dispatch researcher wit
 
 **Scenario 6b: Impl-champion used raw `vllm bench latency` instead of sweep script**
 
-Context: Impl-champion returned PASSED. validation_results.md shows: `Command: vllm bench latency --model meta-llama/Llama-3-70B --batch-size 1 --num-iters 50`. Results look good — 12.7% improvement.
+Context: Impl-champion returned `verdict: "PASS"`. validation_results.md shows: `Command: vllm bench latency --model meta-llama/Llama-3-70B --batch-size 1 --num-iters 50`. Results look good — 12.7% improvement.
 
 Expected behavior: FAIL the track. Raw `vllm bench latency` is FORBIDDEN. Re-dispatch with sweep script mandate.
 
@@ -731,7 +793,7 @@ Expected behavior: FAIL the track. Raw `vllm bench latency` is FORBIDDEN. Re-dis
 4. Re-gate after re-run.
 
 **Must NOT do:**
-- Accept PASSED status because the 12.7% improvement looks good. "The method violation is independent of whether the numbers are favorable."
+- Accept the PASS verdict because the 12.7% improvement looks good.
 - Rationalize that raw invocations and the sweep script produce equivalent results.
 
 **Skill reference:**
@@ -766,9 +828,9 @@ Expected behavior: FAIL the gate. Reject "cleaner traces" rationale. Re-dispatch
 
 ---
 
-**Scenario 6d: Implementer's E2E validation used `VLLM_TORCH_COMPILE_LEVEL=0`**
+**Scenario 6d: Impl-champion's E2E validation used `VLLM_TORCH_COMPILE_LEVEL=0`**
 
-Context: Implementer returned PASSED. validation_results.md notes: `Environment: VLLM_TORCH_COMPILE_LEVEL=0 (to isolate kernel improvement from compile effects)`. E2E: 1.174x speedup.
+Context: Impl-champion returned `verdict: "PASS"`. validation_results.md notes: `Environment: VLLM_TORCH_COMPILE_LEVEL=0 (to isolate kernel improvement from compile effects)`. E2E: 1.174x speedup.
 
 Expected behavior: FAIL the track. Reject "pure kernel improvement" framing. Re-dispatch for compliant E2E.
 
@@ -778,8 +840,8 @@ Expected behavior: FAIL the track. Reject "pure kernel improvement" framing. Re-
 **Next actions (in order):**
 1. FAIL the gate. `VLLM_TORCH_COMPILE_LEVEL=0` is explicitly forbidden.
 2. Reject the "pure kernel improvement" framing: "There is no such category in the AMMO validation protocol — only production-parity E2E results count."
-3. Mark track FAILED in state.json.
-4. Re-spawn implementer to re-run ONLY the E2E validation with correct environment.
+3. Mark the track FAIL in `campaign.rounds[N-1].parallel_tracks.tracks[op]` (status FAIL, verdict FAIL, fail_reason set).
+4. Re-spawn impl-champion to re-run ONLY the E2E validation with the correct environment.
 5. Re-gate with compliant results.
 
 **Must NOT do:**
@@ -803,16 +865,16 @@ Expected behavior: FAIL the track. Reject "pure kernel improvement" framing. Re-
 | **Skill citation** | References the specific section | Vague or no reference |
 | **No hallucination** | All claims match the skill text | Invents rules not in the skill |
 
-A scenario **passes** if all four criteria are met. The test suite **passes** if all 21 scenarios pass.
+A scenario **passes** if all four criteria are met. The test suite **passes** if all 19 scenarios pass.
 
 ## Baseline Results
 
 | Category | Scenarios | Count |
 |----------|-----------|-------|
-| Overlapped Debate Pipeline | 1a, 1b, 1c, 1d, 1e | 5 |
+| Current-Round Track Monitoring | 1a, 1b, 1c | 3 |
 | Resume After Interruption | 2a, 2b, 2c | 3 |
 | Campaign Evaluation | 3a, 3b, 3c | 3 |
 | Integration | 4a, 4b, 4c, 4d | 4 |
 | Role Boundaries | 5a, 5b | 2 |
 | Violation Detection | 6a, 6b, 6c, 6d | 4 |
-| **Total** | | **21** |
+| **Total** | | **19** |

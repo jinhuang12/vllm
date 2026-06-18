@@ -136,7 +136,129 @@ PY_VERSION=$("$MAIN_REPO/.venv/bin/python" -c "import sys; print(f'{sys.version_
     # Add main venv packages (torch, numpy, etc.) via .pth
     # .pth files added via sys.path do NOT have their .pth files processed,
     # so the main venv's editable install meta_path finder is NOT loaded
-    echo "$MAIN_REPO/.venv/lib/python${PY_VERSION}/site-packages" > "$SITE_PKGS/main-venv.pth"
+    # Main venv site-packages (torch, numpy, triton, flashinfer, xformers, ...) —
+    # first line preserves prior direct-dir behavior.
+    MAIN_SP="$MAIN_REPO/.venv/lib/python${PY_VERSION}/site-packages"
+    echo "$MAIN_SP" > "$SITE_PKGS/main-venv.pth"
+
+    # Materialize AMMO-editable optional GPU/runtime packages into the track venv
+    # instead of editing them through the shared session venv. This curated list is
+    # intentionally version-sensitive: update it as vLLM adds/removes optional
+    # package-backed kernel runtimes.
+    #
+    # NOTE: precompiled-output packages (flashinfer_cubin ~1.1GB, flashinfer_jit_cache)
+    # are intentionally EXCLUDED. They are build artifacts, not an authoring surface,
+    # and the materialized `flashinfer` python package still resolves them at runtime
+    # via the main-venv.pth fallback (the whole main site-packages is on sys.path).
+    # Copying them only burned ~1.1GB of disk + thousands of file-creates per track.
+    AMMO_TRACK_LOCAL_RUNTIME_PACKAGES=(
+        flashinfer
+        nvidia_cutlass_dsl
+        deep_gemm
+        deepgemm
+        flash_mla
+        flashmla
+        flash_attn
+        mamba_ssm
+        causal_conv1d
+    )
+    AMMO_TRACK_LOCAL_RUNTIME_EXTRA_GLOBS=(
+        flashinfer_python-*.dist-info
+        flash_attn_*.so
+        flash_attn*cuda*.so
+        selective_scan*.so
+        causal_conv1d*.so
+    )
+    MATERIALIZED_ROOTS_FILE="$SITE_PKGS/.ammo-materialized-runtime-roots"
+    : > "$MATERIALIZED_ROOTS_FILE"
+
+    # Copy src -> dst atomically (tmp + mv) so an existing dst ALWAYS means a
+    # complete copy. A mid-copy abort (ENOSPC / EACCES) leaves only a .ammo-tmp
+    # leftover, never a half-populated dst that the [ ! -e dst ] guard would then
+    # skip forever on a repair re-run. Every failure is non-fatal: a failed copy
+    # warns and the package simply isn't materialized (champion falls back to the
+    # shared copy via main-venv.pth) — it must never abort worktree creation.
+    materialize_runtime_path() {
+        local src="$1" rel dst tmp
+        [ -e "$src" ] || return 0
+        rel="${src#$MAIN_SP/}"
+        [ "$rel" = "$src" ] && return 0
+        dst="$SITE_PKGS/$rel"
+        mkdir -p "$(dirname "$dst")" || { echo "  WARN: mkdir failed for $rel" >&2; return 0; }
+        if [ ! -e "$dst" ]; then
+            tmp="${dst}.ammo-tmp.$$"
+            rm -rf "$tmp" 2>/dev/null || true
+            if cp -a "$src" "$tmp" 2>/dev/null && mv "$tmp" "$dst" 2>/dev/null; then
+                : # complete copy now visible at dst
+            else
+                echo "  WARN: failed to materialize $rel (using shared copy)" >&2
+                rm -rf "$tmp" 2>/dev/null || true
+                return 0
+            fi
+        fi
+        if [ -d "$src" ] && [ -d "$dst" ]; then
+            printf '%s\t%s\n' "$src" "$dst" >> "$MATERIALIZED_ROOTS_FILE" || true
+        fi
+        return 0
+    }
+
+    shopt -s nullglob
+    for package_name in "${AMMO_TRACK_LOCAL_RUNTIME_PACKAGES[@]}"; do
+        materialize_runtime_path "$MAIN_SP/$package_name"
+        materialize_runtime_path "$MAIN_SP/${package_name}.py"
+        for candidate in "$MAIN_SP/${package_name}"*.so \
+                         "$MAIN_SP/${package_name}"*.dist-info \
+                         "$MAIN_SP/${package_name//_/-}"*.dist-info; do
+            materialize_runtime_path "$candidate"
+        done
+    done
+    for pattern in "${AMMO_TRACK_LOCAL_RUNTIME_EXTRA_GLOBS[@]}"; do
+        for candidate in "$MAIN_SP"/$pattern; do
+            materialize_runtime_path "$candidate"
+        done
+    done
+    shopt -u nullglob
+
+    # Replay PATH-STYLE .pth redirects from the main venv generically (content-driven,
+    # not lib-specific). Some third-party libs expose their import name only via a
+    # redirect .pth (e.g. nvidia_cutlass_dsl.pth points `cutlass` at a nested
+    # python_packages/ dir). site.py only processes .pth files in dirs on sys.path at
+    # startup; it does NOT recurse into a dir added by another .pth's path line — so
+    # without this replay the worktree never gets those nested dirs on sys.path and
+    # `import cutlass` (and any future redirect-style lib) fails.
+    # SKIP `import `-directive / `;` (shim) lines: replaying them into main-venv.pth —
+    # itself a processed .pth — would execute them at startup and load the editable-vllm
+    # finder, breaking WorktreeFinder precedence.
+    for pth in "$MAIN_SP"/*.pth; do
+        [ -e "$pth" ] || continue
+        # newline-safe: e.g. nvidia_cutlass_dsl.pth has NO trailing newline; the
+        # `|| [ -n "$line" ]` guard emits the final unterminated line (proven required).
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "${line//[[:space:]]/}" ] && continue                 # skip empty / whitespace-only
+            # Skip lines CPython site.py would exec(): `import ` / `import\t` directives,
+            # and `;`-containing shim lines (defense-in-depth: keeps fragile lines out of
+            # main-venv.pth so the editable-vllm finder never loads).
+            case "$line" in import\ *|import$'\t'*|*\;*) continue ;; esac
+            case "$line" in
+                /*) resolved="$line" ;;
+                *)  resolved="$MAIN_SP/$line" ;;                       # make relative lines absolute under MAIN_SP
+            esac
+            [ "$resolved" = "$MAIN_SP" ] && continue                   # don't duplicate MAIN_SP itself
+            materialized_dst="$resolved"
+            while IFS=$'\t' read -r materialized_src materialized_dst_candidate; do
+                [ -z "${materialized_src:-}" ] && continue
+                if [[ "$resolved" == "$materialized_src" || "$resolved" == "$materialized_src/"* ]]; then
+                    materialized_dst="$materialized_dst_candidate${resolved#$materialized_src}"
+                    break
+                fi
+            done < "$MATERIALIZED_ROOTS_FILE"
+            if [ -d "$materialized_dst" ]; then
+                echo "$materialized_dst" >> "$SITE_PKGS/main-venv.pth"
+            elif [ -d "$resolved" ]; then                              # skip dangling targets
+                echo "$resolved" >> "$SITE_PKGS/main-venv.pth"
+            fi
+        done < "$pth"
+    done
 
     # Python isolation: use a meta-path finder to redirect `import vllm` to the
     # worktree. This is necessary because sys.path[0] = '' (CWD) is set by CPython

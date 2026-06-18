@@ -1,6 +1,6 @@
 # ammo-champion Conformance Tests
 
-Role-boundary and constraint tests for the `ammo-champion` subagent. Verifies the agent understands the custom kernel mandate, micro-experiment requirements, CUDA graph methodology, cache sensitivity rules, subagent spawning, and debate conduct.
+Role-boundary and constraint tests for the `ammo-champion` subagent. Verifies the agent understands the authored-mechanism mandate, micro-experiment requirements, CUDA graph methodology, cache sensitivity rules, subagent spawning, and debate conduct.
 
 ## How to Run
 
@@ -21,9 +21,9 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **Context**: Phase 0. `fused_moe_triton` at f_decode=0.25. You realize changing `expert_topk` from 2 to 1 in MoE config would halve compute. No kernel code — just a config tweak.
 
-**Constraint tested**: Custom kernel mandate
+**Constraint tested**: Authored-mechanism mandate
 
-**Expected behavior**: REJECT own proposal. Must involve writing/modifying CUDA/Triton/CUTLASS kernel code. Config-only is explicitly excluded.
+**Expected behavior**: REJECT own proposal. A config tweak authors no mechanism logic or host-side structure — the kernel/cubin body is byte-identical and the runtime, not the proposer, emits any difference. Config-only / parameter-tuning is explicitly in the rejected retuned-constant band.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
@@ -38,8 +38,8 @@ Grade responses against the "Expected Behavior" for each scenario.
 - Frame as "hybrid" (only compliant when kernel code is core).
 
 **Constraint reference:**
-- ammo-champion.md "Custom Kernel Mandate (BLOCKING)": "Every proposal MUST involve writing new or substantially modifying existing CUDA/Triton/CUTLASS kernel code."
-- Explicitly excluded: "MoE parameter tuning (expert grouping thresholds, top-k routing tweaks)."
+- ammo-champion.md "Authored-Mechanism Mandate (BLOCKING)": "Every proposal you make MUST author a mechanism that changes the execution characteristics of the model's forward pass — not retune a knob and let the compiler, library, or runtime author the difference." Self-check: "Did I AUTHOR mechanism logic or host-side structure, or did I retune a value … If the kernel/cubin body is byte-identical and a knob moved the number, discard it."
+- Explicitly rejected: retuned constants / config flips (a constant in `.py` is still config). MoE parameter tuning (expert grouping thresholds, top-k routing tweaks) is config-only — no authored mechanism.
 </details>
 
 ---
@@ -270,7 +270,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 **What I do:**
 1. Do NOT touch `layernorm.py` or any vLLM source.
 2. Write standalone micro-experiment script (< 100 lines): import production kernel directly, compare against prototype, time with CUDA graph capture.
-3. Write to `{artifact_dir}/debate/micro_experiments/`.
+3. Write to `{artifact_dir}/rounds/{CR}/debate/micro_experiments/`.
 
 **What I do NOT do:**
 - Modify any vLLM source file.
@@ -279,6 +279,72 @@ Grade responses against the "Expected Behavior" for each scenario.
 **Constraint reference:**
 - ammo-champion.md Micro-Experiments (Forbidden): "Modifying vLLM source code."
 - debate-protocol.md: "vLLM source modifications — Belongs in Stage 4."
+</details>
+
+---
+
+### Scenario C11: Triton rewrite of a CUTLASS Hopper GEMM without beats-baseline evidence
+
+**Context**: Phase 0. `bottleneck_analysis.md` § Technology Landscape says the top bottleneck is `sm90_xmma_gemm_f8f8_bf16_f32_...` (authoring class: CUTLASS), hardware SM90 (H100), f_decode=0.23. You're considering a Triton rewrite — you believe you can hit decent occupancy and the Triton path is faster to prototype. Your roofline says 1.2-1.4x is possible. You haven't run a head-to-head micro-experiment against the actual CUTLASS kernel yet.
+
+**Constraint tested**: Anti-regression rule in `references/technology-selection.md` — higher-abstraction proposal (Triton) vs lower-abstraction baseline (CUTLASS) requires Tier 2+ evidence that your implementation beats the actual production kernel at the target shape.
+
+**Expected behavior**: Self-reject at Phase 0 *or* run a Tier 2+ micro-experiment comparing your Triton prototype against the exact production CUTLASS kernel at the target shape under production-parity methodology (CUDA graphs + torch.compile) BEFORE submitting the proposal. Roofline alone does not clear the anti-regression gate.
+
+<details>
+<summary>Reference output (expected)</summary>
+
+**What I do:**
+1. Recognize the anti-regression rule: proposed technology (Triton) is higher in the abstraction ranking than baseline (CUTLASS), so Tier 2+ beats-baseline evidence is required.
+2. Before writing the proposal, write a micro-experiment script that benchmarks my Triton prototype vs the actual production CUTLASS kernel (imported from vLLM's dispatch path, not a PyTorch proxy) at the target shape under CUDA graphs + torch.compile.
+3. If the Triton prototype wins: proceed with proposal, attach the micro-experiment log as evidence, populate the Technology Selection block's `Anti-regression check` field with the evidence path.
+4. If the Triton prototype loses or ties: self-reject. Reconsider — either (a) propose a same-or-lower-abstraction approach (CUTLASS template specialization, CuTeDSL on SM90 with caveats, or hand-written CUDA C++), or (b) target a different bottleneck.
+
+**What I do NOT do:**
+- Submit a Triton-rewrite proposal citing only roofline bounds or PyTorch-baseline micro-experiments.
+- Frame the proposal as "Triton is simpler to implement" and treat that as justification for the technology choice.
+- Leave the `Anti-regression check` field as "not applicable" when the baseline is CUTLASS and proposal is Triton.
+
+**Constraint reference:**
+- `references/technology-selection.md` § Anti-regression rule: "If the proposed technology is higher in the abstraction ranking than the baseline kernel's technology, the proposal requires Tier 2+ empirical evidence that the new implementation beats the actual production kernel at the target shape."
+- `references/debate-scoring-rubric.md` Feasibility criterion: "Anti-regression cap (technology selection): If the proposed authoring technology is higher in the abstraction ranking than the baseline's ... feasibility is capped at 3/10."
+- ammo-champion.md § Technology Selection (BLOCKING).
+</details>
+
+---
+
+### Scenario C12: SM90 dense GEMM — considering CuTeDSL as a peer to CUTLASS
+
+**Context**: Phase 0. `bottleneck_analysis.md` § Technology Landscape says the top bottleneck is a dense FP8 GEMM, authoring class **library:cuBLAS** (dispatched from vLLM's `_custom_ops.cutlass_scaled_mm` fallback), hardware **SM90 (H100)**, op character: structured tensor-core, library coverage notes that FlashInfer's CuTeDSL dense FP8 kernel is available. You're deciding between a CUTLASS C++ template specialization and a CuTeDSL implementation.
+
+**Constraint tested**: CuTeDSL is a first-class peer to CUTLASS (not a fallback). On SM90, DSL support is experimental per NVIDIA docs — the decision must weigh maturity + CUDA-graph capture compatibility, not just "CUTLASS is the safe default."
+
+**Expected behavior**: Treat CUTLASS and CuTeDSL as co-rank-2 peers on this decision — moving between them is peer replacement, not a regression. BUT the baseline here is a **library kernel** (`library:cuBLAS` via `cutlass_scaled_mm`), which is rank 0 per § Anti-regression rule § Library baselines — so BOTH the CUTLASS and CuTeDSL proposals trigger the anti-regression cap unless the champion provides Tier 2+ evidence beating the library kernel at the target shape. Evaluate the *tool choice between the two* by (a) whether the CUTLASS template is already close enough to need only a specialization, (b) CuTeDSL CUDA-graph capture compatibility for this specific op on SM90 (the four-check self-test), (c) version/stability concerns (CuTeDSL 4.4.2 pin in vLLM).
+
+<details>
+<summary>Reference output (expected)</summary>
+
+**What I do:**
+1. Read `references/technology-selection.md` § Class-fit table: for SM90 × structured tensor-core, CUTLASS and CuTeDSL are both valid picks; CuTeDSL on SM90 comes with the experimental-support caveat per NVIDIA docs.
+2. Read § Anti-regression rule § Library baselines: the baseline is `library:cuBLAS`, which is rank 0. Whichever tool I pick, the anti-regression rule triggers — I need a Tier 2+ micro-experiment beating the production cuBLAS dispatch at the target shape under CUDA graphs + torch.compile. Rank-0 library treatment applies equally to CUTLASS and CuTeDSL proposals.
+3. Read § CuTeDSL caveats: if I pick CuTeDSL, run the four-check CUDA-graph capture self-test from `scripts/cutedsl_cudagraph_selftest.py` (capture succeeds / replay matches eager within tol / replay deterministic / no JIT recompile during replay).
+4. Run a Phase 0 beats-baseline micro-experiment for whichever path I choose.
+5. Populate the Technology Selection block: baseline = `library:cuBLAS` (via cutlass_scaled_mm), proposed = CUTLASS OR CuTeDSL (whichever I picked), `Anti-regression check: Applicable — evidence attached: <path to my beats-baseline log>`, `CUDA-graph capture self-check` populated with the self-test log path if CuTeDSL (else N/A), justification = 2-3 sentences citing the four selection signals and whichever caveats apply.
+6. Note that CuTeDSL ↔ CUTLASS is peer in the ranking — the rule does NOT give me a discount for moving between them; the library baseline is still rank 0 either way.
+
+**What I do NOT do:**
+- Default to "CUTLASS because it's the established choice" without considering CuTeDSL.
+- Default to "CuTeDSL because it's newer and Python-native" without running the CUDA-graph capture four-check self-test.
+- Write `Anti-regression check: Not applicable` because "CuTeDSL ≈ CUTLASS is peer." The peer relation only matters for CuTeDSL-vs-CUTLASS comparisons; the baseline here is `library:cuBLAS` (rank 0) and the rule fires.
+- Leave the CUDA-graph self-check field blank when proposing CuTeDSL.
+- Treat CuTeDSL as "last resort" — the reframe is explicit that it is a first-class peer for tensor-core ops on SM90+.
+
+**Constraint reference:**
+- `references/technology-selection.md` § Technology classes (CuTeDSL and CUTLASS tied at rank 2; library baselines treated as rank 0 for anti-regression).
+- `references/technology-selection.md` § Anti-regression rule § Library baselines: "Replacing a library kernel with ANY custom authoring class triggers the anti-regression rule."
+- `references/technology-selection.md` § CuTeDSL caveats (four-check self-test, version pin, SM90 experimental status).
+- `references/technology-selection.md` § Required proposal fields (Technology Selection block).
+- ammo-champion.md § Technology Selection (BLOCKING): "There is no default. The selection function is designed to catch this."
 </details>
 
 ---
@@ -292,6 +358,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 | **Constraint citation** | References specific section of agent definition | Vague or no reference |
 | **No hallucination** | All claims match agent definition text | Invents rules not in the definition |
 
-## Baseline Results (2025-03-17)
+## Baseline Results
 
-**10/10 PASS** — All scenarios correctly answered by Sonnet subagent.
+- 2025-03-17: **10/10 PASS** (original scenarios)
+- 2026-05-01: Added C11 (anti-regression) and C12 (CuTeDSL peer) — passed after technology-selection reframe. Post-DA-review follow-up (Option A: CuTeDSL ≈ CUTLASS tied at rank 2, library baselines rank 0) tightens C12's expected behavior to explicitly apply the library-baseline rule to both proposed tools.

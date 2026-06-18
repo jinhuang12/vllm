@@ -10,11 +10,11 @@ Every claim in a proposal or argument requires evidence. The type of evidence re
 |------|-----------|----------|-------------------|-----------------|
 | **Tier 1 — Analysis** | Theoretical bounds | Roofline calc, Amdahl projection, working-set analysis, ISA inspection | `.py` script using only `import math`/`numpy` — no GPU calls | **3/10** |
 | **Tier 2 — Kernel execution** | Kernel speedup numbers | "Measured 1.34x at BS=8", kernel timing claims | `.py` script with `torch.cuda` calls + `.log` with GPU device name on line 1 (`torch.cuda.get_device_name()`) and `torch.cuda.Event` timing output | **7/10** |
-| **Tier 3 — Hardware profiling** | Hardware utilization metrics | "85% occupancy", "400 GB/s achieved BW", register count | ncu CSV, nsys stats export, or torch.profiler Chrome trace JSON analysis with GPU hardware fingerprint | No cap |
+| **Tier 3 — Hardware profiling** | Hardware utilization metrics | "85% occupancy", "400 GB/s achieved BW", register count | ncu CSV or nsys stats export with GPU hardware fingerprint | No cap |
 
 **Rules**:
 - Claiming a specific kernel speedup NUMBER (e.g., "1.5x faster") requires **Tier 2 or higher**. A roofline calculation showing "up to 2x theoretical" is Tier 1 — acceptable as a bound, but feasibility capped.
-- Claiming specific hardware utilization metrics (occupancy %, achieved BW, register count) requires **Tier 3**. If a metric is cited, it must come from ncu/nsys measurement or torch.profiler Chrome trace analysis, not a roofline estimate. Chrome trace provides per-kernel timing, grid/block dims, registers, and shared memory — sufficient for BW utilization and launch config claims. Occupancy claims still require ncu.
+- Claiming specific hardware utilization metrics (occupancy %, achieved BW, register count) requires **Tier 3**. If a metric is cited, it must come from ncu/nsys measurement, not a roofline estimate. Occupancy and physical-ceiling claims require targeted NCU.
 - The `.log` file is the proof of execution. Missing log = Tier 1 regardless of script contents.
 - Tier 1 is valid for architectural insight proposals (cache regime analysis, working-set estimation). These can advance but are scored conservatively.
 - Strongly prefer providing Tier 3 level evidence. Running `ncu` on your baseline kernel (~60s) preempts all 4 NCU Triggers and unlocks uncapped Tier 3 scoring.
@@ -29,7 +29,6 @@ Every claim in a proposal or argument requires evidence. The type of evidence re
 | ISA inspection | `cuobjdump`, `ncu` |
 | Tiny kernel prototypes | <100 lines of code, <2 min wall-clock execution |
 | nsys/ncu single-kernel traces | One kernel invocation, existing binary only |
-| torch.profiler Chrome trace analysis | Parse `.pt.trace.json.gz` with Python gzip+json for timing, launch config, multi-rank variance |
 | Memory layout analysis | Static analysis of tensor shapes and strides |
 | Kernel-level benchmarks | **MUST use CUDA graph capture** for both baseline and candidate kernels. Raw CUDA event timing without graph capture is INVALID for kernel speedup claims. |
 
@@ -55,9 +54,9 @@ If the warm/cold ratio exceeds 1.5x, the speedup is cache-dependent. Use the col
 
 For proposals that fuse multiple kernels into one, the above cache requirements are necessary but not sufficient:
 
-1. **Pipeline working set check**: Estimate total per-iteration working set (num_layers x per_layer_state). If this exceeds 2x the GPU's L2 cache, isolated benchmarks on small tensors overstate the fused kernel's benefit.
-2. **L2-busting methodology**: Test the fused kernel with chained distinct data totaling > 2.5x L2 cache size, forcing DRAM streaming. This simulates production L2 competition.
-3. **Report both**: Report speedup under (a) isolated warm-cache and (b) L2-busted cold conditions. If (a)/(b) > 1.5x, the E2E estimate MUST use the cold-cache speedup.
+1. **Pipeline working set check**: Estimate total per-iteration working set (num_layers x per_layer_state). If this exceeds 2x the GPU's L2 cache *(debate scoring only; hardware-anchored, NOT an impl ship gate)*, isolated benchmarks on small tensors overstate the fused kernel's benefit.
+2. **L2-busting methodology**: Test the fused kernel with chained distinct data totaling > 2.5x L2 cache size *(hardware-anchored sizing heuristic)*, forcing DRAM streaming. This simulates production L2 competition.
+3. **Report both**: Report speedup under (a) isolated warm-cache and (b) L2-busted cold conditions. If (a)/(b) > 1.5x *(debate scoring only — NOT a retract gate)*, the E2E estimate MUST use the cold-cache speedup.
 
 ## Pipeline-Level Simulation
 
@@ -75,7 +74,7 @@ Every kernel benchmark must produce:
 
 1. A `.py` script in `debate/micro_experiments/` that is independently runnable
 2. A `.log` file with: GPU device name on line 1 (`torch.cuda.get_device_name()`), kernel timing in microseconds, iteration count
-3. For hardware utilization claims: an ncu CSV, nsys stats export, or torch.profiler Chrome trace JSON analysis
+3. For hardware utilization claims: an ncu CSV or nsys stats export
 
 The `.log` file is the proof of execution. Missing log = Tier 1 (theoretical) regardless of script contents, and feasibility is capped at 3/10.
 
@@ -92,7 +91,7 @@ The micro-benchmark baseline must invoke the target kernel via the **same code p
    - CUDA launch grid dimensions
    - Achieved DRAM bandwidth
 
-   Cross-reference against Stage 2 profiling data (nsys trace or Chrome trace) and ncu sanity check for the same shape. If the kernel name matches but grid dimensions differ, investigate and explain the discrepancy before the proposal advances to scoring. Kernel name alone is insufficient — the same kernel template can be launched with different grid/block configs that produce different performance.
+   Cross-reference against Stage 2 profiling data (nsys trace) for the same shape. If the kernel name matches but grid dimensions differ, investigate and explain the discrepancy before the proposal advances to scoring. Kernel name alone is insufficient — the same kernel template can be launched with different grid/block configs that produce different performance.
 
 3. **Statement in proposal**: State the exact baseline invocation (API call, tensor layouts, shape) in the proposal's "Micro-Experiment Result" section.
 
@@ -106,18 +105,18 @@ ncu profiling is encouraged broadly and **required** when any of these triggers 
 |---|------------------|-------------|
 | 1 | Triton kernel + occupancy/register claims | `ncu --metrics l1tex__t_sector_hit_rate.pct,launch__registers_per_thread,sm__warps_active.avg.pct_of_peak_sustained_active` on prototype |
 | 2 | Any specific hardware metric cited (BW, occupancy %, SMEM, cache hit rate) | Metric must come from ncu/nsys measurement. Theoretical estimates must be labeled as such. |
-| 3 | Roofline assumes BW diverging >2x from Stage 2 nsys-derived BW | ncu verification of actual achieved BW. Corrected value replaces assumption in Amdahl calc. |
-| 4 | Micro-experiment baseline BW diverges >10% from Stage 2 ncu/nsys BW | Profile both baselines with `ncu --metrics launch__grid_size,launch__block_size,dram__bytes.sum.per_second`. Unexplained grid divergence → baseline rejected, feasibility capped at 3/10. |
+| 3 | Roofline assumes BW diverging >2x from Stage 2 nsys-derived BW *(advisory scoring check; NOT an impl ship gate)* | ncu verification of actual achieved BW. Corrected value replaces assumption in Amdahl calc. |
+| 4 | Micro-experiment baseline BW diverges >10% from Stage 2 ncu/nsys BW *(advisory scoring check)* | Profile both baselines with `ncu --metrics launch__grid_size,launch__block_size,dram__bytes.sum.per_second`. Unexplained grid divergence → baseline rejected, feasibility capped at 3/10. |
 
 **Governance**: No new mandatory trigger without a documented failure mode from 2+ campaigns.
 
 ## Component Dismissal Standard
 
-A component with `f_decode` > 30% cannot be dismissed as "near-optimal" or "not viable" based on a single experiment. To exclude a >30% f_decode component from all proposals:
+Do not dismiss as "not viable" any component with non-trivial `f_decode` — weight by `f` in debate scoring per `references/debate-scoring-rubric.md § Scoring Criteria` (the E2E impact potential row). Single-experiment dismissal is a methodology red flag; requirements:
 
-1. **Two independent negative results required**: Two different champions (or the same champion with two fundamentally different approaches) must independently demonstrate the component is within 10% of its physical ceiling.
+1. **Two independent negative results required**: Two different champions (or the same champion with two fundamentally different approaches) must independently demonstrate the component is BW-, SMEM-, or register-bound with no remaining algorithmic headroom. "Within X% of ceiling" is an advisory heuristic — NOT a ship/retract gate; two independent confirmations beat any single numeric cutoff.
 2. **No single-experiment dismissal**: If only one champion tested the component and found a negative result, at least one other champion must verify before the component can be excluded.
-3. **Framing constraint**: The bottleneck analysis and debate artifacts must not label any component with measured utilization below 85% as "near-optimal." Present the gap as headroom: e.g., "73% BW utilization = 27% headroom."
+3. **Framing constraint**: Utilization does not gate candidate proposal; the debate rubric scores by expected `f × (1 - 1/s)`. Present measured utilization as headroom (e.g., "73% BW utilization = 27% headroom"), not as a disqualifier — the phrase "near-optimal" is banned from debate artifacts because it crystallizes into an invented threshold that the rubric does not encode.
 
 ## References
 

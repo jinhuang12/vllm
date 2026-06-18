@@ -10,12 +10,12 @@ You will be given an `artifact_dir` path containing a completed AMMO campaign. R
 2. `investigation/bottleneck_analysis.md` — Stage 2 profiling data (source of truth)
 3. `constraints.md` — Stage 1 baseline truth snapshot
 4. `debate/proposals/*.md` — champion proposals
-5. `debate/round_*/*.md` — debate arguments, critiques, rebuttals
-6. `debate/summary.md` — winner selection
+5. `debate/campaign_round_*/round_*/*.md` — debate arguments, critiques, rebuttals (canonical path)
+6. `debate/campaign_round_*/summary.md` — winner selection per campaign round
 7. `tracks/op*/validation_results.md` — per-track validation reports
 8. `tracks/op*/e2e_latency/e2e_latency_results.json` — benchmark numbers
 
-For multi-round campaigns, also check `debate/campaign_round_N/` directories.
+Legacy back-compat: older sessions may have `debate/round_*/*.md` and `debate/summary.md` (flat) for R1 — glob both patterns when reading.
 
 ## Scoring: Start at 10, Deduct for Issues
 
@@ -57,9 +57,9 @@ _Note: When delegation is enabled, max is reduced to -2.5 (see delegation scorin
 - Integration decisions that contradict validation results (e.g., shipping a track that failed correctness)
 - Debate arguments based on general ML knowledge rather than the specific profiling data for this model/hardware combination
 
-## Delegation Scoring (only when `state.json` has `debate.delegation.enabled: true`)
+## Delegation Scoring (only when any round in `state.json` has `campaign.rounds[*].debate.delegation.enabled: true`)
 
-**Gating clause**: If `state.json` shows `debate.delegation.enabled: false`, skip all delegation categories below and use original scoring maxes.
+**Gating clause**: If no round in `state.json` shows `campaign.rounds[*].debate.delegation.enabled: true`, skip all delegation categories below and use original scoring maxes.
 
 When delegation is enabled, use these reduced maxes for original categories:
 - Wasted retries: max -2.5 (was -3.0)
@@ -106,6 +106,8 @@ Deduct for:
 
 These patterns were identified from cross-session analysis of 8+ campaigns. Each is both **flagged** in the report and **scored** as a deduction. Check for all of them in every campaign.
 
+> **Scope**: thresholds in this table (e.g., `<85%` utilization, `>30%` f_decode, `>2x` cold-to-production) are **eval-harness scoring criteria only**, NOT live-campaign gates. They do not fire during a running AMMO campaign — they are how the grader retrospectively scores a completed campaign. Live-campaign ship/retract decisions live in `references/validation-defaults.md` + `SKILL.md § Non-Negotiables` item #10.
+
 | Anti-Pattern | What to Check | Deduction |
 |---|---|---|
 | **Dominant component avoidance** | All champions avoided the highest f_decode component without two independent negative micro-experiments justifying the exclusion | -2.0 |
@@ -140,7 +142,7 @@ Output as `verified_e2e` field in the JSON (see schema below).
 3. For each proposal in `debate/proposals/`:
    - Check: does it cite data from `bottleneck_analysis.md`?
    - Check: does it include micro-experiment results with actual numbers?
-4. For each debate argument in `debate/round_*/`:
+4. For each debate argument in `debate/campaign_round_*/round_*/` (or legacy `debate/round_*/`):
    - Check: is evidence from measurements (not fabricated)?
    - Check: do critiques identify real issues?
 5. For each track in `tracks/op*/`:

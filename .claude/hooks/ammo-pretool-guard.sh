@@ -57,6 +57,66 @@ if [ "$_CAMPAIGN_ACTIVE" = "true" ]; then
     fi
 fi
 
+# ── Worktree venv activation guard ──
+# When the agent's cwd is inside .claude/worktrees/<name>/, any python/pip/pytest
+# invocation MUST run under that worktree's .venv. The main repo's .venv has an
+# editable-install .pth that resolves `import vllm` to the MAIN worktree's
+# source tree — silently invalidating all profiling/benchmarks for the
+# isolated op worktree. One-shot block per session; trust agent judgment after.
+# Runs before the GPU-pool guard so a venv violation on a GPU command surfaces
+# the more fundamental issue (wrong source tree) rather than being masked.
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+case "$CWD" in
+    */.claude/worktrees/*)
+        WORKTREE_ROOT=$(echo "$CWD" | sed -E 's#(.*/\.claude/worktrees/[^/]+).*#\1#')
+        EXPECTED_VENV="$WORKTREE_ROOT/.venv"
+
+        if echo "$COMMAND" | grep -qP '\b(python3?|pytest|pip|uv)\b'; then
+            _VENV_OK=false
+            echo "$COMMAND" | grep -qF "source $EXPECTED_VENV/bin/activate" && _VENV_OK=true
+            echo "$COMMAND" | grep -qF "$EXPECTED_VENV/bin/python"          && _VENV_OK=true
+            echo "$COMMAND" | grep -qF "$EXPECTED_VENV/bin/pytest"          && _VENV_OK=true
+            echo "$COMMAND" | grep -qF "$EXPECTED_VENV/bin/pip"             && _VENV_OK=true
+            # Exempt: bare `import vllm` check (used to verify activation worked)
+            if echo "$COMMAND" | grep -qP '^\s*python3?\s+-c\s+["\x27]import\s+vllm["\x27;\s]*(print\(vllm\.__file__\))?\s*["\x27]?\s*$'; then
+                _VENV_OK=true
+            fi
+
+            _SID_RAW="${CLAUDE_SESSION_ID:-}"
+            if [ "$_VENV_OK" = "false" ] && [ -n "$_SID_RAW" ]; then
+                _GRD="${AMMO_GPU_RES_DIR:-/tmp/ammo_gpu_res}"
+                mkdir -p "$_GRD"
+                WARNED_VENV_FLAG="$_GRD/.warned_venv_${_SID_RAW}"
+                if [ ! -f "$WARNED_VENV_FLAG" ]; then
+                    touch "$WARNED_VENV_FLAG"
+                    cat >&2 <<EOF
+AMMO WORKTREE VENV: Python command in op worktree without activating the worktree-local venv.
+
+You are in: $CWD
+Expected venv: $EXPECTED_VENV
+
+The main repo's .venv has an editable-install .pth that resolves 'import vllm'
+to the MAIN worktree's source tree — NOT your isolated edits. Running profiling
+or benchmarks under the wrong venv silently invalidates the results.
+
+Fix: prefix your command with
+  source $EXPECTED_VENV/bin/activate &&
+
+Or invoke python by absolute path: $EXPECTED_VENV/bin/python ...
+
+Verify once after activation:
+  python -c "import vllm; print(vllm.__file__)"
+  # The path MUST contain '/.claude/worktrees/'
+
+(This block fires only once per session.)
+EOF
+                    exit 2
+                fi
+            fi
+        fi
+        ;;
+esac
+
 # ── GPU Pool Pattern Guard ──
 # Detect GPU-heavy commands that DON'T use the reservation pattern.
 # One-shot warning per session (same mechanism as ammo-stop-guard.sh).

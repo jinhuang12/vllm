@@ -107,7 +107,7 @@ def _aggregate_scorecards(target_slug: str, scorecards: List[Dict]) -> Optional[
             _collect_metric(scorecards, "overall_score_without_transcript")
         ),
         "e2e_speedup": calculate_stats(
-            _collect_metric(scorecards, "raw_metrics", "cumulative_e2e_speedup")
+            _collect_metric(scorecards, "raw_metrics", "cumulative_speedup_vs_round1")
         ),
         "shipped_count": calculate_stats(
             _collect_metric(scorecards, "raw_metrics", "shipped_optimizations")
@@ -194,7 +194,7 @@ def aggregate_target_runs(target_dir: Path) -> Optional[Dict[str, Any]]:
             _collect_metric(scorecards, "overall_score_without_transcript")
         ),
         "e2e_speedup": calculate_stats(
-            _collect_metric(scorecards, "raw_metrics", "cumulative_e2e_speedup")
+            _collect_metric(scorecards, "raw_metrics", "cumulative_speedup_vs_round1")
         ),
         "shipped_count": calculate_stats(
             _collect_metric(scorecards, "raw_metrics", "shipped_optimizations")

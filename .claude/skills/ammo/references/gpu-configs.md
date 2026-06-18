@@ -19,7 +19,7 @@ SM arch, SMEM, registers, cooperative grid, occupancy, M_avg, EP.
 
 ## Supported Architectures
 
-| GPU | SM Arch | SMEM/SM | FP8 Support | TMA | Heuristic BS Threshold (assumes low M_avg) |
+| GPU | SM Arch | SMEM/SM | FP8 Support | TMA | Heuristic BS Threshold *(advisory — hardware-class hint, NOT a gate; assumes low M_avg)* |
 |-----|---------|---------|-------------|-----|-------------------------------------------|
 | B200/GB200 | sm_100 | 256 KB | ✓ | ✓ (TMA v2) | BS ≤ 256 |
 | B300/GB300 | sm_103 | 256 KB | ✓ | ✓ (TMA v2) | BS ≤ 256 |
@@ -31,10 +31,12 @@ SM arch, SMEM, registers, cooperative grid, occupancy, M_avg, EP.
 | RTX 4090 | sm_89 | 100 KB | ✓ | ✗ | BS ≤ 32 |
 | RTX 3090 | sm_86 | 100 KB | ✗ | ✗ | BS ≤ 32 |
 
+The "BS ≤ N" values are hardware-class heuristics for **when to try** a cooperative monokernel, not ship gates. Do not crystallize them into ship/retract thresholds.
+
 ## Monokernel “try zone” (rule of thumb)
 
 These thresholds answer only: “**is it worth trying** a cooperative monokernel for decode-like buckets on this GPU?”
-They are not sufficient to pick ownership/fusion boundaries. Use `references/route-selection-decision-tree.md` for route selection.
+They are not sufficient to pick ownership/fusion boundaries. Champions should consult `bottleneck_analysis.md` BW utilization data for the specific target.
 
 Rule of thumb:
 - Smaller batches underfill large-grid GEMMs; cooperative fusion *may* win if it avoids DRAM hops and keeps barriers low.

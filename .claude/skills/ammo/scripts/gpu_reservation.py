@@ -2,7 +2,9 @@
 """GPU reservation module for AMMO benchmark orchestration.
 
 Provides a file-locked, JSON-backed reservation system for NVIDIA GPUs.
-State lives at /tmp/ammo_gpu_res/state.json (overridable via AMMO_GPU_RES_DIR).
+State lives under AMMO_GPU_RES_DIR when set. Otherwise it falls back to
+/tmp/ammo_gpu_res_{sha256(CUDA_VISIBLE_DEVICES)[:12]}/state.json so sessions
+with different visible GPU pools do not share reservation state.
 
 Agents dynamically request N GPUs from the pool:
     CVD=$(python gpu_reservation.py reserve --num-gpus 2) && \
@@ -41,13 +43,11 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Configuration (module-level constants — patchable in tests)
+# Configuration (module-level constants patchable in tests)
 # ---------------------------------------------------------------------------
 
-STATE_DIR: Path = Path(os.environ.get("AMMO_GPU_RES_DIR", "/tmp/ammo_gpu_res"))
-
-# Delays between successive flock attempts (seconds).  4 delays → 5 attempts.
-BACKOFF_DELAYS: list[float] = [0.1, 0.2, 0.4, 0.8]
+# STATE_DIR is assigned after _compute_state_dir() is defined. It remains a
+# module-level constant so tests and emergency tooling can monkeypatch it.
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +144,11 @@ def _compute_state_dir() -> Path:
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     hash_suffix = hashlib.sha256(cvd.encode()).hexdigest()[:12]
     return Path(f"/tmp/ammo_gpu_res_{hash_suffix}")
+
+
+# Delays between successive flock attempts (seconds).  4 delays -> 5 attempts.
+STATE_DIR: Path = _compute_state_dir()
+BACKOFF_DELAYS: list[float] = [0.1, 0.2, 0.4, 0.8]
 
 
 def _init_state() -> dict:
@@ -376,8 +381,9 @@ def reserve(
             # Scan for a contiguous block of num_gpus consecutive free GPUs
             run_start = None
             run_len = 0
+            prev_i = None
             for i in all_pool_ids:
-                if i in free_set:
+                if i in free_set and (prev_i is None or i == prev_i + 1):
                     if run_start is None:
                         run_start = i
                         run_len = 1
@@ -386,9 +392,18 @@ def reserve(
                     if run_len >= num_gpus:
                         allocated = list(range(run_start, run_start + num_gpus))
                         break
+                    prev_i = i
+                elif i in free_set:
+                    run_start = i
+                    run_len = 1
+                    prev_i = i
+                    if run_len >= num_gpus:
+                        allocated = [i]
+                        break
                 else:
                     run_start = None
                     run_len = 0
+                    prev_i = None
 
         if allocated is None:
             raise ReservationError(

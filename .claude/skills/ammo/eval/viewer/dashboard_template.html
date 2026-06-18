@@ -310,7 +310,7 @@ function renderDetail() {
         donutQueue.push({ canvasId: donutId, dimensions: sc.dimensions || {} });
         // Raw metrics
         const rm = sc.raw_metrics || {};
-        html += `<p style="margin-top:8px;font-size:11px">Speedup: ${fmt(rm.cumulative_e2e_speedup,3)}x | Shipped: ${rm.shipped_optimizations||0} | Rounds: ${rm.total_rounds||'?'} | Status: ${rm.campaign_status||'?'}</p>`;
+        html += `<p style="margin-top:8px;font-size:11px">Speedup: ${fmt(rm.cumulative_speedup_vs_round1,3)}x | Shipped: ${rm.shipped_optimizations||0} | Rounds: ${rm.total_rounds||'?'} | Status: ${rm.campaign_status||'?'}</p>`;
         html += '</div>';
       });
     });

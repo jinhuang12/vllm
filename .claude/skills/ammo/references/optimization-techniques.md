@@ -252,7 +252,7 @@ Baseline pattern (common):
 - Quantization metadata semantics must match the baseline (per-tensor vs per-block/grouped scales, scale layout, saturation rules).
 - Epilogue register pressure must stay bounded (avoid spills that slow the GEMM enough to erase the win).
 
-**Implementation sketch (Triton or CUDA)**
+**Implementation sketch** (pick authoring class via `references/technology-selection.md` — candidates include Triton, CuTeDSL, CUTLASS template, or hand-written CUDA C++)
 - Locate the expert GEMM kernel used for W1 (often called from `fused_experts` or an MoE runner).
 - Add a fused-epilogue variant that:
   - computes W1 tile

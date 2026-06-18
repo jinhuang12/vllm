@@ -15,7 +15,8 @@
 # (inbox_ts <= delivery_ts in transcript).
 #
 # Identity: agentName + teamName from the transcript JSONL (first 5 lines).
-# Targets: champion-* and impl-champion-* agents only.
+# Targets: champion-*, impl-champion-*, team-lead (orchestrator),
+#          monitor-champion-*, monitor-impl-champion-*.
 # Applies to all tool calls. Fail-open (exit 0 on any error).
 set -euo pipefail
 trap 'exit 0' ERR
@@ -29,18 +30,16 @@ if ! command -v jq &>/dev/null; then exit 0; fi
 INPUT=$(cat)
 
 # ── Parse hook input ──
-read -r TOOL_NAME TRANSCRIPT_PATH AGENT_TYPE < <(
-    echo "$INPUT" | jq -r '[.tool_name // "", .transcript_path // "", .agent_type // ""] | @tsv' 2>/dev/null
-) || true
-dbg "tool=$TOOL_NAME"
+# Query each field separately — bash `read` with tab IFS collapses
+# consecutive tabs (tab is a whitespace class member), which silently
+# shifts fields when a middle field (e.g. agent_type) is empty.
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null) || TOOL_NAME=""
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null) || TRANSCRIPT_PATH=""
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // ""' 2>/dev/null) || AGENT_TYPE=""
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null) || SESSION_ID=""
+dbg "tool=$TOOL_NAME agent_type=$AGENT_TYPE session_id=$SESSION_ID"
 
 [ -z "$TOOL_NAME" ] && exit 0
-
-# ── Skip in-process subagents (they cannot receive messages) ──
-if [ -n "$AGENT_TYPE" ]; then
-    dbg "skip: in-process subagent (agent_type=$AGENT_TYPE)"
-    exit 0
-fi
 
 # ── Identity from transcript ──
 AGENT_NAME=""
@@ -74,28 +73,66 @@ if [ -n "$RESOLVED_TRANSCRIPT" ] && [ -f "$RESOLVED_TRANSCRIPT" ]; then
         ' 2>/dev/null) || true
         if [ -n "$FALLBACK" ]; then
             AGENT_NAME="$FALLBACK"
-            # Extract team name from teammate_id's team config search
-            TEAMS_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/teams"
-            if [ -d "$TEAMS_ROOT" ]; then
-                for tdir in "$TEAMS_ROOT"/*/; do
-                    if jq -e --arg n "$AGENT_NAME" '.members[] | select(.name == $n)' "$tdir/config.json" &>/dev/null; then
-                        TEAM_NAME=$(jq -r '.name' "$tdir/config.json" 2>/dev/null) || true
-                        break
-                    fi
-                done
-            fi
-            dbg "fallback identity: agent=$AGENT_NAME team=$TEAM_NAME"
+            dbg "content-based fallback: agent=$AGENT_NAME"
         fi
     fi
+fi
+
+# ── Edit B: orchestrator detection via leadSessionId (via helper) ──
+# The orchestrator (team-lead) has no agentName in its transcript. Use the
+# shared _ammo_is_lead helper as the gating predicate — it already knows
+# how to apply the agent_type / CLAUDE_SUBAGENT / transcript / team-config
+# precedence. If helper says "is lead", scan team configs for the one
+# whose leadSessionId matches SESSION_ID and adopt it as TEAM_NAME.
+TEAMS_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/teams"
+if [ -z "$AGENT_NAME" ]; then
+    HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    source "$HELPER_DIR/_ammo_is_lead.sh"
+    if _ammo_is_lead "$INPUT"; then
+        _candidate_team=""
+        for tdir in "$TEAMS_ROOT"/*/; do
+            [ -f "$tdir/config.json" ] || continue
+            lead_sid=$(jq -r '.leadSessionId // empty' "$tdir/config.json" 2>/dev/null) || continue
+            if [ "$lead_sid" = "$SESSION_ID" ]; then
+                _candidate_team=$(jq -r '.name // empty' "$tdir/config.json" 2>/dev/null) || true
+                [ -z "$_candidate_team" ] && _candidate_team=$(basename "${tdir%/}")
+                break
+            fi
+        done
+        if [ -n "$_candidate_team" ]; then
+            AGENT_NAME="team-lead"
+            TEAM_NAME="$_candidate_team"
+            dbg "orchestrator via helper + team-config match → team=$TEAM_NAME"
+        fi
+    fi
+fi
+
+# ── Edit D: broader TEAM_NAME fallback ──
+# If we have an AGENT_NAME but no TEAM_NAME (e.g. transcript lacks teamName
+# field, fallback content-parse matched but the old inner scan is gone),
+# scan all team configs for a member with that name.
+if [ -n "$AGENT_NAME" ] && [ -z "$TEAM_NAME" ] && [ -d "$TEAMS_ROOT" ]; then
+    for tdir in "$TEAMS_ROOT"/*/; do
+        [ -f "$tdir/config.json" ] || continue
+        if jq -e --arg n "$AGENT_NAME" '.members[]? | select(.name == $n)' "$tdir/config.json" >/dev/null 2>&1; then
+            TEAM_NAME=$(jq -r '.name // empty' "$tdir/config.json" 2>/dev/null) || true
+            [ -z "$TEAM_NAME" ] && TEAM_NAME=$(basename "${tdir%/}")
+            dbg "broader team fallback: agent=$AGENT_NAME → team=$TEAM_NAME"
+            break
+        fi
+    done
 fi
 
 dbg "agent=$AGENT_NAME team=$TEAM_NAME"
 [ -z "$AGENT_NAME" ] && exit 0
 
-# ── Verify champion by naming convention ──
+# ── Edit A: expanded case filter ──
+# Eligible: champion-*, impl-champion-*, team-lead, monitor-champion-*,
+# monitor-impl-champion-*. Anything else (verifier-1, researcher, etc.)
+# is out of scope and skipped.
 case "$AGENT_NAME" in
-    champion-*|impl-champion-*) ;;
-    *) exit 0;;
+    champion-*|impl-champion-*|team-lead|monitor-champion-*|monitor-impl-champion-*) ;;
+    *) dbg "skip: agentName $AGENT_NAME not in eligible set"; exit 0;;
 esac
 
 # ── Read inbox ──

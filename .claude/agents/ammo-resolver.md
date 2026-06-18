@@ -95,7 +95,7 @@ Max 2 revision cycles. If DA rejects twice, escalate to orchestrator with the un
 2. Run the sweep with `--verify-correctness` to validate E2E correctness of the merged combination
 3. Run E2E sweep at ALL campaign batch sizes
 3. Verify both tracks' gating dispatches activate at their respective BS ranges
-4. Confirm no env var conflicts (each optimization has a unique `VLLM_{OP_NAME}`)
+4. Confirm no env var conflicts (each optimization has a unique, mechanism-derived `VLLM_<SCOPE>_<MECHANISM>` flag per `skills/ammo/references/impl-track-rules.md` § Env Flag Naming (PR-Ready) — never an `op_id`-derived name like `VLLM_OP003`)
 
 ## Output
 

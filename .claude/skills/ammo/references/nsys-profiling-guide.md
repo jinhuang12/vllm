@@ -1,734 +1,210 @@
-# Profiling vLLM with Nsight Systems (nsys) and Nsight Compute (ncu)
+# Nsight Systems Profiling Guide
 
-This guide covers nsys (Nsight Systems) profiling for vLLM kernel optimization.
-nsys is the PREFERRED tool when `--cuda-graph-trace=node` is feasible (Tier 0).
-For large models where node mode is infeasible, see `torch-profiler-guide.md`
-for the primary profiling methodology (Tier 1), with nsys graph mode as
-optional enrichment (Tier 2). See §3.10 for the tier selection decision tree.
+Stage 2 has one default profiling workflow:
 
-This is a practical guide for profiling vLLM to:
-- Use **Nsight Systems (nsys)** for **end-to-end** timelines: identify fusion opportunities, launch overhead, sync/memcpy gaps, and system-level bottlenecks.
-- Use **Nsight Compute (ncu)** for **kernel-level** analysis: identify device bottlenecks (memory vs compute, occupancy limits, stall reasons).
+1. Run a clean E2E baseline sweep with no profiler flags.
+2. Run a short Nsight Systems node capture with the architecture-appropriate CUDA trace backend.
+3. Mine the nsys report for kernel ranking, launch chains, per-rank/per-device skew, CUDA memcpy/NVLink activity, and timing shares.
+4. Run targeted Nsight Compute only for physical-ceiling claims such as occupancy, achieved bandwidth counters, or SM utilization.
 
-Rule of thumb:
-1) Start with **nsys** to determine what to optimize and which kernels matter in steady state.
-2) Use **ncu** on 1–3 selected kernels to determine why they are slow and what knob to turn.
+Do not run a profiling probe. Do not use profiler-contaminated latency as the official E2E baseline.
 
-Always record the exact commands and key findings in `validation_results.md`.
+## Required Stage 1 Commands
 
-## Search Anchors
-
-nsys profile, nsys stats, CUDA graphs, torch.compile, fused_moe, fused_experts, topk_softmax, kernel timing, VLLM_WORKER_MULTIPROC_METHOD, ncu, Nsight Compute, Blackwell, SM100, SM120, B200, kernel names
-
-## Scope
-
-This guide covers **profiling (trace capture)** for kernel analysis in Stage 1.
-
-For **validation latency measurements** (Stages 5-6), use `scripts/run_vllm_bench_latency_sweep.py`
-instead — see `references/validation-defaults.md`.
-
-## Table of contents
-1. Goals and non-goals
-2. Make runs comparable (vLLM setup)
-3. Nsight Systems (nsys): capture and analysis (E2E)
-4. Nsight Compute (ncu): targeted kernel profiling (device bottlenecks)
-5. Multi-process / multi-GPU gotchas
-6. Interpreting results: fusion opportunities vs device bottlenecks
-7. Worked example: MoE extraction (nsys → CSV → ncu) + example table
-8. References
-
-## 1) Goals and non-goals
-
-Goals:
-- Identify where GPU time goes and which kernel sequences repeat in steady-state vLLM inference (nsys).
-- Identify device bottlenecks for specific hot kernels (ncu): memory vs compute vs occupancy vs latency.
-
-Non-goals:
-- Treat nsys timing as a microbenchmark oracle. Use it to find candidates and validate "did time disappear?"
-- Use ncu to estimate end-to-end latency. Kernel replay can distort timing; use ncu for attribution.
-
-## 2) Make runs comparable (vLLM setup)
-
-### 2.1 Prefer steady state
-- Always include warmup iterations.
-- If you use CUDA graphs and/or compilation, profile steady-state replay separately from compile/capture.
-- **FlashInfer cubin cold-cache (SM100/Blackwell):** Models using FlashInfer CuTe-DSL kernels (e.g., MoE with NvFP4) download pre-compiled cubins from NVIDIA's artifact server on first use. This takes **~800 seconds** and happens during engine init — well before any benchmark iteration. If you profile without caching these first, the nsys run will appear to "hang" during model loading. **Always run the workload once without nsys** to populate the cubin cache before profiling. Subsequent runs skip the download entirely (<5s init).
-
-### 2.2 vLLM multiprocessing (important for profilers)
-
-vLLM can spawn worker processes. For cleaner profiler behavior:
+Clean baseline, used for all speedup math:
 
 ```bash
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-```
-**V1 multiprocessing escape (CRITICAL):** vLLM V1's default mode (`VLLM_ENABLE_V1_MULTIPROCESSING=1`) runs ALL GPU work in a child `EngineCoreProc` subprocess spawned via `multiprocessing.spawn`. The parent process only does scheduling and ZMQ I/O. This means:
-
-1. nsys profiling the parent captures **zero GPU kernel data** — only `cudaGraphLaunch` stubs from the parent side.
-2. `--trace-fork-before-exec=true` is required for nsys to inject into the child process (spawn internally does fork+exec).
-3. Alternatively, set `VLLM_ENABLE_V1_MULTIPROCESSING=0` to keep GPU work in the parent process. This is simpler for profiling but changes the execution model slightly.
-
-**Recommended profiling setup:**
-```bash
-# Option A: Let nsys follow the subprocess (production-parity)
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node ...
-
-# Option B: Disable V1 multiprocessing (simpler, same kernel behavior)
-export VLLM_ENABLE_V1_MULTIPROCESSING=0
-nsys profile --cuda-graph-trace=node ...
-```
-
-If your nsys trace shows 0 GPU kernels despite a successful run, the V1 multiprocessing escape is almost certainly the cause.
-
-### 2.3 NVTX ranges (recommended)
-
-NVTX improves attribution (stage → kernels) for both nsys and ncu (via NVTX filtering).
-
-```bash
-export VLLM_NVTX_SCOPES_FOR_PROFILING=1
-```
-
-If NVTX is enabled but you see import errors, install the Python package:
-
-```bash
-python -c "import nvtx" || pip install nvtx
-```
-
-Optional (more granular, validate in your configuration):
-- `--enable-layerwise-nvtx-tracing` (may be incompatible with CUDA graph in some modes; confirm in your run).
-
-### 2.4 Keep traces small and comparable
-- Keep `--num-iters` low (often `1`) after warmup.
-- Keep input/output lengths constant across baseline vs variants.
-- Start with single GPU (`CUDA_VISIBLE_DEVICES=0`) unless the bottleneck is distributed.
-
-## 3) Nsight Systems (nsys): capture and analysis (E2E)
-
-### 3.1 Capture modes
-
-**A) Full-run capture (small models, TP=1 only)**
-- Works without modifying the workload.
-- Keep the workload short so the trace is small and analyzable.
-- Acceptable for single-GPU models where torch.compile + CUDA graph capture takes <60s.
-
-**B) Two-step delimited capture (REQUIRED for TP>1 or large models)**
-
-Full-run capture with `--cuda-graph-trace=node` can hang indefinitely. The hang can occur during CUDA graph **replay** under `--cuda-graph-trace=node`, not only during graph creation or torch.compile. Evidence from Qwen3.5-35B-A3B-FP8 on B200: graph capture completed successfully (15s, 102 graphs), BS=1 profiling succeeded (5 iterations), but BS=8 hung after `cudaProfilerStart()` during the first graph replay. Likely cause: per-node replay instrumentation overwhelmed by graph complexity or GPU memory pressure from ~2,142 CUDAGraph objects (50 default capture sizes x ~41 piecewise subgraphs + 50 FULL graphs).
-
-The two-step approach reduces compile/capture overhead in the profiled region (even though it does not fully prevent replay hangs — see also section 3.1C for reducing the CUDA graph capture surface):
-
-1. **Pre-warm** (no nsys): Run the workload once to populate torch.compile and Triton autotuning caches on disk. Note: CUDA graphs are in-memory only and will be recaptured in Step 2 (see note on caching below).
-2. **Profile with delayed capture**: Use `--capture-range=cudaProfilerApi` so nsys idles through model load, compile, and graph capture, then traces only the profiled iteration.
-
-vLLM's `--profile --profiler-config '{"profiler": "cuda"}'` flag calls `cudaProfilerStart/Stop` around exactly one benchmark iteration, which nsys hooks into.
-
-**When to use two-step capture**: Use it whenever `--cuda-graph-trace=node` is needed (which is always for accurate decode-step breakdowns) AND any of these apply:
-- TP > 1 (multiple worker processes)
-- Model has >10B parameters
-- torch.compile time >60 seconds
-- Previous full-run capture attempt timed out or produced a trace >500 MB
-
-If in doubt, use two-step — it is strictly better than full-run for steady-state decode profiling.
-
-**Note on caching**: Only `torch.compile` and Triton autotuning artifacts cache to disk. CUDA graphs are stored in-memory only (`CUDAGraphWrapper.concrete_cudagraph_entries` dict in `vllm/compilation/cuda_graph.py` — a plain Python dict that evaporates on process exit). Pre-warming still helps significantly: it eliminates torch.compile latency (~840s down to ~18s on subsequent runs), but CUDA graph capture still runs every process launch (~12-15s for large MoE models).
-
-**C) Reducing CUDA graph capture surface for nsys profiling**
-
-vLLM's default compilation config captures CUDA graphs for ~50 batch sizes (`[1, 2, 4, 8, 16, 24, 32, ..., 512]`), producing ~2,142 CUDAGraph objects total (50 capture sizes x ~41 piecewise subgraphs + 50 FULL graphs for a large MoE model). This memory pressure can cause `--cuda-graph-trace=node` replay instrumentation to hang.
-
-**Mitigation**: Restrict capture to only the batch sizes being profiled using the `--cudagraph-capture-sizes` CLI argument:
-
-```bash
-vllm bench latency \
-  --model {model_id} \
-  --cudagraph-capture-sizes 1 8 32 \
-  --batch-size 8 \
-  --input-len 64 --output-len 32 \
-  --num-iters-warmup 2 --num-iters 1
-```
-
-This reduces graph objects from ~2,142 to ~126 (a 17x reduction), substantially lowering the instrumentation burden on nsys.
-
-**Important**: `VLLM_CUDAGRAPH_CAPTURE_SIZES` does not exist as an environment variable. Use the CLI argument `--cudagraph-capture-sizes` or pass it via `--compilation-config '{"cudagraph_capture_sizes": [1, 8, 32]}'`.
-
-**Production parity**: The profiled batch sizes (e.g., `[1, 8, 32]`) are exact matches in vLLM's default capture list, so the restricted graphs are identical to what production would use for those sizes. Restricting capture sizes is NOT a parity violation — it simply skips graphs for batch sizes that are not being profiled.
-
-**Automated in sweep script**: The sweep script (`run_vllm_bench_latency_sweep.py`) does this automatically when `--nsys-profile` is active — it sets `--cudagraph-capture-sizes` to match `workload.batch_sizes` from `target.json`.
-
-### 3.2 Recommended nsys flags (vLLM baseline)
-
-Recommended flags for vLLM (especially with worker processes and CUDA graphs):
-- `--trace-fork-before-exec=true` (trace worker processes)
-- `--cuda-graph-trace=node` (expand CUDA graph nodes into kernels)
-
-For CSV attribution (recommended):
-- `--trace=cuda,nvtx` (include NVTX if enabled)
-- `--sample=none` (disable CPU sampling unless you have a CPU-side question)
-
-### 3.3 Quick reference: offline inference (bench latency)
-
-**Preferred: Two-step delimited capture (works for any model size / TP)** 
-
-```bash
-export VLLM_WORKER_MULTIPROC_METHOD=spawn                                                                                                                                                                                                                                                                           
-export HF_HOME=<path_to_hf_cache>  # if model weights are cached elsewhere                                                                                                                                                                                                                                         
-                                                                                                                                                                                                                                                                                                                   
-# Step 1: Pre-warm (populates torch.compile + Triton autotuning disk caches, no nsys)                                                                                                                                                                                                                                          
-vllm bench latency \                                                                                                                                                                                                                                                                                               
-  --model {model_id} \                                                                                                                                                                                                                                                                                             
-  --tensor-parallel-size {tp} \                                                                                                                                                                                                                                                                                    
-  --batch-size 8 \                                                                                                                                                                                                                                                                                                 
-  --input-len 64 \                                                                                                                                                                                                                                                                                                 
-  --output-len 32 \                                                                                                                                                                                                                                                                                                
-  --num-iters-warmup 1 \                                                                                                                                                                                                                                                                                           
-  --num-iters 1                                                                                                                                                                                                                                                                                                    
-                                                                                                                                                                                                                                                                                                                   
-# Step 2: Profile with delayed capture (only traces the --profile iteration)
-nsys profile \
-  --trace=cuda,nvtx \
-  --sample=none \
-  --trace-fork-before-exec=true \
-  --cuda-graph-trace=node \
-  --capture-range=cudaProfilerApi \ 
-  --capture-range-end=stop \
-  -o {artifact_dir}/nsys/baseline_bs8 \
-  vllm bench latency \
-    --model {model_id} \
-    --tensor-parallel-size {tp}
-    --batch-size 8 \
-    --input-len 64 \                                                                                                                                                                                                                                                                                        
-    --output-len 32 \                                                                                                                                                                                                                                                                                       
-    --num-iters-warmup 2 \                                                                                                                                                                                                                                                                                  
-    --profile \                                                                                                                                                                                                                                                                                             
-    --profiler-config '{"profiler": "cuda"}'                                                                                                                                                                                                                                                                
-```                                                                                                                                                                                                                                                                                                         
-                                                                                                                                                                                                                                                                                                            
-Key flags explained:                                                                                                                                                                                                                                                                                        
-- `--capture-range=cudaProfilerApi`: nsys idles until vLLM calls `cudaProfilerStart()`, skipping model load + compile + graph capture entirely                                                                                                                                                              
-- `--capture-range-end=stop`: stops capture at `cudaProfilerStop()`                                                                                                                                                                                                                                         
-- `--profile --profiler-config '{"profiler": "cuda"}'`: vLLM brackets exactly one iteration with cudaProfiler start/stop                                                                                                                                                                                    
-- `--num-iters-warmup 2` in Step 2: ensures CUDA graphs are replayed (warmed) before the profiled iteration                                                                                                                                                                                                 
-- `--output-len 32`: short generation keeps trace small (~20 decode steps) while capturing full steady-state behavior                                                                                                                                                                                       
-- Step 1 pre-warm: torch.compile and Triton autotuning caches persist on disk so Step 2 skips recompilation; CUDA graphs are in-memory only and are recaptured in Step 2                                                                                                                                                                                                                          
-                                                                                                                                                                                                                                                                                                            
-**Fallback: Full-run capture (small TP=1 models only)**                                                                                                                                                                                                                                                     
-                                                                                                                                                                                                                                                                                                            
-```bash                                                                                                                                                                                                                                                                                                     
-nsys profile \                                                                                                                                                                                                                                                                                              
-  --trace=cuda,nvtx \                                                                                                                                                                                                                                                                                       
-  --sample=none \                                                                                                                                                                                                                                                                                           
-  --trace-fork-before-exec=true \                                                                                                                                                                                                                                                                           
-  --cuda-graph-trace=node \                                                                                                                                                                                                                                                                                 
-  -o {artifact_dir}/nsys/baseline_bs8 \                                                                                                                                                                                                                                                                     
-  vllm bench latency \                                                                                                                                                                                                                                                                                      
-    --model {model_id} \                                                                                                                                                                                                                                                                                    
-    --batch-size 8 \    
-    --input-len 1024 \
-    --output-len 32 \
-    --num-iters-warmup 5 \
-    --num-iters 1
-```
-
-Only use full-run capture for small single-GPU models where torch.compile takes <60s.
-
-Tip: If `vllm` is not on your PATH, you can run the CLI via Python:
-
-```bash
-python -m vllm.entrypoints.cli.main bench latency --help
-```
-
-### 3.4 Quick reference: server profiling (dynamic capture)
-
-Use this pattern when profiling `vllm serve` (capture only around request handling):
-
-```bash
-nsys profile \
-  --trace-fork-before-exec=true \
-  --cuda-graph-trace=node \
-  --capture-range=cudaProfilerApi \
-  --capture-range-end repeat \
-  vllm serve {model_id} --profiler-config.profiler cuda
-```
-
-### 3.5 Automated per-bucket profiling via sweep script
-
-Instead of manually running nsys per batch size (which reloads the model each time), use the sweep script's `--nsys-profile` flag to profile all buckets in a single model load:
-
-```bash
-python scripts/run_vllm_bench_latency_sweep.py \
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
   --artifact-dir {artifact_dir} \
+  --target-json {artifact_dir}/target.json \
+  --round {N} \
+  --slot baseline \
+  --labels baseline \
+  --capture-golden-refs
+```
+
+Bounded selected-step nsys capture, used for bottleneck attribution on Hopper/Ampere and any platform where default CUDA tracing is stable:
+
+```bash
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --target-json {artifact_dir}/target.json \
+  --round {N} \
+  --slot profiling \
+  --labels baseline \
   --nsys-profile \
-  --nsys-output-len 32
+  --nsys-mode node \
+  --nsys-capture-output-steps 2,50%,100% \
+  --nsys-num-iters 1 \
+  --nsys-timeout-s 1800
 ```
 
-`--nsys-output-len` decouples the profiling sequence length from the benchmark workload's `output_len`. This is critical for large models — see section 3.9 for why `--cuda-graph-trace=node` becomes superlinearly expensive as kernel count × output length grows. `--nsys-num-iters` defaults to `1` when `--nsys-output-len` is set.
+`--nsys-capture-output-steps 2,50%,100%` resolves against each workload bucket's `output_len`, then profiles short shape-equivalent windows that land on a genuine full-batch decode step (not a chunked-prefill chunk). For target step `k`, the sweep captures decode depth `input_len + k` (invariant of the window) by running `input_len + k - w_eff`, `output_len = w_eff`, and vLLM's CUDA profiler captures only the final worker step. `w_eff` is an effective capture window that the script floors child-wide to clear chunked prefill: `w_eff = max(--nsys-capture-window-output-len, max over (bucket, step) of ceil((input_len + step - requested_window) * batch_size / 16384) + 6)`, where `requested_window = --nsys-capture-window-output-len`. The `ceil(...)` term is the number of chunked-prefill worker-steps (chunk = 16384 tokens) the capture must arm past, evaluated at the shifted prompt length `input_len + step - requested_window` (longest at the deepest requested step). `--nsys-capture-window-output-len` (default 2) is therefore only a LOWER BOUND — the script auto-raises it as needed (e.g. 2 → 11 for an 8192-token prompt at batch 8, where the deepest step 512 gives `ceil((8192+512-2)*8/16384)+6 = 5+6 = 11`) and you cannot force the effective window below the floor. You normally do not set it. `--nsys-output-len` remains a horizon override for percentage resolution.
 
-This produces **one `.nsys-rep` per bucket** in `{artifact_dir}/e2e_latency/nsys/` (e.g., `baseline_bs1.nsys-rep`, `baseline_bs8.nsys-rep`).
-
-**How it works**: The sweep script wraps the child process with `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat:N` and calls `cudaProfilerStart()/Stop()` with `torch.cuda.synchronize()` around each bucket's measured iterations (after warmup). nsys's repeat mode automatically splits each capture range into a separate `.nsys-rep` file. The script renames the numbered files to match bucket tags.
-
-**TP > 1 compatibility**: The script sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` and uses `--trace-fork-before-exec=true`. nsys captures all traced processes (including TP workers) when any process triggers the capture range — this is an nsys-level mechanism, not CUDA profiler propagation. Each `.nsys-rep` contains traces from all GPUs.
-
-**Workload matrix support**: The sweep script also supports sweeping `(input_len, output_len, batch_size)` tuples via the `workload_matrix` field in `target.json` — see `references/e2e-latency-guide.md`.
-
-Each output file is independently analyzable:
+For Blackwell (B200/B300) runs, always use `--nsys-trace cuda-sw` to avoid hardware-tracing stalls under CUDA graph replay:
 
 ```bash
-nsys stats --report cuda_gpu_kern_sum {artifact_dir}/e2e_latency/nsys/baseline_bs8.nsys-rep
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --target-json {artifact_dir}/target.json \
+  --round {N} \
+  --slot profiling \
+  --labels baseline \
+  --nsys-profile \
+  --nsys-mode node \
+  --nsys-trace cuda-sw \
+  --nsys-capture-output-steps 2,50%,100% \
+  --nsys-num-iters 1 \
+  --nsys-timeout-s 1800
 ```
 
-### 3.6 Traces without `--cuda-graph-trace=node` are misleading (CRITICAL)                                                                                                                                                                                                                                         
-                                                                                                                                                                                                                                                                                                                   
-If `--cuda-graph-trace=node` is omitted (or the trace hangs and you fall back to a non-expanded trace), the resulting data has serious distortions:                                                                                                                                                                
-                                                                                                                                                                                                                                                                                                                   
-1. **FULL CUDA graph replays appear as single opaque `cudaGraphLaunch` events.** Individual kernels inside the graph are NOT visible. Since steady-state decode runs entirely inside FULL CUDA graphs, the per-kernel breakdown is missing for the most important region.                                          
-                                                                                                                                                                                                                                                                                                                   
-2. **All-reduce spin-wait inflates communication time.** Custom all-reduce kernels (e.g., `multimem_all_reduce_kernel`) report wall time including barrier spin-wait. In a trace, this looks like 50-80% of GPU time is communication — but the actual added latency is only ~5-15 us per call. The spin-wait overlaps with compute on peer GPUs and is NOT additive to the critical path.                                                                                                                                                                                                                             
-                                                                                                                                                                                                                                                                                                                   
-3. **Piecewise graph kernel times overestimate decode costs.** Kernels visible in piecewise graph regions have different scheduling behavior than those in FULL graph replay. In one measured case, MoE routing overhead was 75.9 us/call in piecewise regions but only 14.8 us/call under FULL CUDA graph replay — a 5.1x overestimate.                                                                                                                                                                                                                                                                                      
-                                                                                                                                                                                                                                                                                                                   
-**If you must work with a non-expanded trace**, document these caveats prominently in `bottleneck_analysis.md` and flag all `f_decode` estimates as approximate with explicit uncertainty bounds. Prefer CUDA-graph micro-experiments (like those in Stage 3 debate) to validate nsys-extrapolated timings before committing to optimization targets.
+This produces one `.nsys-rep` per selected depth and batch bucket. The trace
+sidecar records both the synthetic capture shape and source shape:
+`source_input_len`, `source_output_len`, `capture_output_step`,
+`capture_window_output_len`, and `capture_target_output_len`.
 
-NOTE: When using nsys `--cuda-graph-trace=graph` as Tier 2 enrichment alongside torch.profiler (Tier 1), the timing limitation above applies only to nsys data. The primary timing data comes from torch.profiler Chrome trace, which captures production-representative per-kernel timing via CUPTI activity tracing. Use nsys graph mode ONLY for its exclusive fields (cluster dims, NVLink traffic, smem split), NOT for kernel timing or rankings.                                                                                                                                                                                                                                                                         
-                                                                                                                                                                                                                                                                                                                   
-### 3.7 Export the minimum useful CSV reports                                                                                                                                                                                                                                                                      
-    
+Use the bounded fallback `--nsys-output-len 2 --nsys-num-iters 1` only if
+selected-step capture fails; document that depth coverage was omitted.
 
-From a `.nsys-rep`, export:
-- `cuda_gpu_kern_sum` — per-kernel GPU time totals (what dominates)
-- `cuda_gpu_trace` — chronological kernel list (repeat patterns, gaps)
-- `nvtx_sum` and `nvtx_kern_sum` (if NVTX exists) — stage attribution
-- `cuda_api_sum` (optional) — CPU/CUDA API overhead and syncs
+Outputs:
 
-```bash
-nsys stats --report cuda_gpu_kern_sum --format csv \
-  --output {artifact_dir}/nsys/baseline_bs8_cuda_gpu_kern_sum \
-  {artifact_dir}/nsys/baseline_bs8.nsys-rep
-
-nsys stats --report cuda_gpu_trace --format csv \
-  --output {artifact_dir}/nsys/baseline_bs8_cuda_gpu_trace \
-  {artifact_dir}/nsys/baseline_bs8.nsys-rep
-
-# Optional (requires NVTX)
-nsys stats --report nvtx_sum --format csv \
-  --output {artifact_dir}/nsys/baseline_bs8_nvtx_sum \
-  {artifact_dir}/nsys/baseline_bs8.nsys-rep
-
-nsys stats --report nvtx_kern_sum --format csv \
-  --output {artifact_dir}/nsys/baseline_bs8_nvtx_kern_sum \
-  {artifact_dir}/nsys/baseline_bs8.nsys-rep
-
-# Optional: look for sync/API overhead
-nsys stats --report cuda_api_sum --format csv \
-  --output {artifact_dir}/nsys/baseline_bs8_cuda_api_sum \
-  {artifact_dir}/nsys/baseline_bs8.nsys-rep
+```text
+{artifact_dir}/rounds/{N}/sweeps/baseline/e2e_latency_results.json
+{artifact_dir}/rounds/{N}/profiling/nsys/*.nsys-rep
 ```
 
-### 3.8 What each nsys report answers
+`--slot baseline` plus any profiler flag is invalid. The sweep script enforces this guard so official timing cannot be contaminated by profiler overhead.
 
-- `cuda_gpu_kern_sum`:
-  - "What kernels dominate total GPU time?"
-  - "Is the hot path heavy-kernel dominated (GEMM/attention) or micro-kernel dominated (fusion/launch overhead)?"
+## Trace Backend Matrix
 
-- `cuda_gpu_trace`:
-  - "What kernel sequences repeat in steady state?"
-  - "Where is micro-kernel soup between heavy kernels?"
-  - "Are there gaps/bubbles between kernels?"
-
-- `nvtx_sum` / `nvtx_kern_sum`:
-  - "Which vLLM stage owns time?"
-  - "Which kernels are inside that stage?"
-
-- `cuda_api_sum`:
-  - "Are we spending time in `cudaStreamSynchronize` / `cudaMemcpy*` / graph breaks / CPU launch overhead?"
-
-### 3.9 Scaling limits of --cuda-graph-trace=node
-
-`--cuda-graph-trace=node` forces nsys to execute each CUDA graph node individually with full driver instrumentation. The overhead per kernel is NOT constant — it grows superlinearly as the total number of profiled events exceeds CPU cache capacity for trace buffers.
-
-**Overhead model (empirical, observed on SM89 L40S / SM100 B200 hosts — actual overhead varies with host CPU, RAM bandwidth, and nsys version):**
-
-| Total Kernel Events | Effective Overhead/Kernel | Typical Wall Time |
-|---:|---:|---:|
-| <30,000 | ~60 us | <5 min |
-| ~200,000 | ~150 us | ~30 min |
-| >3,000,000 | ~1,500 us | >100 min (may DNF) |
-
-Total events = `kernels_per_step × output_len × num_iters × num_buckets`.
-
-**Key insight**: `--capture-range=cudaProfilerApi` does NOT reduce this overhead. Instrumentation hooks are injected during CUDA graph capture (which happens during warmup, before `cudaProfilerStart()`), not during data collection. Delayed capture reduces trace *size* but not profiling *overhead*.
-
-**Formula for safe profiling output length:**
-
-```
-nsys_OL = min(32, floor(20000 / kernels_per_step))
-```
-
-This keeps events under ~20K per bucket with `num_iters=1`. For multi-bucket sweeps, total events = `kernels_per_step × nsys_OL × num_buckets`. With 3 buckets and ~1,200 kernels/step, total events reach ~57K — above the <30K fast regime but well below the 200K+ danger zone. Profiling will take ~5-10 min rather than <5 min, which is acceptable. For TP > 1, nsys traces all GPU contexts (`--trace-fork-before-exec=true`), roughly multiplying events by TP — use `kernels_per_step × TP` in the formula for conservative estimates. Examples:
-
-| Model | Kernels/Step | nsys_OL |
-|---|---:|---:|
-| Qwen3.5-4B | ~200 | 32 (capped) |
-| Nemotron-3-Nano-30B-A3B | ~400 | 32 (capped) |
-| NemotronH-120B (88 hybrid layers) | ~1,177 | 16 |
-
-**Detecting kernel count (pre-profiling probe):**
-
-Run a short capture with `--cuda-graph-trace=node` and `OL=2` to count kernel executions per step. Using `=node` (not `=graph`) is required — `=graph` collapses each graph replay into a single event, hiding per-kernel detail.
-
-```bash
-# Quick probe: ~2-5 min (model load + warmup + 1 short iter)
-nsys profile \
-  --trace=cuda \
-  --sample=none \
-  --cuda-graph-trace=node \
-  --trace-fork-before-exec=true \
-  -o /tmp/probe \
-  vllm bench latency \
-    --model {model_id} \
-    --batch-size 1 \
-    --input-len 64 \
-    --output-len 2 \
-    --num-iters-warmup 3 \
-    --num-iters 1
-
-# Extract total kernel executions from the summary.
-# cuda_gpu_kern_sum lists unique kernel names with their instance count.
-# Sum the Instances column to get total kernel executions across the trace.
-nsys stats --report cuda_gpu_kern_sum /tmp/probe.nsys-rep
-
-# Approximate kernels_per_step:
-# The trace contains warmup (3 iters × ~3 steps each) + benchmark (1 iter × 3 steps).
-# In graph-replay steady state, each decode step runs a fixed kernel count.
-# Divide total instances by ~12 for a rough estimate of kernels_per_step.
-# If the model has N layers, a quick check: kernels_per_step ≈ N × 10-15
-# for standard transformers, or N × 13-20 for hybrid (MoE+Mamba+Attention).
-```
-
-Then apply the formula to choose `--nsys-output-len` for the real capture. The estimate is approximate — when in doubt, use a conservative (lower) `--nsys-output-len`.
-
-**Note**: profiling at a short OL means decode steps operate on shorter KV sequences (input_len + nsys_OL tokens). For Stage 1 kernel survey (identifying *which* kernels dominate), this is fine — kernel identity and count are constant across KV lengths. For Stage 2 device-level analysis where kernel *duration* matters (e.g., attention scaling with KV length), profile at a representative OL or use targeted ncu on specific kernels.
-
-**Escape hatches when profiling is still too slow:**
-
-| Strategy | When to use |
-|---|---|
-| Reduce `--nsys-output-len` further (e.g., 4-8) | Default first step |
-| `--cuda-graph-trace=graph` | When you only need aggregate graph timing, not per-kernel (see section 3.6 for major caveats — kernel-level data is lost) |
-| Two-pass: nsys survey (OL=8) → targeted ncu on top 3 kernels | When device-level roofline data is needed for Stage 2 |
-
-### 3.10 Profiling Decision Tree (Tiered Strategy)
-
-Before attempting nsys profiling on models with TP > 1 or > 10B params, run the probe script to estimate cost:
-
-```bash
-python scripts/nsys_probe.py --artifact-dir {artifact_dir}
-```
-
-Tier selection (automatic via nsys probe):
-
-```
-1. Run nsys_probe.py → probe_results.json
-2. IF probe PASS (GREEN/YELLOW, <15 min estimated):
-   → Tier 0: nsys --cuda-graph-trace=node (single source of truth)
-   → All data in one tool. No torch.profiler needed.
-3. IF probe FAIL (RED/timeout):
-   → Tier 1: torch.profiler (PRIMARY) — see torch-profiler-guide.md
-     - Production-representative timing via CUPTI activity tracing
-     - Multi-rank analysis (all rank files)
-     - Kernel chain analysis via chronological ordering
-   → Tier 2 (optional): nsys --cuda-graph-trace=graph (ENRICHMENT)
-     - SM100 cluster dimensions (nsys-exclusive, HIGH value for Blackwell)
-     - NVLink peer-to-peer traffic (nsys-exclusive, MEDIUM)
-     - Static vs dynamic shared memory split (nsys-exclusive, LOW-MED)
-     - WARNING: Tier 2 kernel timings are from capture phase, NOT production
-4. IF communication optimization needed:
-   → Always add Tier 2 (NVLink traffic invisible in Chrome trace)
-5. IF SM100 kernel optimization (CGA cluster tuning):
-   → Always add Tier 2 (cluster dims nsys-exclusive)
-```
-
-For small TP=1 models (< 10B params), the probe is optional — proceed directly to `--nsys-profile` with default settings.
-
-If nsys profiling fails AFTER the probe passed (unexpected), run the probe as a diagnostic to compare expected vs actual behavior.
-
-### 3.11 Blackwell (SM100/SM120) profiling considerations
-
-Blackwell GPUs introduce a new **Hardware Event System** for CUDA tracing. On Blackwell, `--trace=cuda` uses hardware-accelerated tracing by default (falling back to `cuda-sw` if needed). This changes the trace infrastructure under `--cuda-graph-trace=node`.
-
-**ncu kernel name changes on Blackwell:**
-
-cuBLAS uses architecture-specific kernel implementations. On SM89/SM90, kernels may appear as `bmm_Bfloat16_*` or `sm90_xmma_gemm_*`. On SM100 (Blackwell), cuBLAS has confirmed new code paths (CUDA Toolkit 13.2 release notes: *"Improved performance on Blackwell (sm_100 and sm_103) via heuristics tuning"*), and **kernel names will likely differ** from previous architectures.
-
-**Best practice for ncu on new hardware:**
-
-1. **Discovery run first** (no kernel filter):
-   ```bash
-   ncu --set basic --target-processes all \
-     --launch-count 10 \
-     -o {artifact_dir}/ncu/discovery \
-     vllm bench latency --model {model_id} --batch-size 8 \
-       --input-len 64 --output-len 8 --num-iters-warmup 3 --num-iters 1
-   ```
-   Inspect the output to learn actual kernel names on this architecture.
-
-2. **Use broad regex filters** that are architecture-portable:
-   ```bash
-   # Instead of: --kernel-name "regex:bmm_Bfloat16"
-   # Use:
-   --kernel-name "regex:xmma_gemm.*bf16|gemm.*[Bb]f16|bmm.*[Bb]f16|fused_moe|fused_experts"
-   ```
-
-3. **Use `--kernel-name-base demangled`** for more readable matching:
-   ```bash
-   ncu --kernel-name-base demangled --kernel-name "regex:gemm.*bf16" ...
-   ```
-
-### 3.12 Torch Profiler (Tier 1)
-
-When nsys `--cuda-graph-trace=node` is infeasible (large MoE models, >~50B params, or probe timeout), torch.profiler is the PRIMARY profiling tool.
-
-See `torch-profiler-guide.md` for:
-- Chrome trace JSON format and parsing
-- Multi-rank analysis methodology
-- Kernel chain extraction from chronological ordering
-- Bandwidth utilization estimation
-- Occupancy caveats on Blackwell + CUDA graphs
-
-torch.profiler captures per-kernel timing during CUDA graph REPLAY (production conditions), unlike nsys `--cuda-graph-trace=graph` which captures timing during graph CAPTURE (non-production). This makes torch.profiler the authoritative source for kernel rankings when node mode is unavailable.
-
-### 3.13 nsys-Exclusive Capabilities
-
-The following data is ONLY available from nsys and cannot be obtained from torch.profiler Chrome traces:
-
-| Capability | nsys Table/Field | Use Case |
+| Hardware family | Stage 2 trace backend | Notes |
 |---|---|---|
-| SM100 cluster dimensions | CUPTI_ACTIVITY_KIND_KERNEL.clusterX/Y/Z | CGA optimization on Blackwell |
-| Static vs dynamic smem | staticSharedMemory, dynamicSharedMemory | Determine if smem is tunable |
-| NVLink peer traffic | CUPTI_ACTIVITY_KIND_MEMCPY (copyKind=PtoP) | Communication optimization |
-| Full CUDA runtime API | CUPTI_ACTIVITY_KIND_RUNTIME (19K+ events) | CPU-side overhead analysis |
-| CUDA graph topology | CUDA_GRAPH_NODE_EVENTS | Graph structure validation |
-| sharedMemoryExecuted | Actual vs requested smem allocation | L1 partition analysis |
-| localMemoryPerThread | Per-thread local (spill) memory | Register spilling detection |
+| Blackwell B200/B300 (SM100/SM120) | `--nsys-trace cuda-sw` | Always use software tracing. Hardware tracing stalls under CUDA graph replay on Blackwell regardless of model type or TP size. |
+| Hopper H100/H200 | default `--nsys-trace cuda` | Use normal CUDA tracing unless timeout/hang failure appears. |
+| Ampere A100 | default `--nsys-trace cuda` | Use normal CUDA tracing unless timeout/hang failure appears. |
+| Unknown NVIDIA target | default `--nsys-trace cuda` first | Switch to `cuda-sw` only after logs match the Blackwell-style replay/collective timeout failure. |
 
-## 4) Nsight Compute (ncu): targeted kernel profiling (device bottlenecks)
+On Blackwell, the hardware event system for CUDA tracing interacts poorly with CUDA graph replay, causing long warmup/profiling stalls followed by RPC or NCCL watchdog timeouts. This affects all workloads (not just MoE or TP>1). `cuda-sw` still captures CUDA API/software activity and graph node attribution while avoiding that hardware-tracing path.
 
-### 4.1 How to pick kernels for ncu
+Keep `--nsys-mode node` for the default Stage 2 path because node mode is the ranking source for CUDA graph workloads.
 
-Use nsys `cuda_gpu_kern_sum` to select:
-- 1–2 kernels with high total time and meaningful instances.
-- Optionally 1 short kernel that runs extremely often (fusion candidate).
+`--nsys-capture-output-steps` accepts comma-separated integers and percentages.
+Percentages resolve against `--nsys-output-len` when supplied, otherwise against
+each bucket's workload `output_len`. Duplicate resolved steps are removed in
+stable order. A step shallower than the effective capture window is still
+captured — the script shifts `input_len` (`il_eff = input_len + step - w_eff`)
+so the trace lands at the requested decode depth. The only step that is dropped
+is one where `il_eff < 1` (the context is too short to host a steady-state
+decode); that bucket/step logs a loud WARNING and the remaining steps continue.
+To recover a dropped step, use a larger `input_len` or a shallower step —
+lowering `--nsys-capture-window-output-len` will not help, because it is only a
+lower bound that the script auto-raises to clear chunked prefill.
 
-Treat kernel name matching as approximate (Triton and CUTLASS names can vary). Use NVTX ranges and adjacency in the trace when names are long.
+If the command fails:
 
-### 4.2 ncu recommended starting point
+- Check the supervisor log under `rounds/{N}/sweeps/profiling/logs/`.
+- Confirm the hardware family. On Blackwell (B200/B300), confirm the command used `--nsys-trace cuda-sw`; on Hopper/Ampere, start from default `cuda`.
+- Keep `--nsys-capture-output-steps 2,50%,100%` and `--nsys-num-iters 1` for the default capture. Use `--nsys-output-len 2 --nsys-num-iters 1` only when selected-step capture itself fails.
+- Increase `--nsys-timeout-s` only if logs show useful forward progress.
+- Reduce the profiled bucket set only as a last resort, and document the omitted buckets.
 
-Start small:
-- `--set basic` first (lower overhead)
-- keep `--launch-count` small
-- use `--launch-skip` to avoid warmup noise
-- enable NVTX filtering if available (`--nvtx`, `--nvtx-include`)
+## Stage 2 Mining
 
-Example (MoE kernel pattern, forward stage):
+Mine the existing nsys reports. Do not re-run the sweep just to analyze traces.
 
-```bash
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export VLLM_NVTX_SCOPES_FOR_PROFILING=1
+Minimum analysis:
 
-ncu \
-  --set basic \
-  --target-processes all \
-  --nvtx \
-  --nvtx-include "gpu_model_runner: forward" \
-  --kernel-name "fused_moe" \
-  --launch-skip 50 \
-  --launch-count 5 \
-  -o {artifact_dir}/ncu/fused_moe_basic \
-  vllm bench latency \
-    --model {model_id} \
-    --batch-size 8 \
-    --input-len 1024 \
-    --output-len 32 \
-    --num-iters-warmup 5 \
-    --num-iters 1
-```
+- Export nsys reports to SQLite or stats tables.
+- Rank kernels by total GPU time and count.
+- Group kernel chains in timestamp order, not architecture order.
+- Map top kernels to source paths or generated backends when possible.
+- For TP > 1, compare all rank/device reports and report per-rank skew.
+- Separate compute kernels from communication kernels and memcpy/P2P traffic.
+- Compute `f_decode`, `decode_share_of_e2e`, and `f_e2e` using measured Stage 1 data.
 
-If you need more detail, move to:
+Useful commands:
 
 ```bash
-ncu --set detailed ...
+nsys stats --force-export=true --report cuda_gpu_kern_sum \
+  {artifact_dir}/rounds/{N}/profiling/nsys/baseline_profile*.nsys-rep
+
+nsys stats --force-export=true --report cuda_gpu_trace \
+  {artifact_dir}/rounds/{N}/profiling/nsys/baseline_profile*.nsys-rep
+
+nsys export --type sqlite --force-overwrite=true \
+  --output {artifact_dir}/rounds/{N}/profiling/nsys/baseline.sqlite \
+  {artifact_dir}/rounds/{N}/profiling/nsys/baseline_profile*.nsys-rep
 ```
 
-### 4.3 Exporting ncu output for review
+Report approximate trace timings honestly. A value such as `~74 us` is valid when it comes from the nsys trace. It is not valid to infer kernel duration or ordering from source code or architecture diagrams.
 
-ncu can print CSV to stdout (useful for quick comparisons):
+## Optional Graph Diagnostics
+
+`--nsys-mode graph` is optional diagnostic enrichment. Use it only when node-mode results leave a specific open question about graph structure, launch grouping, CUDA graph replay, or metadata available only in graph view.
+
+Graph mode is not the ranking source for Stage 2. If node and graph mode disagree, use node-mode timing for bottleneck ranking and explain why graph mode was captured.
+
+Graph diagnostic command:
 
 ```bash
-ncu --set basic --csv ...
+.venv/bin/python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py \
+  --artifact-dir {artifact_dir} \
+  --target-json {artifact_dir}/target.json \
+  --round {N} \
+  --slot profiling \
+  --labels baseline \
+  --nsys-profile \
+  --nsys-mode graph \
+  --nsys-output-len 2 \
+  --nsys-num-iters 1 \
+  --nsys-timeout-s 1800
 ```
 
-For deeper inspection, prefer saving a report with `-o`/`--export` and opening it in the Nsight Compute UI or importing via CLI workflows.
+Add `--nsys-trace cuda-sw` to graph diagnostics on Blackwell (B200/B300) — same reasoning as node mode above.
 
-## 5) Multi-process / multi-GPU gotchas
+## Targeted NCU
 
-### 5.1 nsys
-- Use `--trace-fork-before-exec=true` to follow vLLM worker processes.
-**For TP > 1**: Use the two-step delimited capture (section 3.1B, section 3.3) and consider reducing the CUDA graph capture surface (section 3.1C). Full-run capture with `--cuda-graph-trace=node` can hang during graph replay when per-node instrumentation is overwhelmed by the number of CUDAGraph objects. The two-step approach (pre-warm without nsys, then `--capture-range=cudaProfilerApi`) reduces overhead, and restricting `--cudagraph-capture-sizes` further mitigates replay hangs.
-- Single-GPU tracing (`CUDA_VISIBLE_DEVICES=0`) is useful for kernel-level analysis but cannot capture multi-GPU communication patterns. For TP models, trace all GPUs but use delimited capture to keep trace size manageable.
-- For CUDA graphs, include `--cuda-graph-trace=node` to see per-kernel detail.
+Nsight Compute is required before making any physical-ceiling claim:
 
-### 5.2 ncu
-- Use `--target-processes all` to include worker processes.
-- Keep `--launch-count` small; replay overhead grows quickly.
-- If you only want one rank/process, use `--target-processes-filter` and/or run single GPU.
+- Occupancy or achieved occupancy.
+- SM utilization or tensor-core utilization.
+- Achieved memory bandwidth from hardware counters.
+- Register pressure, shared-memory pressure, or stall-reason claims.
+- "Kernel X can improve by at most Y%" where Y comes from a hardware ceiling.
 
-## 6) Interpreting results: fusion opportunities vs device bottlenecks
+Keep NCU narrow. Profile only the top kernels identified by nsys, with representative bucket sizes. Store results under:
 
-### 6.1 Fusion opportunities (best found with nsys)
-
-Signals:
-- Many short pointwise kernels between heavy kernels (launch overhead + HBM round-trips).
-- Repeated chains like: cast → add → mul → activation → cast.
-- Quant/dequant kernels interleaved with compute kernels.
-- Large gaps/bubbles between kernels (CPU overhead, sync points, graph breaks).
-
-Actions:
-- Fuse pointwise chains (Triton/CUDA fusion).
-- Reduce intermediate reads/writes to HBM (fuse producer/consumer).
-- Pull small ops into an existing heavy kernel (when safe).
-- Fix graph breaks / unintended syncs to reduce bubbles.
-
-### 6.2 Device bottlenecks (best found with ncu)
-
-Common diagnoses:
-- **Memory bound**: bandwidth saturated, low compute utilization → improve data layout/reuse/coalescing, reduce traffic.
-- **Compute bound**: high SM/Tensor utilization → improve tensor core path, tiling, pipelining.
-- **Occupancy limited**: capped by registers/shared memory → reduce regs/smem, adjust tiling.
-- **Latency/launch limited**: extremely short kernels → fix with fusion (nsys typically shows this best).
-
-## 7) Worked example: MoE extraction (nsys → CSV → ncu) + example table
-
-This section is MoE-specific by design. Keep it as a worked example so the rest of the guide remains general.
-
-### 7.1 Capture a short nsys trace (MoE workload)
-
-```bash
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-
-nsys profile \
-  --trace-fork-before-exec=true \
-  --cuda-graph-trace=node \
-  -o {artifact_dir}/nsys/moe_bs8 \
-  vllm bench latency \
-    --model {model_id} \
-    --batch-size 8 \
-    --input-len 1024 \
-    --output-len 32 \
-    --num-iters-warmup 5 \
-    --num-iters 1
+```text
+{artifact_dir}/rounds/{N}/profiling/ncu/
 ```
 
-### 7.2 Extract MoE kernel times (nsys stats + grep)
+Stage 2 may rank bottlenecks from nsys without NCU. It may not claim a physical ceiling without NCU or an explicitly cited hardware spec and math.
 
-```bash
-# Full kernel summary (sorted by total time)
-nsys stats --report cuda_gpu_kern_sum {artifact_dir}/nsys/moe_bs8.nsys-rep
+## Valid Stage 2 Evidence
 
-# Filter common MoE-related kernels
-nsys stats --report cuda_gpu_kern_sum {artifact_dir}/nsys/moe_bs8.nsys-rep \
-  | grep -E "fused_moe|fused_experts|topk|topk_softmax|moe_align"
-```
+Acceptable:
 
-MoE kernel name patterns you may see:
+- `rounds/{N}/profiling/nsys/*.nsys-rep`
+- nsys stats/export tables derived from those reports
+- sweep JSON from `rounds/{N}/sweeps/baseline/`
+- targeted NCU CSV/report for hardware-counter claims
+- source-code mapping used only to explain what a measured kernel is
 
-| Pattern | What it is |
-|---------|------------|
-| `fused_moe*` | Main fused MoE kernel |
-| `fused_experts*` | Expert execution kernel |
-| `topk*` / `topk_softmax*` | Router/gating kernel |
-| `moe_align*` | Token alignment/preparation |
-| `xmma_gemm*` | GEMM kernels (may be inside MoE) |
-| `act_and_mul*` / `silu*` | Activation kernels |
+Not acceptable:
 
-### 7.3 Follow-up with ncu (pick one MoE kernel)
+- Profiler-run latency as official E2E timing.
+- Architecture-inferred kernel chains without trace timestamps.
+- Occupancy/bandwidth-counter claims without targeted NCU.
+- Graph-mode timing as the primary bottleneck ranking source.
 
-Take the top MoE kernel from `cuda_gpu_kern_sum` and run a small `ncu` capture to diagnose whether it is memory bound, compute bound, or occupancy limited.
+## Report Checklist
 
-```bash
-ncu \
-  --set basic \
-  --target-processes all \
-  --kernel-name "fused_moe" \
-  --launch-skip 50 \
-  --launch-count 5 \
-  -o {artifact_dir}/ncu/moe_fused_moe_basic \
-  vllm bench latency \
-    --model {model_id} \
-    --batch-size 8 \
-    --input-len 1024 \
-    --output-len 32 \
-    --num-iters-warmup 5 \
-    --num-iters 1
-```
+`rounds/{N}/mining/bottleneck_analysis.md` must include:
 
-### 7.4 Example: constraints.md entry (keep as a template)
-
-```markdown
-## Baseline Truth Snapshot
-
-nsys profile: {artifact_dir}/nsys/moe_bs8.nsys-rep
-
-### MoE Kernel Timings (BS=8, decode step)
-
-| Kernel | Avg (us) | % of MoE |
-|--------|----------|----------|
-| fused_moe_kernel | 523.4 | 78% |
-| topk_softmax | 45.2 | 7% |
-| moe_align_block | 32.1 | 5% |
-| scaled_fp8_quant | 28.9 | 4% |
-| (accumulate) | 41.5 | 6% |
-| **Total MoE** | **671.1** | **100%** |
-
-### Derived Values
-- P = 8 * 8 = 64 (token-expert pairs, top_k=8)
-- M_avg = 64 / 128 = 0.5 tokens/expert
-- Saturation = 64 / 108 = 0.59 (108 SMs example)
-```
-
-### 7.5 Red flags in traces (use as a checklist)
-
-| Symptom | Possible cause | Action |
-|---------|----------------|--------|
-| Unexpected `cudaMemcpy*` | Host-device transfer on hot path | Find the caller; keep transfers off the step loop |
-| `cudaStreamSynchronize` | Graph breaks / explicit sync | Identify the sync site; restore async/graph capture |
-| Large gaps between kernels | CPU overhead or sync | Confirm CUDA graphs are active; reduce Python overhead |
-| Missing kernels in trace | Graph not expanded | Ensure `--cuda-graph-trace=node` is set |
-| ncu `--kernel-name` matches 0 kernels | Architecture-specific kernel names | Run discovery pass without `--kernel-name` first; use broader regex (see §3.11) |
-| nsys hang on Blackwell (B200/B300) | Hardware Event System + node replay overhead | Same mitigations as §3.1B/§3.9; do NOT use `node:host-only` (invalid, see §3.11) |
-| Zero GPU kernels in trace despite successful run | V1 multiprocessing: GPU work in child process, nsys only traced parent | Use `VLLM_ENABLE_V1_MULTIPROCESSING=0` or `--trace-fork-before-exec=true` (section 2.2) |
-| nsys "hangs" during model loading (>5 min) | FlashInfer cubin cold-cache download (~800s first time on SM100) | Pre-cache cubins by running once without nsys (section 2.1) |
-| High variance in kernel times | Contention / throttling | Profile on an isolated GPU / stable clocks |
-| Kernel appears in piecewise graph but not FULL decode graph | One-time init, prefill-only, or framework overhead | Compute f_decode separately; if f_decode ≈ 0, this kernel is not worth optimizing for decode-heavy workloads |
-| Kernel instance count >> (num_layers × num_decode_steps) | Autotuning, JIT, or graph capture artifact | Cross-check with multi-iteration run or FULL CUDA graph extraction |
-
-### 7.6 Transient vs steady-state overhead
-
-Traces with `--num-iters 1` capture one-time costs (Triton autotuning, JIT, graph capture) as a large fraction of GPU time. These are amortized in production. The researcher should extract the FULL CUDA graph (decode) region and compute `f_decode` as the primary optimization target. Use `--num-iters-warmup 5` to ensure warmup overhead completes before the bench iteration.
-
-## Installation (if needed)
-
-```bash
-apt update
-apt install -y --no-install-recommends gnupg
-echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu$(source /etc/lsb-release; echo "$DISTRIB_RELEASE" | tr -d .)/$(dpkg --print-architecture) /" \
-  | tee /etc/apt/sources.list.d/nvidia-devtools.list
-apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub
-apt update
-apt install nsight-systems-cli
-```
-
-## 8) References
-
-- vLLM profiling docs: https://docs.vllm.ai/en/latest/contributing/profiling/
-- Nsight Systems User Guide: https://docs.nvidia.com/nsight-systems/UserGuide/index.html
-- Nsight Compute User Guide: https://docs.nvidia.com/nsight-compute/
+- Exact Stage 1 baseline and profiling commands.
+- Artifact paths for every trace used.
+- Top kernels/components by measured time.
+- Per-rank/per-device comparison for TP/DP runs.
+- `f_decode`, `decode_share_of_e2e`, and `f_e2e` tables.
+- Technology Landscape entries for the top components.
+- Any NCU-backed physical-ceiling claims with paths to the raw NCU artifacts.

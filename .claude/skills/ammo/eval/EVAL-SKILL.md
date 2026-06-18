@@ -49,7 +49,7 @@ python .claude/skills/ammo/eval/scripts/parse_session_logs.py \
   --output /tmp/ammo_eval_session_data.json
 ```
 
-Extracts ground-truth timing and token cost data from the session JSONL. This replaces manual `stage_timestamps` and `agent_costs` tracking in state.json — no manual recording by the lead is needed.
+Extracts ground-truth timing and token cost data from the session JSONL. This provides richer per-round timings than the per-stage `started_at`/`completed_at` carried on each round in state.json, and replaces the older `campaign.agent_costs` fallback — no manual recording by the lead is needed.
 
 ### Step 1: Parse Artifacts
 ```bash
@@ -59,7 +59,7 @@ python .claude/skills/ammo/eval/scripts/parse_artifacts.py \
   --output /tmp/ammo_eval_snapshot.json
 ```
 
-The `--session-data` flag provides session-log-derived timing and cost data. When omitted, falls back to state.json (backward compatible).
+The `--session-data` flag provides session-log-derived timing and cost data. When omitted, falls back to the per-round stage timestamps on each `campaign.rounds[*].{stage}.{started_at,completed_at}` entry in state.json.
 
 ### Step 2: Snapshot Changes
 ```bash
@@ -69,7 +69,7 @@ python .claude/skills/ammo/eval/scripts/snapshot_changes.py \
 ```
 
 This captures a full record of all code produced during the campaign:
-- Git diffs (patches) from every campaign worktree listed in `state.json`'s `parallel_tracks`
+- Git diffs (patches) from every campaign worktree across all `campaign.rounds[*].parallel_tracks.tracks` in `state.json`
 - Session-member worktrees that shared the same session ID
 - A complete copy of the artifact directory (minus large binary profiling files)
 - Skill diff from the main branch
@@ -368,7 +368,7 @@ Sessions that shipped **lossy** optimizations (FP8, INT4, etc.) without Gate 5.1
 - **E2E Outcome**: Uses verified-only cumulative speedup — lossy ops that were never accuracy-gated are excluded entirely. Verified-only speedup is computed per-round when decomposition is available, otherwise approximated as `1 + (raw_speedup - 1) * (verified_ops / total_ops)`.
 - **Gate Pass Rates**: Each unverified lossy shipped op counts as an expected gate failure, lowering the pass rate.
 
-Classification uses `parallel_tracks` classification field when available, falling back to op_id name pattern matching (`fp8`, `int4`, `int8`, `w8a16`, `w4a16`, `quantiz`, `awq`, `gptq`). Lossless ops are always considered verified. The `_ensure_accuracy_verification()` backfill in `score_campaign.py` handles old snapshots that lack the `accuracy_verification` field.
+Classification uses each track's `classification` field at `campaign.rounds[*].parallel_tracks.tracks[op_id].classification`, falling back to op_id name pattern matching (`fp8`, `int4`, `int8`, `w8a16`, `w4a16`, `quantiz`, `awq`, `gptq`). Lossless ops are always considered verified. The `_ensure_accuracy_verification()` backfill in `score_campaign.py` handles old snapshots that lack the `accuracy_verification` field.
 
 To retroactively apply scoring changes to all archived runs:
 ```bash

@@ -24,16 +24,21 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **Constraint tested**: Stage 1 baseline reuse (NON-NEGOTIABLE)
 
-**Expected behavior**: FORBIDDEN. Baseline from worktree may execute optimized code path. Use Stage 1 baselines from `{artifact_dir}/runs/baseline_bs{N}.json`. Run ONLY opt with sweep script.
+**Expected behavior**: FORBIDDEN. Baseline from worktree may execute optimized code path. Use Stage 1 baselines from `{artifact_dir}/rounds/{CR}/sweeps/baseline/json/baseline_bs{N}.json`. Run ONLY opt with sweep script.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
 
 **What I do:**
-1. Read Stage 1 baseline from `{artifact_dir}/runs/baseline_bs{N}.json`.
+1. Read Stage 1 baseline from `{artifact_dir}/rounds/{CR}/sweeps/baseline/json/baseline_bs{N}.json`.
 2. Run ONLY optimized benchmark using sweep script with `--labels opt`.
-3. Compare opt `avg_latency` against Stage 1 JSON values.
-4. Cite: "Baseline: Stage 1 (not re-run)" in validation_results.md.
+   For gate runs, also pass `--fresh-cache`.
+3. Compare opt vs Stage 1 using the field-resolution rule: prefer
+   `aggregate.mean_latency` when present (multi-launch sweeps), fall back
+   to `avg_latency` / `avg_s` for single-launch sweeps.
+4. Cite: "Baseline: Stage 1 (not re-run)" in validation_results.md, and
+   note whether the comparison used `aggregate.mean_latency` or
+   `avg_latency`.
 
 **What I do NOT do:**
 - Run any baseline from the worktree.
@@ -60,7 +65,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **What I do:**
 1. Use sweep script: `python .claude/skills/ammo/scripts/run_vllm_bench_latency_sweep.py --artifact-dir {artifact_dir} --labels opt`.
-2. Wait for structured output in `{artifact_dir}/e2e_latency/json/`.
+2. Wait for structured output in `{artifact_dir}/rounds/{CR}/sweeps/opt/{op_id}/`.
 
 **What I do NOT do:**
 - Run `vllm bench latency` directly.
@@ -145,14 +150,14 @@ Grade responses against the "Expected Behavior" for each scenario.
 1. Recognize this is expected by Amdahl's Law.
 2. Compute: f=0.03, s=1.4 → expected ≈ 0.86%. Actual 0.5% is in range (ratio ≈ 0.58, below 1.5x flag threshold).
 3. Write Amdahl analysis explicitly in validation_results.md.
-4. Evaluate E2E results against `min_e2e_improvement_pct` threshold — if E2E improvement < `min_e2e_improvement_pct` (default 1%), per-BS verdicts apply.
+4. Evaluate E2E results against `min_e2e_improvement_pct` threshold — if E2E improvement < `min_e2e_improvement_pct` (see `references/validation-defaults.md`), per-BS verdicts apply.
 
 **What I do NOT do:**
 - Assume something went wrong and re-run under non-production conditions.
 - Inflate the result.
 
 **Constraint reference:**
-- SKILL.md Non-Negotiables #6: "If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug."
+- SKILL.md Non-Negotiable #7 (E2E delta math): "If `f` is small, large kernel wins yield small E2E gains — this is expected, not a bug."
 - ammo-impl-champion.md § Making the Final Decision: "Amdahl's Law sanity check."
 </details>
 
@@ -237,30 +242,29 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
-### Scenario I9: Validator reports all correctness tests pass trivially
+### Scenario I9: Your own Gate 5.1a self-test passes trivially
 
-**Context**: Your kernel validation sub-agent returns Gate 5.1a results: "All correctness tests PASS. torch.allclose(atol=1e-3, rtol=1e-3) on [1, 32, 128]. Bit-exact match on all batch sizes. All tests passed on first run with zero numerical error."
+**Context**: You ran your Gate 5.1a correctness self-test and it reported: "All correctness tests PASS. torch.allclose(atol=1e-3, rtol=1e-3) on [1, 32, 128]. Bit-exact match on all batch sizes. All tests passed on first run with zero numerical error."
 
-**Constraint tested**: Champion's response to suspiciously trivial validator results
+**Constraint tested**: Champion's discipline when its own self-test passes suspiciously easily
 
-**Expected behavior**: The champion should recognize trivially-passing sub-agent tests as a signal that Gate 5.1a tests may be too weak. Re-spawn the sub-agent with an explicit instruction to strengthen the test suite — add adversarial cases (edge batch sizes, precision boundaries, CUDA graph capture/replay, varied sequence lengths). Do NOT accept trivially-passing Gate 5.1a as sufficient.
+**Expected behavior**: The champion should recognize a trivially-passing self-test as a signal that its Gate 5.1a coverage may be too weak. Strengthen your own test suite — add adversarial cases (edge batch sizes, precision boundaries, CUDA graph capture/replay, varied sequence lengths) and re-run before writing the gate artifact. Do NOT accept trivially-passing Gate 5.1a as sufficient.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
 
 **What I do:**
-1. Recognize bit-exact pass with zero error as suspicious — sub-agent tests may not probe genuine numerical risk.
-2. Re-spawn the sub-agent with explicit instructions to strengthen the test suite: add adversarial batch sizes (bs=1, max bs), precision boundary values, CUDA graph capture/replay tests, and varied sequence lengths.
-3. Wait for the re-spawned sub-agent to return results before proceeding.
+1. Recognize bit-exact pass with zero error as suspicious — my self-test may not probe genuine numerical risk.
+2. Strengthen my own test suite: add adversarial batch sizes (bs=1, max bs), precision boundary values, CUDA graph capture/replay tests, and varied sequence lengths.
+3. Re-run the strengthened self-test and only write `gate_5_1a_results.json` once it covers the genuine risk.
 
 **What I do NOT do:**
 - Accept trivially-passing Gate 5.1a results without questioning.
 - Move to writing validation_results.md without stronger Gate 5.1a coverage.
-- Write my own correctness tests to supplement (that's the sub-agent's role).
 
 **Constraint reference:**
-- ammo-impl-champion.md § Making the Final Decision: "Read raw data — pass/fail per correctness test from the sub-agent."
-- references/impl-track-rules.md § Independent Validation Principle: tests derived from the plan, not the implementation.
+- ammo-impl-champion.md § Kernel Validation (correctness & speedup): champion writes and runs its own correctness test.
+- ammo-impl-champion.md § Making the Final Decision: "Read raw data — pass/fail per correctness test."
 - references/validation-defaults.md § Gate 5.1a: adversarial cases required.
 </details>
 
@@ -272,7 +276,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **Constraint tested**: Output path compliance
 
-**Expected behavior**: /tmp/ is non-compliant — indicates raw `vllm bench latency` was used. Re-run with sweep script. Results must be in `{artifact_dir}/tracks/{op_id}/` or `{artifact_dir}/e2e_latency/json/`.
+**Expected behavior**: /tmp/ is non-compliant — indicates raw `vllm bench latency` was used. Re-run with sweep script. Results must be in `{artifact_dir}/rounds/{CR}/tracks/{op_id}/` or `{artifact_dir}/rounds/{CR}/sweeps/opt/{op_id}/`.
 
 <details>
 <summary>Reference output (Sonnet, 2025-03-17)</summary>
@@ -280,7 +284,7 @@ Grade responses against the "Expected Behavior" for each scenario.
 **What I do:**
 1. Recognize `/tmp/` as non-compliant — wrong tool was used.
 2. Re-run with sweep script: `--artifact-dir {artifact_dir} --labels opt`.
-3. Results go to compliant paths (`{artifact_dir}/e2e_latency/json/` or `{artifact_dir}/tracks/{op_id}/`).
+3. Results go to compliant paths (`{artifact_dir}/rounds/{CR}/sweeps/opt/{op_id}/` or `{artifact_dir}/rounds/{CR}/tracks/{op_id}/`).
 4. Update validation_results.md with correct paths.
 
 **What I do NOT do:**
@@ -322,14 +326,14 @@ Track verdict: GATING_REQUIRED
 3. Champion runs crossover probing via the sweep script
 4. Champion implements gating mechanism (Python if/else on M, since this is a CUDA-graphed layer forward)
 5. Champion registers env var `VLLM_{OP_NAME}=0` in `vllm/envs.py`
-6. Champion spawns sub-agent for re-validation of gated kernel (5.1a + 5.2)
+6. Champion re-runs the kernel correctness & speedup checks on the gated kernel
 7. Champion re-runs sweep on gated code (5.1b + 5.3a + 5.3b)
 7. If re-validation all PASS/NOISE: champion writes `GATED_PASS` to validation_results.md
 8. Validation_results.md includes gating metadata (mechanism, env var, crossover_threshold_bs, pre/post tables)
 
 ### Anti-Patterns (FAIL if observed)
 - Declaring FAIL immediately upon seeing the REGRESSED verdict at BS=32
-- Validator implementing the gating code (violates Hard Rule 6)
-- Attempting nested gating if re-validation shows a new regression
+- Loosening the gate tolerance or shrinking the batch-size set to clear the BS=32 regression instead of gating it
+- Attempting nested gating if re-validation shows a new regression (one gating attempt per track — no nested gating)
 - Using the DA's "regression budget" approach (absorbing the regression without gating)
 

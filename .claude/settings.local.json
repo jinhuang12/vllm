@@ -1,15 +1,109 @@
 {
+  "statusLine": {
+    "type": "command",
+    "command": "bash $CLAUDE_PROJECT_DIR/.claude/hooks/ammo-statusline.sh"
+  },
   "env": {
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000",
-    "CLAUDE_PROJECT_DIR": "/home/jinhun/vllm"
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "CLAUDE_CODE_USE_MANTLE": "1",
+    "ENABLE_PROMPT_CACHING_1H": "1",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "anthropic.claude-opus-4-8[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "global.anthropic.claude-sonnet-4-6[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+    "AWS_REGION": "eu-west-1"
+  },
+  "model": "anthropic.claude-opus-4-8[1m]",
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "WebFetch(domain:*)",
+      "Skill",
+      "Glob",
+      "Grep",
+      "Task",
+      "TeamCreate",
+      "TeamDelete",
+      "SendMessage",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskList",
+      "NotebookEdit",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "EnterWorktree",
+      "ImportExternalFile"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(su:*)",
+      "Bash(apt:*)",
+      "Bash(apt-get:*)",
+      "Bash(yum:*)",
+      "Bash(dnf:*)",
+      "Bash(pacman:*)",
+      "Bash(brew:*)",
+      "Bash(snap:*)",
+      "Bash(flatpak:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(rsync:*)",
+      "Bash(docker:*)",
+      "Bash(podman:*)",
+      "Bash(kubectl:*)",
+      "Bash(helm:*)",
+      "Bash(aws:*)",
+      "Bash(gcloud:*)",
+      "Bash(az:*)",
+      "Bash(systemctl:*)",
+      "Bash(service:*)",
+      "Bash(chmod 777:*)",
+      "Bash(chown:*)",
+      "Bash(dd:*)",
+      "Bash(mkfs:*)",
+      "Bash(fdisk:*)",
+      "Bash(mount:*)",
+      "Bash(umount:*)"
+    ],
+    "defaultMode": "bypassPermissions",
+    "additionalDirectories": [
+      "/tmp",
+      "/workspace/vllm"
+    ]
   },
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "Bash|Agent|Write|Edit|TaskCreate|TaskUpdate|TaskStop|TeamCreate|TeamDelete|SendMessage",
         "hooks": [
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-msg-check.sh",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-team-spawn-guard.sh",
+            "timeout": 3000
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-agent-cwd-guard.sh",
             "timeout": 5000
           }
         ]
@@ -20,6 +114,21 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-pretool-guard.sh"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-venv-python-guard.sh",
+            "timeout": 3000
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-skill-files-guard.sh",
+            "timeout": 3000
           }
         ]
       },
@@ -39,27 +148,6 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-create-with-build.sh"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-gpu-release.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-monitor-reminder.sh",
-            "timeout": 3000
           }
         ]
       }
@@ -117,6 +205,57 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-gpu-release.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-monitor-reminder.sh",
+            "timeout": 3000
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-state-validate.sh",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-next-step-reminder.sh",
+            "timeout": 3000
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ammo-artifact-layout-warn.sh",
+            "timeout": 3000
+          }
+        ]
+      }
+    ],
     "WorktreeRemove": [
       {
         "hooks": [
@@ -126,12 +265,6 @@
           }
         ]
       }
-    ]
-  },
-  "permissions": {
-    "allow": [
-      "Bash(cp /home/jinhun/vllm/.claude/agents/ammo-researcher.md /home/jinhun/AIRE-TFL-KernelBench/KernelBench/scripts/cuda_eval_server_v2/ai_cli_session/.claude/agents/ammo-researcher.md)",
-      "Read(//home/jinhun/AIRE-TFL-KernelBench/KernelBench/scripts/cuda_eval_server_v2/ai_cli_session/.claude/agents/**)"
     ]
   }
 }

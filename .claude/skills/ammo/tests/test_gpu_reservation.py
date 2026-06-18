@@ -59,7 +59,7 @@ class TestInitState:
         """_init_state with 4 discovered GPUs creates state with 4 null entries."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             state = read_state()
 
         assert state["gpu_count"] == 4
@@ -81,8 +81,8 @@ class TestInitState:
         state_file.write_text(json.dumps(existing))
 
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=99):
-            # _discover_gpu_count should NOT be called because state already exists
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(99))):
+            # _discover_session_gpus should NOT be called because state already exists
             state = read_state()
 
         assert state["gpu_count"] == 2
@@ -134,7 +134,7 @@ class TestWriteReservation:
         """Reserving free GPUs writes entries into state."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             write_reservation(
                 gpu_ids=[0, 1],
                 session_id="sess001",
@@ -153,7 +153,7 @@ class TestWriteReservation:
         """Reserving a GPU ID that doesn't exist in state raises ReservationError."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             with pytest.raises(ReservationError, match="not found in state"):
                 write_reservation(
                     gpu_ids=[7],
@@ -167,7 +167,7 @@ class TestWriteReservation:
         state_dir = _make_temp_dir(tmp_path)
         long_snippet = "x" * 200
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=1):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(1))):
             write_reservation(
                 gpu_ids=[0],
                 session_id="sess_t",
@@ -182,7 +182,7 @@ class TestWriteReservation:
         """Trying to reserve an already-held GPU raises ReservationError."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=2):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(2))):
             # First reservation succeeds
             write_reservation(
                 gpu_ids=[0],
@@ -209,7 +209,7 @@ class TestLeaseExpiry:
         """check_and_reclaim_expired removes entries with lease_hours=0 (already expired)."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=2):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(2))):
             # lease_hours=0 means it expires immediately (at the time of writing)
             write_reservation(
                 gpu_ids=[0],
@@ -235,7 +235,7 @@ class TestForceClear:
         """force_clear(session_id='s1') removes only entries owned by s1."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=2):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(2))):
             write_reservation(
                 gpu_ids=[0],
                 session_id="s1",
@@ -258,7 +258,7 @@ class TestForceClear:
         """force_clear() with no args raises ValueError."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=1):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(1))):
             with pytest.raises(ValueError):
                 force_clear()
 
@@ -272,7 +272,7 @@ class TestReserve:
         """reserve(1) on a 4-GPU system returns [0] and marks GPU 0 reserved."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             result = reserve(num_gpus=1, session_id="s1")
             state = read_state()
 
@@ -285,7 +285,7 @@ class TestReserve:
         """reserve(2) on a 4-GPU system returns [0, 1] (contiguous block)."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             result = reserve(num_gpus=2, session_id="s1")
 
         assert result == [0, 1]
@@ -294,7 +294,7 @@ class TestReserve:
         """GPU 0 held, reserve(2) returns [1, 2] (next contiguous block)."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             # Hold GPU 0
             write_reservation(gpu_ids=[0], session_id="other")
             # Reserve 2 contiguous GPUs
@@ -306,7 +306,7 @@ class TestReserve:
         """GPUs 0,2 held on 4-GPU system, reserve(2) fails (only [1] and [3] free)."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             # Hold GPUs 0 and 2 with different sessions
             write_reservation(gpu_ids=[0], session_id="other_a")
             write_reservation(gpu_ids=[2], session_id="other_b")
@@ -318,7 +318,7 @@ class TestReserve:
         """Session 's1' holds GPUs 0,1. Calling reserve(2, 's1') releases old first."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             # First reservation
             result1 = reserve(num_gpus=2, session_id="s1")
             assert result1 == [0, 1]
@@ -333,7 +333,7 @@ class TestReserve:
         """All 4 GPUs held by different sessions, reserve(1) fails."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             # Fill all GPUs with different sessions
             for i in range(4):
                 write_reservation(gpu_ids=[i], session_id=f"other_{i}")
@@ -345,7 +345,7 @@ class TestReserve:
         """GPU 1 held by different session, GPUs 0,2,3 free, request 2 -> [2,3]."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             # Hold GPU 1
             write_reservation(gpu_ids=[1], session_id="other")
             # Reserve 2 contiguous — GPU 0 alone is not contiguous with
@@ -354,11 +354,25 @@ class TestReserve:
 
         assert result == [2, 3]
 
+    def test_non_contiguous_session_pool_uses_physical_ids(self, tmp_path):
+        """Session pools may expose non-contiguous physical GPU IDs via CVD."""
+        state_dir = _make_temp_dir(tmp_path)
+        with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=[4, 6, 7]):
+            result = reserve(num_gpus=2, session_id="s1")
+            state = read_state()
+
+        assert result == [6, 7]
+        assert sorted(state["gpus"].keys()) == ["4", "6", "7"]
+        assert state["gpus"]["4"] is None
+        assert state["gpus"]["6"]["session_id"] == "s1"
+        assert state["gpus"]["7"]["session_id"] == "s1"
+
     def test_failed_reserve_preserves_existing(self, tmp_path):
         """Failed reserve must NOT destroy the session's existing reservations."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             # s1 holds GPU 0
             reserve(num_gpus=1, session_id="s1")
             # Fill GPUs 1,2,3 with other sessions
@@ -381,7 +395,7 @@ class TestReserve:
         """reserve(num_gpus=0) raises ValueError."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             with pytest.raises(ValueError, match="num_gpus must be positive"):
                 reserve(num_gpus=0, session_id="s1")
 
@@ -389,7 +403,7 @@ class TestReserve:
         """reserve(num_gpus=-1) raises ValueError."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             with pytest.raises(ValueError, match="num_gpus must be positive"):
                 reserve(num_gpus=-1, session_id="s1")
 
@@ -397,7 +411,7 @@ class TestReserve:
         """GPU 0 has expired lease, reserve(1) reclaims it and returns [0]."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=1):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(1))):
             # Create an immediately-expiring reservation
             write_reservation(
                 gpu_ids=[0],
@@ -420,7 +434,7 @@ class TestReleaseBySession:
         """release_by_session('s1') clears all GPUs held by s1."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             reserve(num_gpus=2, session_id="s1")
             released = release_by_session("s1")
             state = read_state()
@@ -433,7 +447,7 @@ class TestReleaseBySession:
         """release_by_session('s1') only clears s1, leaves s2 intact."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=4):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(4))):
             write_reservation(gpu_ids=[0], session_id="s1")
             write_reservation(gpu_ids=[1], session_id="s2")
             released = release_by_session("s1")
@@ -448,7 +462,7 @@ class TestReleaseBySession:
         """release_by_session('nonexistent') returns []."""
         state_dir = _make_temp_dir(tmp_path)
         with mock.patch.object(gpu_reservation, "STATE_DIR", state_dir), \
-             mock.patch("gpu_reservation._discover_gpu_count", return_value=2):
+             mock.patch("gpu_reservation._discover_session_gpus", return_value=list(range(2))):
             result = release_by_session("nonexistent")
 
         assert result == []

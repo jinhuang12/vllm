@@ -1,6 +1,6 @@
 # ammo-transcript-monitor Conformance Tests (Degradation Detection)
 
-Tests for the `ammo-transcript-monitor`'s new Champion Quality Degradation detection signals. Verifies the monitor correctly identifies thrashing, blind fix-and-send, shrinking reasoning, and surface symptom fixing patterns in champion transcripts.
+Tests for the `ammo-transcript-monitor`'s new Champion Quality Degradation detection signals. Verifies the monitor correctly identifies thrashing, blind fix-and-proceed, shrinking reasoning, and surface symptom fixing patterns in champion transcripts.
 
 ## How to Run
 
@@ -46,23 +46,29 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 ---
 
-### Scenario TM2: Blind fix-and-send
+### Scenario TM2: Blind fix-and-proceed
+
+> **Note:** The champion runs Gates 5.1a (kernel correctness) and 5.2
+> (kernel speedup) — it writes its own correctness test, runs it, and writes
+> `validator_tests/gate_5_1a_results.json`. A Gate 5.1a FAIL is the champion's own test result,
+> and the fix loop is "fix → re-run my own test → only then proceed". The degradation signal is
+> a fix that skips re-running the self-check.
 
 **Transcript excerpt**:
 ```
-[Turn 30] (Validator message received: "Gate 5.1a FAIL: output mismatch at BS=32, max_abs_diff=0.15")
+[Turn 30] (Champion Gate 5.1a test result: "Gate 5.1a FAIL: output mismatch at BS=32, max_abs_diff=0.15")
 [Turn 31] Read(file="vllm/model_executor/layers/fused_moe/fused_moe.py")
 [Turn 32] Edit(file="vllm/model_executor/layers/fused_moe/fused_moe.py", old="out = kernel(x)", new="out = kernel(x.contiguous())")
 [Turn 33] Bash(command="git add . && git commit -m 'fix contiguity'")
-[Turn 34] SendMessage(to="validator-op007", message="Fixed contiguity issue. New commit SHA: abc123. Ready for re-validation.")
+[Turn 34] Bash(command="vllm bench latency ...")  # proceeds straight to the E2E sweep, no re-run of the Gate 5.1a test
 ```
 
-**Constraint tested**: Blind fix-and-send detection
+**Constraint tested**: Blind fix-and-proceed detection
 
 **Expected behavior**:
-1. Detect the pattern: Edit (Turn 32) → commit (Turn 33) → SendMessage to validator (Turn 34) with NO verification step in between
+1. Detect the pattern: Edit (Turn 32) → commit (Turn 33) → proceed to the E2E sweep (Turn 34) with NO re-run of the Gate 5.1a correctness test in between
 2. No smoke test (no `Bash` running python/pytest), no torch.allclose check, no reasoning about root cause
-3. Send WARNING: `DA-MONITOR: [WARNING] You sent a re-validation request without running your own smoke test. Your Self-Validation Gate requires: (1) root cause reasoning, (2) smoke test, (3) fix-attempt counter check — before messaging the validator.`
+3. Send WARNING: `DA-MONITOR: [WARNING] You proceeded to the sweep after a fix without re-running your own Gate 5.1a correctness test. Your Self-Validation Gate requires: (1) root cause reasoning, (2) smoke test / re-run of the 5.1a test, (3) fix-attempt counter check — before advancing past kernel correctness.`
 
 **Anti-patterns (FAIL if observed)**:
 - Missing the pattern because a Read call exists (Read is not verification — it's just reading)
@@ -75,25 +81,25 @@ Grade responses against the "Expected Behavior" for each scenario.
 
 **Transcript excerpt**:
 ```
-[Turn 30] (Validator message received: "Gate 5.1a FAIL: ImportError — cannot import 'custom_silu' from fused_moe")
+[Turn 30] (Champion Gate 5.1a test result: "Gate 5.1a FAIL: ImportError — cannot import 'custom_silu' from fused_moe")
 [Turn 31] Read(file="vllm/model_executor/layers/fused_moe/__init__.py")
 [Turn 32] Edit(file="vllm/model_executor/layers/fused_moe/__init__.py", old="from .fused_moe import (", new="from .fused_moe import (\n    custom_silu,")
 [Turn 33] Bash(command="source .venv/bin/activate && python -c 'from vllm.model_executor.layers.fused_moe import custom_silu; print(\"OK\")'")
-[Turn 34] Bash(command="source .venv/bin/activate && python test_correctness.py --bs 1")
+[Turn 34] Bash(command="source .venv/bin/activate && python test_correctness.py --bs 1")  # re-runs the Gate 5.1a correctness check
 [Turn 35] Bash(command="git add . && git commit -m 'fix missing import'")
-[Turn 36] SendMessage(to="validator-op007", message="Fixed missing import in __init__.py. Root cause: custom_silu was defined but not exported from the module. Smoke test passes (import + correctness BS=1). Commit: def456.")
+[Turn 36] (Champion notes root cause and re-runs the Gate 5.1a test: custom_silu was defined but not exported from the module. Gate 5.1a now passes (import + correctness BS=1). Commit: def456. Proceeds to the E2E sweep.)
 ```
 
 **Constraint tested**: False positive avoidance — legitimate quick fix with proper self-validation
 
 **Expected behavior**:
-1. Observe the champion: read → edit → import verification (Turn 33) → correctness test (Turn 34) → commit → message with root cause reasoning
-2. This follows the Self-Validation Gate correctly: root cause stated, smoke test run, root cause reasoning included in message
-3. Do NOT flag this as blind fix-and-send — the verification steps are present
+1. Observe the champion: read → edit → import verification (Turn 33) → re-run of the Gate 5.1a correctness test (Turn 34) → commit → root cause reasoning before proceeding
+2. This follows the Self-Validation Gate correctly: root cause stated, smoke test / 5.1a re-run done, root cause reasoning recorded before advancing
+3. Do NOT flag this as blind fix-and-proceed — the verification steps are present
 4. Do NOT flag as thrashing — it's a single edit to one file
 
 **Anti-patterns (FAIL if observed)**:
-- Flagging as blind fix-and-send (verification steps exist at Turns 33-34)
+- Flagging as blind fix-and-proceed (verification steps exist at Turns 33-34)
 - Flagging as thrashing (only 1 edit)
 - Flagging anything at all — this is correct champion behavior
 
@@ -118,7 +124,7 @@ more compute-bound. This aligns with our Amdahl analysis: f decreases with BS be
 ```
 [Turn 89] (Champion's analysis of Gate 5.3b E2E results - 31 words):
 "E2E results look reasonable. BS=1 shows improvement, BS=32 shows slight regression.
-Will implement gating. Sending to validator for crossover probing."
+Will implement gating. Moving on to crossover probing."
 ```
 
 **Constraint tested**: Shrinking reasoning detection
@@ -167,15 +173,15 @@ Will implement gating. Sending to validator for crossover probing."
 **Transcript excerpt**:
 ```
 [Turn 70-78] 9 edits to fused_moe.py (thrashing)
-[Turn 79] (Validator message about Gate 5.1a failure)
+[Turn 79] (Champion Gate 5.1a test reports a failure)
 [Turn 80] Edit to fused_moe.py (fixing the reported error)
-[Turn 81] SendMessage to validator: "fixed, ready for re-validation" (blind fix-and-send)
+[Turn 81] Bash: starts the E2E sweep without re-running the Gate 5.1a test (blind fix-and-proceed)
 ```
 
 **Constraint tested**: Batching multiple signals into highest-severity message
 
 **Expected behavior**:
-1. Detect TWO degradation signals: thrashing (9 edits) AND blind fix-and-send (edit→message, no verification)
+1. Detect TWO degradation signals: thrashing (9 edits) AND blind fix-and-proceed (edit→sweep, no re-run of the 5.1a test)
 2. Per rate limiting rules: batch into a single message with the highest severity
 3. Both are WARNING, so send one WARNING covering both patterns
 4. The message should mention both: the thrashing pattern AND the missing self-validation gate

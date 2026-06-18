@@ -37,7 +37,7 @@ def _make_scorecard(score: float, speedup: float, shipped: int) -> dict:
             "transcript_quality": {"score": 7.0, "weight": 0.15, "weighted_contribution": 1.05},
         },
         "raw_metrics": {
-            "cumulative_e2e_speedup": speedup,
+            "cumulative_speedup_vs_round1": speedup,
             "shipped_optimizations": shipped,
             "total_rounds": 1,
             "total_proposals": 3,

@@ -99,6 +99,22 @@ class TestArgparseRemovedFlags:
         ns = p.parse_args(["--artifact-dir", "/tmp/x", "--_child-label", "baseline"])
         assert ns._child_label == "baseline"
 
+    def test_nsys_capture_output_steps_requires_nsys_profile(self, tmp_path):
+        from run_vllm_bench_latency_sweep import main
+
+        argv = [
+            "run_vllm_bench_latency_sweep.py",
+            "--artifact-dir",
+            str(tmp_path),
+            "--labels",
+            "baseline",
+            "--nsys-capture-output-steps",
+            "2,50%,100%",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit, match="require --nsys-profile"):
+                main()
+
 
 # ---------------------------------------------------------------------------
 # Config identity check (unconditional)
@@ -195,6 +211,230 @@ class TestIdenticalConfigCheck:
             except SystemExit as e:
                 assert "identical" not in str(e)
 
+
+# ---------------------------------------------------------------------------
+# nsys capture output steps
+# ---------------------------------------------------------------------------
+
+class TestNsysCaptureOutputSteps:
+    """Selected-step nsys profiling shifts prompt length and keeps traces short."""
+
+    def test_parse_steps_resolves_percentages(self):
+        from run_vllm_bench_latency_sweep import _parse_nsys_capture_output_steps
+
+        assert _parse_nsys_capture_output_steps("2,50%,100%", 512) == [2, 256, 512]
+
+    def test_parse_steps_deduplicates_preserving_order(self):
+        from run_vllm_bench_latency_sweep import _parse_nsys_capture_output_steps
+
+        assert _parse_nsys_capture_output_steps("2,50%,2,100%", 4) == [2, 4]
+
+    def test_parse_steps_rejects_beyond_output_len(self):
+        from run_vllm_bench_latency_sweep import _parse_nsys_capture_output_steps
+
+        with pytest.raises(SystemExit, match="exceeds"):
+            _parse_nsys_capture_output_steps("513", 512)
+
+    def test_expand_floors_window_above_prefill_and_shifts_horizon(self):
+        """Window is floored child-wide ABOVE chunked prefill; input_len shifts to keep
+        the captured decode depth (src_il + step) invariant.
+
+        For il=8192,bs=8 the deepest step (512) gives il_eff_max=8702 →
+        ceil(8702*8/16384)=5 prefill steps, +MARGIN(6) → window floored to 11 (the
+        requested 2 is just a lower bound). input_len_eff = src_il + step - 11; the
+        sum src_il+step (8194/8448/8704) is preserved, so depth is unchanged.
+        """
+        from run_vllm_bench_latency_sweep import _expand_nsys_profile_buckets
+
+        buckets = [{"input_len": 8192, "output_len": 512, "batch_size": 8}]
+        expanded = _expand_nsys_profile_buckets(
+            buckets,
+            nsys_capture_window_output_len=2,
+            nsys_capture_output_steps="2,50%,100%",
+        )
+
+        # window floored to 11 (n_prefill=5 + MARGIN=6); il shifted by -11; depth preserved.
+        assert [(b["input_len"], b["output_len"]) for b in expanded] == [
+            (8183, 11),
+            (8437, 11),
+            (8693, 11),
+        ]
+        # captured decode depth = src_il + step stays invariant under the floored window.
+        assert [b["input_len"] + b["output_len"] for b in expanded] == [
+            8192 + 2,
+            8192 + 256,
+            8192 + 512,
+        ]
+        assert [b["nsys_source_input_len"] for b in expanded] == [8192, 8192, 8192]
+        assert [b["nsys_source_output_len"] for b in expanded] == [512, 512, 512]
+        assert [b["nsys_capture_output_step"] for b in expanded] == [2, 256, 512]
+        assert [b["nsys_capture_window_output_len"] for b in expanded] == [11, 11, 11]
+        assert [b["nsys_capture_target_output_len"] for b in expanded] == [512, 512, 512]
+
+    def test_expand_default_window_is_lower_bound_then_floored(self):
+        """With no --nsys-capture-window-output-len the requested window defaults to 2,
+        but it is only a LOWER BOUND: it gets floored above chunked prefill.
+
+        il=4096,bs=1, deepest step 512 → il_eff_max=4606 → ceil(4606/16384)=1 prefill
+        step, +MARGIN(6) → window floored to 7. il shifts by -7; depth preserved.
+        """
+        from run_vllm_bench_latency_sweep import _expand_nsys_profile_buckets
+
+        buckets = [{"input_len": 4096, "output_len": 512, "batch_size": 1}]
+        expanded = _expand_nsys_profile_buckets(
+            buckets,
+            nsys_capture_output_steps="50%,100%",
+        )
+
+        assert [(b["input_len"], b["output_len"]) for b in expanded] == [
+            (4345, 7),
+            (4601, 7),
+        ]
+        # depth = src_il + step invariant (4096+256, 4096+512).
+        assert [b["input_len"] + b["output_len"] for b in expanded] == [4352, 4608]
+        assert [b["nsys_capture_window_output_len"] for b in expanded] == [7, 7]
+
+    def test_expand_accepts_step_before_window_no_longer_rejected(self):
+        """REGRESSION: the OLD `step < window` SystemExit guard was REMOVED by the fix.
+
+        A shallow step (2) is now capturable because the input_len shift lands the
+        capture at the correct decode depth regardless of the (floored) window. Here
+        il=64,bs=8 floors the window to 7 (n_prefill=1 + MARGIN=6); step 2 yields
+        il_eff = 64 + 2 - 7 = 59 (>= 1), so it is emitted, NOT rejected.
+        """
+        from run_vllm_bench_latency_sweep import _expand_nsys_profile_buckets
+
+        buckets = [{"input_len": 64, "output_len": 512, "batch_size": 8}]
+        expanded = _expand_nsys_profile_buckets(
+            buckets,
+            nsys_capture_window_output_len=4,
+            nsys_capture_output_steps="2,50%,100%",
+        )
+
+        # No SystemExit. Window floored to 7; step 2 survives (il_eff=59 >= 1).
+        assert [(b["input_len"], b["output_len"]) for b in expanded] == [
+            (59, 7),
+            (313, 7),
+            (569, 7),
+        ]
+        assert [b["nsys_capture_output_step"] for b in expanded] == [2, 256, 512]
+        assert all(b["nsys_capture_window_output_len"] == 7 for b in expanded)
+
+    def test_nsys_tag_buckets_expand_and_filter_dp_skips(self):
+        from run_vllm_bench_latency_sweep import _nsys_tag_buckets_for_dp
+
+        buckets = [
+            {"input_len": 64, "output_len": 512, "batch_size": 1},
+            {"input_len": 64, "output_len": 512, "batch_size": 8},
+        ]
+        measured = _nsys_tag_buckets_for_dp(
+            buckets,
+            4,
+            nsys_capture_output_steps="2,50%,100%",
+        )
+
+        # bs=1 dropped by DP-skip; bs=8 expanded. Window floored to 7 (n_prefill=1 +
+        # MARGIN=6 for il=64); input_len shifted by -7 (64+step-7 = 59/313/569).
+        assert [(b["batch_size"], b["input_len"], b["output_len"]) for b in measured] == [
+            (8, 59, 7),
+            (8, 313, 7),
+            (8, 569, 7),
+        ]
+
+    def test_nsys_tag_buckets_dedupe_duplicate_expanded_tags(self):
+        from run_vllm_bench_latency_sweep import _bucket_file_tag, _nsys_tag_buckets_for_dp
+
+        buckets = [
+            {"input_len": 64, "output_len": 512, "batch_size": 8},
+            {"input_len": 318, "output_len": 512, "batch_size": 8},
+        ]
+        measured = _nsys_tag_buckets_for_dp(
+            buckets,
+            1,
+            nsys_output_len=None,
+            nsys_capture_window_output_len=2,
+            nsys_capture_output_steps="2,50%",
+        )
+        tags = [_bucket_file_tag(bucket, measured) for bucket in measured]
+
+        # Window floored to 7. il=64 → {59, 313}; il=318 → {313, 567}; the duplicate
+        # il_eff=313 is deduped, leaving three unique shapes.
+        assert [(b["input_len"], b["output_len"], b["batch_size"]) for b in measured] == [
+            (59, 7, 8),
+            (313, 7, 8),
+            (567, 7, 8),
+        ]
+        assert len(tags) == len(set(tags))
+
+    def test_output_len_remains_horizon_override_window_is_separate(self):
+        from run_vllm_bench_latency_sweep import _expand_nsys_profile_buckets
+
+        buckets = [{"input_len": 64, "output_len": 1024, "batch_size": 8}]
+        expanded = _expand_nsys_profile_buckets(
+            buckets,
+            nsys_output_len=512,
+            nsys_capture_window_output_len=2,
+            nsys_capture_output_steps="50%,100%",
+        )
+
+        # Percentages resolve against nsys_output_len=512 (NOT the workload's 1024), so
+        # steps are [256, 512]. Window floored to 7 (il=64 → il_eff_max=569 →
+        # ceil(569*8/16384)=1 + MARGIN(6)); il shifted by -7.
+        assert [(b["input_len"], b["output_len"]) for b in expanded] == [
+            (313, 7),
+            (569, 7),
+        ]
+        assert [b["nsys_capture_target_output_len"] for b in expanded] == [512, 512]
+
+    def test_nsys_capture_output_steps_requires_single_iter(self, tmp_path):
+        from run_vllm_bench_latency_sweep import main
+
+        argv = [
+            "run_vllm_bench_latency_sweep.py",
+            "--artifact-dir",
+            str(tmp_path),
+            "--labels",
+            "baseline",
+            "--nsys-profile",
+            "--nsys-capture-output-steps",
+            "2,50%,100%",
+            "--nsys-num-iters",
+            "2",
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch("shutil.which", return_value="/usr/bin/nsys"):
+            with pytest.raises(SystemExit, match="requires --nsys-num-iters 1"):
+                main()
+
+    def test_configure_selected_step_profiler_sets_cuda_delay(self):
+        """delay_iterations == the floored capture window, and max_num_batched_tokens is
+        pinned to the chunk size used in the floor arithmetic.
+
+        Bucket is a realistic post-expand selected-step bucket (il_eff=8693, bs=8,
+        window=11). n_prefill(8693,8)=5 < window=11, so the defensive guard passes and
+        the profiler arms at delay=11.
+        """
+        from run_vllm_bench_latency_sweep import (
+            _PROFILING_CHUNK_TOKENS,
+            _apply_selected_step_profiler_config,
+        )
+
+        ea_dict = {"profiler_config": {"profiler": "none"}}
+        _apply_selected_step_profiler_config(
+            ea_dict,
+            {
+                "input_len": 8693,
+                "batch_size": 8,
+                "nsys_capture_output_step": 512,
+                "nsys_capture_window_output_len": 11,
+            },
+        )
+
+        assert ea_dict["profiler_config"] == {
+            "profiler": "cuda",
+            "delay_iterations": 11,
+            "max_iterations": 1,
+        }
+        assert ea_dict["max_num_batched_tokens"] == _PROFILING_CHUNK_TOKENS
 
 # ---------------------------------------------------------------------------
 # Sanitize filename
@@ -553,3 +793,82 @@ class TestEnsureWorktreePythonpath:
         env = {"PYTHONPATH": ""}
         result = self._call(env, cwd="/tmp/worktree")
         assert result["PYTHONPATH"] == "/tmp/worktree"
+
+
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_vllm_op_env — Track A6 preserve_keys contract
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeVllmOpEnv:
+    """Verify the broadened sanitizer strips all VLLM_* except preserve_keys."""
+
+    def _fn(self):
+        import run_vllm_bench_latency_sweep as sweep
+        return sweep._sanitize_vllm_op_env
+
+    def test_strips_vllm_op_numeric(self):
+        """Numeric op flags (VLLM_OP001, VLLM_OP042) are stripped by default."""
+        sanitize = self._fn()
+        env = {"VLLM_OP001": "1", "VLLM_OP042": "1", "PATH": "/usr/bin"}
+        out = sanitize(env)
+        assert "VLLM_OP001" not in out
+        assert "VLLM_OP042" not in out
+        assert out["PATH"] == "/usr/bin"
+
+    def test_strips_broad_vllm_prefix(self):
+        """After A6 broadening, VLLM_* named flags (not just VLLM_OP\\d+) are stripped."""
+        sanitize = self._fn()
+        env = {
+            "VLLM_MOE_TRITON_ROUTER": "1",
+            "VLLM_ATTENTION_BACKEND": "FLASHINFER",
+            "VLLM_USE_V1": "1",
+            "PATH": "/usr/bin",
+        }
+        out = sanitize(env)
+        assert "VLLM_MOE_TRITON_ROUTER" not in out
+        assert "VLLM_ATTENTION_BACKEND" not in out
+        assert "VLLM_USE_V1" not in out
+        assert out["PATH"] == "/usr/bin"
+
+    def test_preserve_keys_survive(self):
+        """Keys in preserve_keys pass through even though they match ^VLLM_."""
+        sanitize = self._fn()
+        env = {
+            "VLLM_MOE_TRITON_ROUTER": "1",
+            "VLLM_OP001": "1",
+            "VLLM_ATTENTION_BACKEND": "FLASHINFER",
+        }
+        out = sanitize(env, preserve_keys={"VLLM_MOE_TRITON_ROUTER", "VLLM_ATTENTION_BACKEND"})
+        assert out["VLLM_MOE_TRITON_ROUTER"] == "1"
+        assert out["VLLM_ATTENTION_BACKEND"] == "FLASHINFER"
+        assert "VLLM_OP001" not in out  # not in preserve set
+
+    def test_preserve_keys_accepts_frozenset(self):
+        """preserve_keys parameter accepts frozenset as well as set."""
+        sanitize = self._fn()
+        env = {"VLLM_OP001": "1", "VLLM_OP002": "1"}
+        out = sanitize(env, preserve_keys=frozenset({"VLLM_OP001"}))
+        assert out == {"VLLM_OP001": "1"}
+
+    def test_default_preserve_keys_is_empty(self):
+        """With no preserve_keys arg, all VLLM_* are stripped."""
+        sanitize = self._fn()
+        env = {"VLLM_OP001": "1", "VLLM_FOO": "bar"}
+        out = sanitize(env)
+        assert "VLLM_OP001" not in out
+        assert "VLLM_FOO" not in out
+
+    def test_non_vllm_prefix_always_passes_through(self):
+        """Non-VLLM_* keys are never touched, regardless of preserve_keys."""
+        sanitize = self._fn()
+        env = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/x",
+            "CUDA_VISIBLE_DEVICES": "0",
+            "PYTHONPATH": "/opt/vllm",
+        }
+        out = sanitize(env, preserve_keys=set())
+        assert out == env

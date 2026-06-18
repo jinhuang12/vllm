@@ -17,19 +17,20 @@ AGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // ""' 2>/dev/null
 AGENT_NAME=$(echo "$INPUT" | jq -r '.tool_input.name // ""' 2>/dev/null) || true
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null) || true
 
-# Only fire for champion agent types
+# Only fire for impl-champion agent types (debate champions no longer get monitors)
 case "$AGENT_TYPE" in
-    ammo-champion|ammo-impl-champion) ;;
+    ammo-impl-champion) ;;
     *) exit 0;;
 esac
 
-# Only fire for orchestrator sessions (no agentName = top-level session).
-# Champions spawning delegates should NOT get this reminder.
-if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
-    HAS_AGENT_NAME=$(head -5 "$TRANSCRIPT_PATH" 2>/dev/null | jq -rs '
-        [.[] | select(.agentName)] | length
-    ' 2>/dev/null) || true
-    [ "${HAS_AGENT_NAME:-0}" -gt 0 ] && exit 0
+# Only fire for the lead orchestrator. Delegated to the shared
+# _ammo_is_lead helper so post-compaction agentName=team-lead entries
+# in the transcript don't silence the reminder. Champions/monitors still
+# get suppressed via the helper's L3 (transcript agentName != team-lead).
+HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HELPER_DIR/_ammo_is_lead.sh"
+if ! _ammo_is_lead "$INPUT"; then
+    exit 0
 fi
 
 # Build reminder — works with or without a name

@@ -14,7 +14,7 @@
   "campaign": {
     "status": "campaign_exhausted",
     "total_rounds": 1,
-    "cumulative_e2e_speedup": 1.05,
+    "cumulative_speedup_vs_round1": 1.05,
     "shipped_optimizations_count": 1,
     "shipped_optimization_ids": ["op001"],
     "rounds": [

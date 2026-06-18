@@ -56,7 +56,7 @@ A full fused kernel can additionally remove:
 
 ### Step 3: Convert to a time upper bound
 Pick a conservative effective bandwidth:
-- If you don’t have NCU yet: use `BW_eff = 1 TB/s` as a conservative Hopper-class back-of-envelope.
+- If you don’t have NCU yet: use `BW_eff = 1 TB/s` *(advisory BW fallback — hardware-class hint, NOT a gate)* as a conservative Hopper-class back-of-envelope.
 - Otherwise compute `BW_eff` from NCU for the relevant baseline kernels.
 
 Then:
@@ -64,8 +64,8 @@ Then:
 
 ### Gate
 For the bucket(s) you’re optimizing:
-- If `time_saved_max_us < 0.5 * required_savings_us` → fusion is **low probability** unless it is a “true epilogue” with no occupancy/grid regression.
-- If `time_saved_max_us < 1–2 us` → treat as **not worth attempting** for decode unless you already have evidence the fused kernel matches baseline GEMM throughput.
+- If `time_saved_max_us < 0.5 * required_savings_us` → fusion is **low probability** *(advisory heuristic — NOT a ship/retract gate)* unless it is a "true epilogue" with no occupancy/grid regression.
+- If `time_saved_max_us < 1–2 us` → treat as **not worth attempting** for decode *(advisory heuristic — NOT a ship/retract gate)* unless you already have evidence the fused kernel matches baseline GEMM throughput.
 
 ---
 

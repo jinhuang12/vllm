@@ -874,7 +874,7 @@ If the model uses an activation function not in templates above:
    Investigate {activation_name} activation function for CUDA MoE kernel:
 
    1. Find the mathematical formula in vLLM source or model documentation
-   2. Search for efficient CUDA implementations (check CUTLASS, cuDNN, Triton)
+   2. Search for efficient implementations across all authoring classes (CUTLASS, CuTeDSL, cuDNN, Triton, FlashInfer, DeepGEMM) — see `references/technology-selection.md` for the authoring-class taxonomy
    3. Determine how it interacts with gated architecture (is it gate*act(up) or act(gate)*up?)
    4. Check for numerical stability concerns (overflow, underflow, NaN)
    5. Look for any model-specific variations
@@ -1127,6 +1127,8 @@ return torch.cond(
 Both branches must return same-shape tensors.
 
 ### Variant 2: Python if/else (CUDA-Graphed / Layer Forward Paths)
+
+> In the dispatch templates below, `{OP_NAME}` is a **descriptive mechanism name** (e.g. `MOE_TWO_STREAM`, `FP8_PREFILL_GEMM_SM100`) — the public, PR-facing flag name, NOT the internal `op_id`. `VLLM_OP003`-style names leak the tracking handle and are a BLOCKING Stage 4-5 audit finding. See `impl-track-rules.md` § Env Flag Naming (PR-Ready).
 
 For code paths captured by CUDA graphs. The Python conditional is evaluated at graph capture time and frozen -- no runtime cost during replay. Each batch-size bucket captures a separate graph with the correct branch.
 
