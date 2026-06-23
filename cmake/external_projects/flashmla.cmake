@@ -30,6 +30,32 @@ endif()
 FetchContent_MakeAvailable(flashmla)
 message(STATUS "FlashMLA is available at ${flashmla_SOURCE_DIR}")
 
+# Op-005: Apply optimized MLA combine kernel patch (BLOCK_SIZE_M=1 for better BW).
+# Env-var gated: VLLM_USE_OPTIMIZED_MLA_COMBINE=0 reverts to original BLOCK_SIZE_M=8.
+set(OP005_PATCH "${CMAKE_SOURCE_DIR}/patches/flashmla-op005-optimized-combine.patch")
+if(EXISTS "${OP005_PATCH}")
+  execute_process(
+    COMMAND git apply --check "${OP005_PATCH}"
+    WORKING_DIRECTORY "${flashmla_SOURCE_DIR}"
+    RESULT_VARIABLE PATCH_CHECK_RESULT
+    OUTPUT_QUIET ERROR_QUIET
+  )
+  if(PATCH_CHECK_RESULT EQUAL 0)
+    execute_process(
+      COMMAND git apply "${OP005_PATCH}"
+      WORKING_DIRECTORY "${flashmla_SOURCE_DIR}"
+      RESULT_VARIABLE PATCH_RESULT
+    )
+    if(PATCH_RESULT EQUAL 0)
+      message(STATUS "Op-005: Applied optimized MLA combine kernel patch")
+    else()
+      message(WARNING "Op-005: Failed to apply FlashMLA combine patch")
+    endif()
+  else()
+    message(STATUS "Op-005: FlashMLA combine patch already applied or not applicable")
+  endif()
+endif()
+
 # Vendor FlashMLA interface into vLLM with torch-ops shim.
 set(FLASHMLA_VENDOR_DIR "${CMAKE_SOURCE_DIR}/vllm/third_party/flashmla")
 file(MAKE_DIRECTORY "${FLASHMLA_VENDOR_DIR}")
