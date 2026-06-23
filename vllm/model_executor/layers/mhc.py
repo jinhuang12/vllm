@@ -408,12 +408,23 @@ def mhc_post_tilelang(
         T.pdl_trigger()
 
 
+# Dispatch threshold: use Triton for M <= this value, tilelang otherwise.
+# At small M, tilelang grid=(M,) severely underutilizes 192-SM B200.
+# Triton uses grid=(M * n_h_tiles,) for better SM fill.
+_MHC_POST_TRITON_M_THRESHOLD = 12
+
+
 def mhc_post(
     x: torch.Tensor,
     residual: torch.Tensor,
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
+    num_tokens = residual.shape[0] if residual.dim() == 3 else residual.shape[-3]
+    if num_tokens <= _MHC_POST_TRITON_M_THRESHOLD:
+        from vllm.model_executor.layers.mhc_triton import mhc_post_triton
+        return mhc_post_triton(x, residual, post_layer_mix, comb_res_mix)
+
     out = torch.empty_like(residual)
     mhc_post_tilelang(
         comb_res_mix,

@@ -799,8 +799,23 @@ class DeepseekV4MoE(nn.Module):
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
-    ) -> torch.Tensor:
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        split_shared: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
+        """
+        Args:
+            hidden_states: Input tensor.
+            input_ids: Token IDs for hash-based routing.
+            split_shared: If True, return (routed_output, shared_output)
+                separately instead of adding them. Used by fused mhc_post+add
+                kernel to eliminate a kernel launch.
+
+        Returns:
+            If split_shared=False: combined output tensor (default behavior).
+            If split_shared=True: (routed_output, shared_output) tuple.
+        """
         if self.gate.tid2eid is not None:
             if input_ids is None:
                 raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
@@ -836,7 +851,12 @@ class DeepseekV4MoE(nn.Module):
 
         if self.shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
+            if split_shared:
+                return (final_hidden_states.view(org_shape),
+                        shared_output.view(org_shape))
             final_hidden_states += shared_output
+        elif split_shared:
+            return final_hidden_states.view(org_shape), None
 
         return final_hidden_states.view(org_shape)
 
@@ -1058,6 +1078,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
+        # Init-time flag: use fused mhc_post+add path when the MoE has
+        # shared experts and uses mega_moe (eliminates triton_add kernel).
+        self._use_fused_mhc_post_add = (
+            self.ffn.use_mega_moe
+            and self.ffn.shared_experts is not None
+        )
+
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.hc_mult = config.hc_mult
@@ -1117,9 +1144,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_base: torch.Tensor,
     ):
         # Lazy import to avoid top-level tilelang dependency.
-        # Registers both torch.ops.vllm.mhc_pre and mhc_post,
-        # so hc_post() doesn't need its own import.
+        # Registers torch.ops.vllm.mhc_pre, mhc_post, and mhc_post_fused_add.
         import vllm.model_executor.layers.mhc  # noqa: F401
+        import vllm.model_executor.layers.mhc_triton  # noqa: F401
 
         post_mix, res_mix, layer_input = torch.ops.vllm.mhc_pre(
             residual=x,
@@ -1143,6 +1170,19 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         return torch.ops.vllm.mhc_post(x, residual, post, comb)
 
+    def hc_post_fused_add(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+        x_add: torch.Tensor,
+    ):
+        """Fused mhc_post + input-side add (eliminates triton_add kernel)."""
+        return torch.ops.vllm.mhc_post_fused_add(
+            x, residual, post, comb, x_add
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1162,8 +1202,20 @@ class DeepseekV4DecoderLayer(nn.Module):
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
         x = self.ffn_norm(x)
-        x = self.ffn(x, input_ids)
-        x = self.hc_post(x, residual, post, comb)
+
+        # Fused path: get routed and shared outputs separately,
+        # then fuse the add into the mhc_post kernel (eliminates triton_add).
+        # _use_fused_mhc_post_add is True only when use_mega_moe=True AND
+        # shared_experts is not None, so x_shared is guaranteed non-None.
+        if self._use_fused_mhc_post_add:
+            x_routed, x_shared = self.ffn(x, input_ids, split_shared=True)
+            x = self.hc_post_fused_add(
+                x_routed, residual, post, comb, x_shared
+            )
+        else:
+            x = self.ffn(x, input_ids)
+            x = self.hc_post(x, residual, post, comb)
+
         return x
 
 

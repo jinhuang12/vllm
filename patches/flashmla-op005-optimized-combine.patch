@@ -1,0 +1,107 @@
+diff --git a/csrc/smxx/decode/combine/combine.cu b/csrc/smxx/decode/combine/combine.cu
+index 7f23874..4653e70 100644
+--- a/csrc/smxx/decode/combine/combine.cu
++++ b/csrc/smxx/decode/combine/combine.cu
+@@ -1,5 +1,7 @@
+ #include "combine.h"
+ 
++#include <cstdlib>
++#include <string>
+ #include <math_constants.h>
+ #include <cute/tensor.hpp>
+ #include <cutlass/cutlass.h>
+@@ -184,30 +186,74 @@ flash_fwd_mla_combine_kernel(__grid_constant__ const CombineParams params) {
+     }()
+ 
+ 
++// Op-005: Check env var once at first call. Default: optimized (1).
++static bool use_optimized_mla_combine() {
++    static bool checked = false;
++    static bool use_opt = true;
++    if (!checked) {
++        const char* env = std::getenv("VLLM_USE_OPTIMIZED_MLA_COMBINE");
++        if (env && std::string(env) == "0") {
++            use_opt = false;
++        }
++        checked = true;
++    }
++    return use_opt;
++}
++
+ template<typename ElementT>
+ void run_flash_mla_combine_kernel(CombineParams &params) {
+     static constexpr int HEAD_DIM_V = 512;  // Since only this head dimension is supported by Flash MLA
+     FLASH_ASSERT(params.d_v == HEAD_DIM_V);
+-    MLA_NUM_SPLITS_SWITCH(params.num_sm_parts, NUM_SPLITS, [&] {
+-        constexpr int BLOCK_SIZE_M = 8;
+-        constexpr int NUM_THREADS = BLOCK_SIZE_M*32;
+-        constexpr size_t smem_size = BLOCK_SIZE_M*(NUM_SPLITS+1)*sizeof(float);
+-        auto combine_kernel = &flash_fwd_mla_combine_kernel<ElementT, HEAD_DIM_V, BLOCK_SIZE_M, NUM_SPLITS, NUM_THREADS>;
+-        CHECK_CUDA(cudaFuncSetAttribute(combine_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+-        // Use cudaLaunchKernelEx to enable PDL (Programmatic Dependent Launch)
+-        cudaLaunchAttribute attribute[1];
+-        attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+-        attribute[0].val.programmaticStreamSerializationAllowed = 1;
+-        cudaLaunchConfig_t combine_kernel_config = {
+-            dim3(params.b, params.s_q, ku::ceil_div(params.h_q, BLOCK_SIZE_M)),
+-            dim3(NUM_THREADS, 1, 1),
+-            0,
+-            params.stream,
+-            attribute,
+-            1
+-        };
+-        CHECK_CUDA(cudaLaunchKernelEx(&combine_kernel_config, combine_kernel, params));
+-    });
++
++    if (use_optimized_mla_combine()) {
++        // Op-005 optimization: Use BLOCK_SIZE_M=1 for 8x more blocks.
++        // Original: BLOCK_SIZE_M=8 → 128 blocks (for B=8, H=128) = 0.67 blocks/SM on B200.
++        // Optimized: BLOCK_SIZE_M=1 → 1024 blocks = 5.3 blocks/SM → much better BW saturation.
++        // The kernel is BW-bound (16 MB read, <7 us roofline @ 8 TB/s on B200).
++        // More blocks = more in-flight memory requests = higher achieved bandwidth.
++        // Each block = 1 warp (32 threads), each thread handles 512/(32*4) = 4 float4 loads.
++        // B200 supports up to 32 blocks/SM, so 5.3 blocks/SM is well within limits.
++        MLA_NUM_SPLITS_SWITCH(params.num_sm_parts, NUM_SPLITS, [&] {
++            constexpr int BLOCK_SIZE_M = 1;
++            constexpr int NUM_THREADS = BLOCK_SIZE_M*32;
++            constexpr size_t smem_size = BLOCK_SIZE_M*(NUM_SPLITS+1)*sizeof(float);
++            auto combine_kernel = &flash_fwd_mla_combine_kernel<ElementT, HEAD_DIM_V, BLOCK_SIZE_M, NUM_SPLITS, NUM_THREADS>;
++            CHECK_CUDA(cudaFuncSetAttribute(combine_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
++            cudaLaunchAttribute attribute[1];
++            attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
++            attribute[0].val.programmaticStreamSerializationAllowed = 1;
++            cudaLaunchConfig_t combine_kernel_config = {
++                dim3(params.b, params.s_q, ku::ceil_div(params.h_q, BLOCK_SIZE_M)),
++                dim3(NUM_THREADS, 1, 1),
++                0,
++                params.stream,
++                attribute,
++                1
++            };
++            CHECK_CUDA(cudaLaunchKernelEx(&combine_kernel_config, combine_kernel, params));
++        });
++    } else {
++        // Original kernel: BLOCK_SIZE_M=8
++        MLA_NUM_SPLITS_SWITCH(params.num_sm_parts, NUM_SPLITS, [&] {
++            constexpr int BLOCK_SIZE_M = 8;
++            constexpr int NUM_THREADS = BLOCK_SIZE_M*32;
++            constexpr size_t smem_size = BLOCK_SIZE_M*(NUM_SPLITS+1)*sizeof(float);
++            auto combine_kernel = &flash_fwd_mla_combine_kernel<ElementT, HEAD_DIM_V, BLOCK_SIZE_M, NUM_SPLITS, NUM_THREADS>;
++            CHECK_CUDA(cudaFuncSetAttribute(combine_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
++            cudaLaunchAttribute attribute[1];
++            attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
++            attribute[0].val.programmaticStreamSerializationAllowed = 1;
++            cudaLaunchConfig_t combine_kernel_config = {
++                dim3(params.b, params.s_q, ku::ceil_div(params.h_q, BLOCK_SIZE_M)),
++                dim3(NUM_THREADS, 1, 1),
++                0,
++                params.stream,
++                attribute,
++                1
++            };
++            CHECK_CUDA(cudaLaunchKernelEx(&combine_kernel_config, combine_kernel, params));
++        });
++    }
+     CHECK_CUDA_KERNEL_LAUNCH();
+ }
+ 

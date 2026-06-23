@@ -166,6 +166,8 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+    VLLM_USE_CUTLASS_SPLITK_FP8_LINEAR: bool = True
+    VLLM_USE_OPTIMIZED_MLA_COMBINE: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1264,6 +1266,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to create TMA-aligned scale tensor when DeepGEMM is used.
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
+    ),
+    # Whether to use CUTLASS splitK FP8 block-scaled GEMM for small-M linear
+    # projections where DeepGEMM's persistent scheduler under-utilizes SMs.
+    # op-003: Dispatch to FlashInfer CUTLASS when N <= 2048 and M in [32, 64].
+    "VLLM_USE_CUTLASS_SPLITK_FP8_LINEAR": lambda: bool(
+        int(os.getenv("VLLM_USE_CUTLASS_SPLITK_FP8_LINEAR", "1"))
+    ),
+    # Whether to use the optimized MLA combine kernel (op-005).
+    # The optimized kernel uses BLOCK_SIZE_M=1 (8x more blocks) for better
+    # memory bandwidth saturation on B200. Default enabled (=1), set to 0
+    # to use the original BLOCK_SIZE_M=8 combine kernel.
+    "VLLM_USE_OPTIMIZED_MLA_COMBINE": lambda: bool(
+        int(os.getenv("VLLM_USE_OPTIMIZED_MLA_COMBINE", "1"))
     ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
